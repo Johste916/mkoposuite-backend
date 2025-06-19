@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Overdue Repayment Notice</title>
+</head>
+<body style="font-family: sans-serif; line-height: 1.5;">
+  <p>Dear <strong><%= borrowerName %></strong>,</p>
+  <p>
+    Our records show that your loan repayment (ID: <strong><%= loanId %></strong>) 
+    of <strong>TSh <%= amount %></strong> was due on 
+    <strong><%= dueDate %></strong> and is now <strong style="color: red;">overdue</strong>.
+  </p>
+  <p>
+    Please remit payment as soon as possible to minimize additional penalties. 
+    If you’ve already paid, kindly disregard this notice.
+  </p>
+  <hr>
+  <p>Johsta Microfinance<br>Customer Service</p>
+</body>
+</html>
