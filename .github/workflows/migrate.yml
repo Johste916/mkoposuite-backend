@@ -2,7 +2,7 @@ name: Run Sequelize Migrations
 
 on:
   push:
-    branches: [ main ]  # Change this if your branch is named 'master'
+    branches: [ main ]
 
 jobs:
   migrate:
@@ -20,10 +20,8 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install sequelize-cli globally
-        run: npm install -g sequelize-cli
-
-      - name: Run migrations
+      - name: Run Sequelize migrations directly
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: sequelize-cli db:migrate
+        run: |
+          npx sequelize-cli db:migrate --config config/config.js
