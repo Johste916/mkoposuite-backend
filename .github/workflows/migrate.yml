@@ -9,21 +9,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: ✅ Checkout code
         uses: actions/checkout@v3
 
-      - name: Setup Node.js
+      - name: 🧰 Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: 18
 
-      - name: Install dependencies
+      - name: 📦 Install dependencies
         run: npm install
 
-      - name: Log Supabase DB Host (debug)
-        run: echo "Connecting to Supabase at ${{ secrets.DATABASE_URL }}"
+      - name: 🔎 Debug DB connection — show current DB
+        run: |
+          npm install --global pg
+          echo "SELECT current_database();" | psql "${{ secrets.DATABASE_URL }}"
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
-      - name: Run migrations
+      - name: 🛠 Run Sequelize migrations
         run: npx sequelize-cli db:migrate --env production
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
