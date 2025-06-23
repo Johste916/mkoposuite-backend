@@ -1,0 +1,27 @@
+name: Run Sequelize Migrations
+
+on:
+  push:
+    branches: [ main ]  # Change 'main' if your branch is named 'master'
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npx sequelize-cli db:migrate

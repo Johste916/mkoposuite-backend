@@ -3,7 +3,7 @@ module.exports = {
     username: 'postgres',
     password: 'Johsta67!',
     database: 'postgres',
-    host: 'db.qlrkytmgsxyuyjgfghuu.supabase.co',
+    host: 'db.wmqicrqpffbcosxvkfci.supabase.co', // ✅ new working host
     port: 5432,
     dialect: 'postgres',
     logging: false,
@@ -16,7 +16,7 @@ module.exports = {
   },
 
   test: {
-    // (same values as development if needed)
+    // Optional: can copy same as development if needed
   },
 
   production: {
