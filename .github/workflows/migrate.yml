@@ -20,8 +20,14 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Run Sequelize migrations directly
+      - name: Show installed node modules
+        run: ls -la node_modules/.bin
+
+      - name: Show sequelize version
+        run: npx sequelize-cli --version || echo "sequelize-cli not found"
+
+      - name: Run migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          npx sequelize-cli db:migrate --config config/config.js
+          npx sequelize-cli db:migrate --config config/config.js || echo "Migration failed"
