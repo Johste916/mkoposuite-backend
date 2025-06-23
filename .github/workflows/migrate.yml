@@ -1,18 +1,18 @@
-name: Run Sequelize Migrations
+name: Run Sequelize Migrations on Supabase
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   migrate:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: 18
@@ -20,14 +20,10 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Show installed node modules
-        run: ls -la node_modules/.bin
-
-      - name: Show sequelize version
-        run: npx sequelize-cli --version || echo "sequelize-cli not found"
+      - name: Log Supabase DB Host (debug)
+        run: echo "Connecting to Supabase at ${{ secrets.DATABASE_URL }}"
 
       - name: Run migrations
+        run: npx sequelize-cli db:migrate --env production
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          npx sequelize-cli db:migrate --config config/config.js || echo "Migration failed"
