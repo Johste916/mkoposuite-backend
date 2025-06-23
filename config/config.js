@@ -1,10 +1,8 @@
+require('dotenv').config();
+
 module.exports = {
   development: {
-    username: 'postgres',
-    password: 'Johsta67!',
-    database: 'postgres',
-    host: 'db.wmqicrqpffbcosxvkfci.supabase.co', // ✅ new working host
-    port: 5432,
+    url: process.env.DATABASE_URL || 'postgres://postgres:Johsta67!@db.wmqicrqpffbcosxvkfci.supabase.co:5432/postgres',
     dialect: 'postgres',
     logging: false,
     dialectOptions: {
@@ -16,7 +14,15 @@ module.exports = {
   },
 
   test: {
-    // Optional: can copy same as development if needed
+    url: process.env.DATABASE_URL || 'postgres://postgres:Johsta67!@db.wmqicrqpffbcosxvkfci.supabase.co:5432/postgres',
+    dialect: 'postgres',
+    logging: false,
+    dialectOptions: {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false
+      }
+    }
   },
 
   production: {
