@@ -27,8 +27,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
-      - name: 🛠 Run Sequelize migrations with npx
+      - name: 🛠 Run Sequelize migrations (direct path)
         run: |
-          npx sequelize-cli db:migrate
+          ./node_modules/.bin/sequelize-cli db:migrate
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
