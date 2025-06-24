@@ -4,15 +4,14 @@ require('dotenv').config();
 
 const app = express();
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Routes
+// ✅ Register routes
 const authRoutes = require('./routes/authRoutes');
-app.use('/api', authRoutes);  // ✅ This maps /api/login
+app.use('/api', authRoutes); // ✅ Gives access to /api/login and /api/test
 
-// 404 handler
+// ✅ Catch-all 404
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
