@@ -15,7 +15,7 @@ module.exports = {
     dialectOptions: {
       ssl: {
         require: true,
-        rejectUnauthorized: false, // Required for Supabase pooled connections
+        rejectUnauthorized: false, // Needed for Supabase pooled connections
       },
     },
   }

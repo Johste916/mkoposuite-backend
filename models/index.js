@@ -1,39 +1,40 @@
-'use strict';
+// src/models/index.js
+require('dotenv').config();
+const { Sequelize, DataTypes } = require('sequelize');
 
-const fs = require('fs');
-const path = require('path');
-const Sequelize = require('sequelize');
-const basename = path.basename(__filename);
-const env = process.env.NODE_ENV || 'development';
-const config = require(__dirname + '/../config/config.js')[env];
-const db = {};
+// Ensure all values are read
+const dbName = process.env.DB_NAME;
+const dbUser = process.env.DB_USER;
+const dbPass = process.env.DB_PASSWORD;
+const dbHost = process.env.DB_HOST;
+const dbPort = process.env.DB_PORT;
 
-let sequelize;
-
-if (config.use_env_variable && process.env[config.use_env_variable]) {
-  // ✅ Use DATABASE_URL in production
-  sequelize = new Sequelize(process.env[config.use_env_variable], config);
-} else {
-  // ✅ Use local DB in development
-  sequelize = new Sequelize(config.database, config.username, config.password, config);
+if (!dbName || !dbUser || !dbPass || !dbHost || !dbPort) {
+  throw new Error("❌ Missing one or more required DB environment variables");
 }
 
-// ✅ Register models
-db.User = require('./user')(sequelize, Sequelize.DataTypes);
-db.Borrower = require('./borrower')(sequelize, Sequelize.DataTypes);
-db.Branch = require('./branch')(sequelize, Sequelize.DataTypes);
-db.Loan = require('./loan')(sequelize, Sequelize.DataTypes);
-db.LoanRepayment = require('./loanrepayment')(sequelize, Sequelize.DataTypes);
-db.LoanPayment = require('./loanpayment')(sequelize, Sequelize.DataTypes);
-
-// ✅ Apply associations
-Object.keys(db).forEach(modelName => {
-  if (db[modelName].associate) {
-    db[modelName].associate(db);
+const sequelize = new Sequelize(dbName, dbUser, dbPass, {
+  host: dbHost,
+  port: dbPort,
+  dialect: 'postgres',
+  logging: false,
+  dialectOptions: {
+    ssl: {
+      require: true,
+      rejectUnauthorized: false
+    }
   }
 });
 
-db.sequelize = sequelize;
+const db = {};
 db.Sequelize = Sequelize;
+db.sequelize = sequelize;
+
+db.User = require('./user')(sequelize, DataTypes);
+db.Loan = require('./loan')(sequelize, DataTypes);
+db.LoanRepayment = require('./loanrepayment')(sequelize, DataTypes);
+db.Borrower = require('./borrower')(sequelize, DataTypes);
+db.Branch = require('./branch')(sequelize, DataTypes);
+db.LoanPayment = require('./loanpayment')(sequelize, DataTypes);
 
 module.exports = db;

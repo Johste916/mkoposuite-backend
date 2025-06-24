@@ -30,7 +30,7 @@ jobs:
       - name: 🛠 Give execute permission to sequelize-cli
         run: chmod +x ./node_modules/.bin/sequelize-cli
 
-      - name: 🚀 Run Sequelize migrations
-        run: ./node_modules/.bin/sequelize-cli db:migrate
+      - name: 🚀 Run Sequelize migrations (force production env)
+        run: ./node_modules/.bin/sequelize-cli db:migrate --env production
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

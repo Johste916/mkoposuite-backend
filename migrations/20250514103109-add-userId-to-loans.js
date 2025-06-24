@@ -2,32 +2,26 @@
 
 module.exports = {
   up: async (queryInterface, Sequelize) => {
-    // Check if column already exists
-    const table = await queryInterface.describeTable('Loans');
+    const table = await queryInterface.describeTable('Users');
 
-    if (!table.userId) {
-      await queryInterface.addColumn('Loans', 'userId', {
-        type: Sequelize.INTEGER,
+    if (!table.password) {
+      await queryInterface.addColumn('Users', 'password', {
+        type: Sequelize.STRING,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id'
-        },
-        onUpdate: 'CASCADE',
-        onDelete: 'SET NULL'
+        defaultValue: '', // prevent null constraint error during migration
       });
     } else {
-      console.log('✅ Skipped: "userId" column already exists on "Loans" table');
+      console.log('✅ Skipped: "password" already exists on Users table');
     }
   },
 
   down: async (queryInterface, Sequelize) => {
-    const table = await queryInterface.describeTable('Loans');
+    const table = await queryInterface.describeTable('Users');
 
-    if (table.userId) {
-      await queryInterface.removeColumn('Loans', 'userId');
+    if (table.password) {
+      await queryInterface.removeColumn('Users', 'password');
     } else {
-      console.log('ℹ️ Skipped: "userId" column not found on "Loans" table');
+      console.log('ℹ️ Skipped: "password" not found on Users table');
     }
   }
 };
