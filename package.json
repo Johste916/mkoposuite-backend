@@ -1,7 +1,7 @@
 {
   "name": "loan-management-backend",
   "version": "1.0.0",
-  "description": "Loan Management System backend with Express, Sequelize, PostgreSQL, and EJS.",
+  "description": "MkopoSuite backend using Express, Sequelize, Supabase, and JWT.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -11,10 +11,11 @@
   "keywords": [
     "loan",
     "management",
-    "microfinance",
+    "mkoposuite",
     "node",
     "express",
-    "sequelize"
+    "sequelize",
+    "supabase"
   ],
   "author": "John Meena",
   "license": "ISC",
@@ -37,9 +38,3 @@
     "pg-hstore": "^2.3.4",
     "recharts": "^2.15.3",
     "sequelize": "^6.37.7"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0",
-    "sequelize-cli": "^6.6.3"
-  }
-}
