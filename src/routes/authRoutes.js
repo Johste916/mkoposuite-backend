@@ -2,12 +2,12 @@ const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
 
-// ✅ Main login route
+// ✅ Login route
 router.post('/login', authController.login);
 
-// ✅ Debugging route to confirm deployment
+// ✅ Health test
 router.get('/test', (req, res) => {
-  res.json({ message: '✅ Auth route is working!' });
+  res.json({ message: 'Backend is running locally ✅' });
 });
 
 module.exports = router;
