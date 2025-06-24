@@ -5,9 +5,9 @@ const authController = require('../controllers/authController');
 // ✅ Login route
 router.post('/login', authController.login);
 
-// ✅ Route tester
+// ✅ Test route
 router.get('/test', (req, res) => {
-  res.json({ message: 'Backend is running locally ✅' });
+  res.json({ message: '✅ Auth route is working!' });
 });
 
 module.exports = router;
