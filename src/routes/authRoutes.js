@@ -2,10 +2,10 @@ const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
 
-// POST /api/login
+// ✅ Main login route
 router.post('/login', authController.login);
 
-// Optional test route for debugging
+// ✅ Debugging route to confirm deployment
 router.get('/test', (req, res) => {
   res.json({ message: '✅ Auth route is working!' });
 });
