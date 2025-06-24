@@ -20,10 +20,10 @@ jobs:
       - name: 📦 Install dependencies
         run: npm install
 
-      - name: 🔎 Debug DB connection — show current DB
+      - name: 🔎 Confirm DB connectivity
         run: |
           npm install --global pg
-          echo "SELECT current_database();" | psql "${{ secrets.DATABASE_URL }}"
+          echo "SELECT NOW();" | psql "${{ secrets.DATABASE_URL }}"
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
