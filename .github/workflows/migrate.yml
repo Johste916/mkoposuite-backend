@@ -27,8 +27,10 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
-      - name: 🛠 Run Sequelize migrations (direct path)
-        run: |
-          ./node_modules/.bin/sequelize-cli db:migrate
+      - name: 🛠 Give execute permission to sequelize-cli
+        run: chmod +x ./node_modules/.bin/sequelize-cli
+
+      - name: 🚀 Run Sequelize migrations
+        run: ./node_modules/.bin/sequelize-cli db:migrate
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
