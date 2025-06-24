@@ -1,9 +1,13 @@
-// backend/src/routes/authRoutes.js
 const express = require('express');
 const router = express.Router();
-const { login } = require('../controllers/authController');
+const authController = require('../controllers/authController');
 
-// POST /api/auth/login
-router.post('/login', login);
+// ✅ Login route (used by Postman or frontend)
+router.post('/login', authController.login);
+
+// ✅ Temporary test route (to verify deployment)
+router.get('/test', (req, res) => {
+  res.json({ message: '✅ Auth route is working!' });
+});
 
 module.exports = router;
