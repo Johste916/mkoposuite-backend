@@ -4,8 +4,11 @@ const { Model } = require('sequelize');
 module.exports = (sequelize, DataTypes) => {
   class User extends Model {
     static associate(models) {
-      // Relations can be defined here if needed
-      User.belongsTo(models.Branch, { foreignKey: 'branchId', as: 'branch' });
+      // Relation with Branch model
+      User.belongsTo(models.Branch, {
+        foreignKey: 'branchId',
+        as: 'branch'
+      });
     }
   }
 
@@ -26,7 +29,7 @@ module.exports = (sequelize, DataTypes) => {
       passwordHash: {
         type: DataTypes.STRING,
         allowNull: false,
-        field: 'password_hash' // 👈 Matches Supabase's actual column name
+        field: 'password_hash'  // 🔑 matches Supabase column
       },
       role: {
         type: DataTypes.STRING,
@@ -36,6 +39,7 @@ module.exports = (sequelize, DataTypes) => {
       branchId: {
         type: DataTypes.INTEGER,
         allowNull: true,
+        field: 'branch_id',  // 👈 optional: match Supabase if column is snake_case
         references: {
           model: 'Branches',
           key: 'id'
@@ -45,8 +49,8 @@ module.exports = (sequelize, DataTypes) => {
     {
       sequelize,
       modelName: 'User',
-      tableName: 'Users',         // 👈 explicitly match Supabase table name
-      timestamps: true            // includes createdAt & updatedAt
+      tableName: 'Users',     // 🔁 Make sure this matches the Supabase table
+      timestamps: true        // Includes createdAt and updatedAt
     }
   );
 
