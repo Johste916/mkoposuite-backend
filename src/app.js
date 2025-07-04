@@ -1,10 +1,11 @@
-// app.js
+// src/app.js
+
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const app = express();
 
-// Load environment variables
+// Load environment variables from .env file
 dotenv.config();
 
 // Middlewares
@@ -19,17 +20,20 @@ app.get('/api/test', (req, res) => {
 // Import routes
 const authRoutes = require('./routes/authRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
-const loanRoutes = require('./routes/loanRoutes');
-const borrowerRoutes = require('./routes/borrowerRoutes');
-const repaymentRoutes = require('./routes/repaymentRoutes');
-const userRoutes = require('./routes/userRoutes');
+// Uncomment the routes below only if the files exist
+// const loanRoutes = require('./routes/loanRoutes');
+// const borrowerRoutes = require('./routes/borrowerRoutes');
+// const repaymentRoutes = require('./routes/repaymentRoutes');
+// const userRoutes = require('./routes/userRoutes');
 
 // Mount routes under /api
 app.use('/api', authRoutes);
 app.use('/api', dashboardRoutes);
-app.use('/api', loanRoutes);
-app.use('/api', borrowerRoutes);
-app.use('/api', repaymentRoutes);
-app.use('/api', userRoutes);
+// Uncomment if routes exist
+// app.use('/api', loanRoutes);
+// app.use('/api', borrowerRoutes);
+// app.use('/api', repaymentRoutes);
+// app.use('/api', userRoutes);
 
 module.exports = app;
+
