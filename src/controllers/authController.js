@@ -1,5 +1,3 @@
-// src/controllers/authController.js
-
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { User } = require('../models');
@@ -7,9 +5,6 @@ require('dotenv').config();
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// @desc    Handle user login
-// @route   POST /api/login
-// @access  Public
 exports.login = async (req, res) => {
   const { email, password } = req.body;
 
