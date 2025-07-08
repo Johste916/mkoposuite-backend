@@ -1,3 +1,10 @@
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const User = require('../models/user'); // ✅ Direct import of User model
+require('dotenv').config();
+
+const JWT_SECRET = process.env.JWT_SECRET;
+
 exports.login = async (req, res) => {
   const { email, password } = req.body;
 
