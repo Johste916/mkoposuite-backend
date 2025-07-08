@@ -12,7 +12,7 @@ module.exports = (sequelize, DataTypes) => {
     password: {
       type: DataTypes.STRING,
       allowNull: false,
-      field: 'password_hash' // 👈 map password to DB column
+      field: 'password_hash' // ✅ CORRECT: maps to the real DB column
     },
     role: {
       type: DataTypes.STRING,
