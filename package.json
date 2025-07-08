@@ -2,9 +2,9 @@
   "name": "mkoposuite-backend",
   "version": "1.0.0",
   "description": "Backend for MkopoSuite Loan Management System",
-  "main": "src/index.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node src/index.js",
+    "start": "node index.js",
     "migrate": "npx sequelize-cli db:migrate"
   },
   "keywords": [],
