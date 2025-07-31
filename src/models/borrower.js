@@ -1,5 +1,3 @@
-// src/models/borrower.js
-
 module.exports = (sequelize, DataTypes) => {
   const Borrower = sequelize.define('Borrower', {
     id: {
