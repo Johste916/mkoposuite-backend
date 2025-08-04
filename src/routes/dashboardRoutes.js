@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { getDashboardSummary, getDefaulters } = require('../controllers/dashboardController');
-const authenticate = require('../middleware/authMiddleware'); // this is a function
+const { authenticateUser } = require('../middleware/authMiddleware'); // ✅ Fix here
 
-router.get('/summary', authenticate, getDashboardSummary);
-router.get('/defaulters', authenticate, getDefaulters);
+router.get('/summary', authenticateUser, getDashboardSummary);
+router.get('/defaulters', authenticateUser, getDefaulters);
 
 module.exports = router;
