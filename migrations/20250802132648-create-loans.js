@@ -1,0 +1,57 @@
+'use strict';
+
+module.exports = {
+  async up(queryInterface, Sequelize) {
+    await queryInterface.createTable('loans', {
+      id: {
+        type: Sequelize.INTEGER,
+        autoIncrement: true,
+        primaryKey: true,
+        allowNull: false,
+      },
+      borrowerId: {
+        type: Sequelize.INTEGER,
+        allowNull: false,
+      },
+      amount: {
+        type: Sequelize.FLOAT,
+        allowNull: false,
+      },
+      interestRate: {
+        type: Sequelize.FLOAT,
+        allowNull: false,
+      },
+      startDate: {
+        type: Sequelize.DATEONLY,
+        allowNull: false,
+      },
+      endDate: {
+        type: Sequelize.DATEONLY,
+        allowNull: false,
+      },
+      repaymentFrequency: {
+        type: Sequelize.ENUM('weekly', 'monthly'),
+        allowNull: false,
+      },
+      interestMethod: {
+        type: Sequelize.ENUM('flat', 'reducing'),
+        allowNull: false,
+      },
+      status: {
+        type: Sequelize.ENUM('pending', 'approved', 'rejected', 'disbursed'),
+        defaultValue: 'pending',
+      },
+      approvedBy: Sequelize.INTEGER,
+      approvalDate: Sequelize.DATE,
+      disbursedBy: Sequelize.INTEGER,
+      disbursementDate: Sequelize.DATE,
+      disbursementMethod: Sequelize.STRING,
+      createdAt: Sequelize.DATE,
+      updatedAt: Sequelize.DATE,
+    });
+  },
+
+  async down(queryInterface, Sequelize) {
+    await queryInterface.dropTable('loans');
+  },
+};
