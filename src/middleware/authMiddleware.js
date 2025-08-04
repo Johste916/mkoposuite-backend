@@ -2,7 +2,8 @@
 
 const jwt = require('jsonwebtoken');
 
-const authenticate = (req, res, next) => {
+// ✅ Authenticate middleware
+const authenticateUser = (req, res, next) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.split(' ')[1];
 
@@ -12,11 +13,25 @@ const authenticate = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // Optional: assign user to request object
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(403).json({ message: 'Invalid token' });
   }
 };
 
-module.exports = authenticate;
+// ✅ Role-based access middleware
+const authorizeRoles = (...roles) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Access denied: insufficient role' });
+    }
+    next();
+  };
+};
+
+// ✅ Export both
+module.exports = {
+  authenticateUser,
+  authorizeRoles,
+};
