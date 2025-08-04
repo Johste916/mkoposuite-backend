@@ -1,6 +1,6 @@
 // index.js
 const app = require('../app');
-const { sequelize } = require('./models'); // Adjust if your Sequelize models are in a different path
+const { sequelize } = require('../models'); // Adjust if your Sequelize models are in a different path
 
 const PORT = process.env.PORT || 10000;
 
