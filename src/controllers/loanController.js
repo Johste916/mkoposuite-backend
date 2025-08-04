@@ -1,4 +1,5 @@
 // controllers/loanController.js
+
 const { Loan, Borrower, Branch, User } = require('../models');
 const {
   generateFlatRateSchedule,
@@ -151,11 +152,8 @@ const disburseLoan = async (req, res) => {
 // Amortization Schedule
 const getLoanSchedule = async (req, res) => {
   try {
-    const loanId = req.params.loanId;
-    const loan = await Loan.findByPk(loanId);
-    if (!loan) {
-      return res.status(404).json({ error: 'Loan not found' });
-    }
+    const loan = await Loan.findByPk(req.params.loanId);
+    if (!loan) return res.status(404).json({ error: 'Loan not found' });
 
     const duration = Math.ceil(
       (new Date(loan.endDate) - new Date(loan.startDate)) / (1000 * 60 * 60 * 24 * 30)
@@ -168,20 +166,20 @@ const getLoanSchedule = async (req, res) => {
       issueDate: loan.startDate,
     };
 
-    let schedule = [];
+    const schedule =
+      loan.interestMethod === 'flat'
+        ? generateFlatRateSchedule(input)
+        : loan.interestMethod === 'reducing'
+        ? generateReducingBalanceSchedule(input)
+        : [];
 
-    if (loan.interestMethod === 'flat') {
-      schedule = generateFlatRateSchedule(input);
-    } else if (loan.interestMethod === 'reducing') {
-      schedule = generateReducingBalanceSchedule(input);
-    } else {
+    if (!schedule.length)
       return res.status(400).json({ error: 'Invalid interest method' });
-    }
 
-    return res.json({ loanId, interestMethod: loan.interestMethod, schedule });
+    res.json({ loanId: loan.id, interestMethod: loan.interestMethod, schedule });
   } catch (error) {
-    console.error('Error generating loan schedule:', error);
-    return res.status(500).json({ error: 'Server error' });
+    console.error('Schedule error:', error);
+    res.status(500).json({ error: 'Failed to generate schedule' });
   }
 };
 
@@ -189,18 +187,17 @@ const getLoanSchedule = async (req, res) => {
 const getDisbursementList = async (req, res) => {
   try {
     const loans = await Loan.findAll({
-      where: {},
+      where: { status: 'disbursed' },
       include: [
         { model: Borrower },
         { model: Branch, as: 'branch' },
         { model: User, as: 'initiator', attributes: ['id', 'name'] },
       ],
-      order: [['createdAt', 'DESC']],
+      order: [['disbursementDate', 'DESC']],
     });
-
     res.json(loans);
-  } catch (error) {
-    console.error('Disbursement list error:', error);
+  } catch (err) {
+    console.error('Disbursement list error:', err);
     res.status(500).json({ error: 'Failed to fetch disbursements' });
   }
 };
@@ -213,7 +210,7 @@ module.exports = {
   deleteLoan,
   approveLoan,
   rejectLoan,
-  disburseLoan, // ← this must match exactly!
+  disburseLoan,
   getLoanSchedule,
-  getDisbursementList,
+  getDisbursementList, // ✅ Must match route name
 };
