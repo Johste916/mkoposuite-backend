@@ -1,17 +1,20 @@
+// src/routes/loanRoutes.js
 const express = require('express');
 const router = express.Router();
 const loanController = require('../controllers/loanController');
 const { authenticateToken } = require('../middleware/authMiddleware');
 
-console.log('💥 Loaded loanController:', Object.keys(loanController));
+// ✅ Route order matters: static > specific > dynamic
 
-// Static Routes First
-router.post('/', authenticateToken, loanController.createLoan);
-router.get('/', authenticateToken, loanController.getAllLoans);
+// ✅ Static routes
 router.get('/disbursements/list', authenticateToken, loanController.getDisbursementList);
 router.get('/:loanId/schedule', authenticateToken, loanController.getLoanSchedule);
 
-// Dynamic Routes After
+// ✅ Main routes
+router.post('/', authenticateToken, loanController.createLoan);
+router.get('/', authenticateToken, loanController.getAllLoans);
+
+// ✅ Dynamic routes (put last)
 router.get('/:id', authenticateToken, loanController.getLoanById);
 router.put('/:id', authenticateToken, loanController.updateLoan);
 router.delete('/:id', authenticateToken, loanController.deleteLoan);
