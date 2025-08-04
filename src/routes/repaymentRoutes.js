@@ -1,10 +1,17 @@
+// src/routes/repaymentRoutes.js
+
 const express = require('express');
 const router = express.Router();
 const repaymentController = require('../controllers/repaymentController');
-const { authenticateToken } = require('../middleware/authMiddleware');
+const { authenticateUser } = require('../middleware/authMiddleware');
 
-router.get('/', authenticateToken, repaymentController.getAllRepayments);
-router.get('/borrower/:borrowerId', authenticateToken, repaymentController.getRepaymentsByBorrower);
-router.post('/', authenticateToken, repaymentController.createRepayment); // Admin only
+// 📥 Get all repayments
+router.get('/', authenticateUser, repaymentController.getAllRepayments);
+
+// 📥 Get repayments for a specific borrower
+router.get('/borrower/:borrowerId', authenticateUser, repaymentController.getRepaymentsByBorrower);
+
+// 📤 Manually create a repayment (Admin only)
+router.post('/', authenticateUser, repaymentController.createRepayment);
 
 module.exports = router;
