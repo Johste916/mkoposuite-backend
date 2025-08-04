@@ -8,7 +8,7 @@ const { authenticateToken } = require('../middleware/authMiddleware');
 // 📄 Create a new loan
 router.post('/', authenticateToken, loanController.createLoan);
 
-// 📄 Get all loans (paginated, optionally filtered)
+// 📄 Get all loans
 router.get('/', authenticateToken, loanController.getAllLoans);
 
 // 📄 Get loan by ID
@@ -29,7 +29,10 @@ router.post('/:id/reject', authenticateToken, loanController.rejectLoan);
 // 💵 Disburse a loan
 router.post('/:id/disburse', authenticateToken, loanController.disburseLoan);
 
-// 📄 Get disbursement list (e.g., for reporting or filtering)
-router.get('/disbursements/list', authenticateToken, loanController.getDisbursedLoans);
+// 📆 Get amortization schedule
+router.get('/:loanId/schedule', authenticateToken, loanController.getLoanSchedule);
+
+// 📄 Get disbursement list
+router.get('/disbursements/list', authenticateToken, loanController.getDisbursementList);
 
 module.exports = router;
