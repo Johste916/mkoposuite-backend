@@ -1,21 +1,33 @@
 const express = require('express');
-const cors = require('cors');
 const app = express();
+const path = require('path');
 
-// ✅ Allow only specific frontend URLs
+// ✅ Robust CORS Setup
 const allowedOrigins = [
   'http://localhost:5173',
-  'https://strong-fudge-7fc28d.netlify.app'
+  'https://strong-fudge-7fc28d.netlify.app',
+  'https://mkoposuite.netlify.app', // optional
 ];
 
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true,
-}));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
 
 app.use(express.json());
 
-// Route Imports
+// ✅ Route Imports
 const authRoutes = require('./routes/authRoutes');
 const borrowerRoutes = require('./routes/borrowerRoutes');
 const loanRoutes = require('./routes/loanRoutes');
@@ -31,7 +43,7 @@ const branchRoutes = require('./routes/branchRoutes');
 const userRoleRoutes = require('./routes/userRoleRoutes');
 const userBranchRoutes = require('./routes/userBranchRoutes');
 
-// Route Registrations
+// ✅ Route Registrations
 app.use('/api/login', authRoutes);
 app.use('/api/borrowers', borrowerRoutes);
 app.use('/api/loans', loanRoutes);
@@ -47,9 +59,9 @@ app.use('/api/branches', branchRoutes);
 app.use('/api/user-roles', userRoleRoutes);
 app.use('/api/user-branches', userBranchRoutes);
 
-// Health Check
+// ✅ Health Check
 app.get('/api/test', (req, res) => {
-  res.send('API is working!');
+  res.send('✅ API is working!');
 });
 
 module.exports = app;
