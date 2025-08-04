@@ -213,7 +213,7 @@ module.exports = {
   deleteLoan,
   approveLoan,
   rejectLoan,
-  disburseLoan,
+  disburseLoan, // ← this must match exactly!
   getLoanSchedule,
   getDisbursementList,
 };
