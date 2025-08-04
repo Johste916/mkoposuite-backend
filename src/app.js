@@ -1,9 +1,18 @@
 const express = require('express');
 const cors = require('cors');
-const app = express(); // ✅ This was missing!
+const app = express();
 
-// Middleware
-app.use(cors());
+// ✅ Allow only specific frontend URLs
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://strong-fudge-7fc28d.netlify.app'
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+}));
+
 app.use(express.json());
 
 // Route Imports
