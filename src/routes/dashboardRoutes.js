@@ -1,10 +1,9 @@
-// src/routes/dashboardRoutes.js
 const express = require('express');
 const router = express.Router();
-const dashboardController = require('../controllers/dashboardController');
-const authenticate = require('../middleware/authMiddleware');
+const { getDashboardSummary, getDefaulters } = require('../controllers/dashboardController');
+const authenticate = require('../middleware/authMiddleware'); // this is a function
 
-router.get('/summary', authenticate, dashboardController.getDashboardSummary);
-router.get('/defaulters', authenticate, dashboardController.getDefaulters);
+router.get('/summary', authenticate, getDashboardSummary);
+router.get('/defaulters', authenticate, getDefaulters);
 
 module.exports = router;
