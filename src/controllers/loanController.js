@@ -1,20 +1,14 @@
 // controllers/loanController.js
-
 const { Loan, Borrower, Branch, User } = require('../models');
-const {
-  generateFlatRateSchedule,
-  generateReducingBalanceSchedule,
-} = require('../utils/generateSchedule');
+const { generateFlatRateSchedule, generateReducingBalanceSchedule } = require('../utils/generateSchedule');
 
-// Create Loan
 const createLoan = async (req, res) => {
   try {
-    const payload = {
+    const loan = await Loan.create({
       ...req.body,
       initiatedBy: req.user.id,
       status: 'pending',
-    };
-    const loan = await Loan.create(payload);
+    });
     res.status(201).json(loan);
   } catch (err) {
     console.error('Create loan error:', err);
@@ -22,7 +16,6 @@ const createLoan = async (req, res) => {
   }
 };
 
-// Get All Loans
 const getAllLoans = async (req, res) => {
   try {
     const loans = await Loan.findAll({
@@ -43,7 +36,6 @@ const getAllLoans = async (req, res) => {
   }
 };
 
-// Get Single Loan
 const getLoanById = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id, {
@@ -63,7 +55,6 @@ const getLoanById = async (req, res) => {
   }
 };
 
-// Update Loan
 const updateLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
@@ -76,7 +67,6 @@ const updateLoan = async (req, res) => {
   }
 };
 
-// Delete Loan
 const deleteLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
@@ -89,7 +79,6 @@ const deleteLoan = async (req, res) => {
   }
 };
 
-// Approve Loan
 const approveLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
@@ -109,7 +98,6 @@ const approveLoan = async (req, res) => {
   }
 };
 
-// Reject Loan
 const rejectLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
@@ -129,7 +117,6 @@ const rejectLoan = async (req, res) => {
   }
 };
 
-// Disburse Loan
 const disburseLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
@@ -149,7 +136,6 @@ const disburseLoan = async (req, res) => {
   }
 };
 
-// Amortization Schedule
 const getLoanSchedule = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.loanId);
@@ -177,13 +163,11 @@ const getLoanSchedule = async (req, res) => {
       return res.status(400).json({ error: 'Invalid interest method' });
 
     res.json({ loanId: loan.id, interestMethod: loan.interestMethod, schedule });
-  } catch (error) {
-    console.error('Schedule error:', error);
+  } catch (err) {
     res.status(500).json({ error: 'Failed to generate schedule' });
   }
 };
 
-// Disbursement List
 const getDisbursementList = async (req, res) => {
   try {
     const loans = await Loan.findAll({
@@ -212,5 +196,5 @@ module.exports = {
   rejectLoan,
   disburseLoan,
   getLoanSchedule,
-  getDisbursementList, // ✅ Must match route name
+  getDisbursementList, // ✅ Ensure this name matches the route
 };
