@@ -1,5 +1,3 @@
-// src/middleware/authMiddleware.js
-
 const jwt = require('jsonwebtoken');
 
 // ✅ Authenticate middleware
@@ -30,7 +28,7 @@ const authorizeRoles = (...roles) => {
   };
 };
 
-// ✅ Export both
+// ✅ Export
 module.exports = {
   authenticateUser,
   authorizeRoles,
