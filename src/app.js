@@ -1,3 +1,5 @@
+// src/app.js
+
 const express = require('express');
 const app = express();
 const path = require('path');
@@ -6,20 +8,23 @@ const path = require('path');
 const allowedOrigins = [
   'http://localhost:5173',
   'https://strong-fudge-7fc28d.netlify.app',
-  'https://mkoposuite.netlify.app', // optional
+  'https://mkoposuite.netlify.app', // optional: production domain
 ];
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
+
   if (allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin'); // ✅ Required for dynamic origin
   }
+
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 
   if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+    return res.sendStatus(200); // ✅ Preflight OK
   }
 
   next();
@@ -59,7 +64,7 @@ app.use('/api/branches', branchRoutes);
 app.use('/api/user-roles', userRoleRoutes);
 app.use('/api/user-branches', userBranchRoutes);
 
-// ✅ Health Check
+// ✅ Health Check Route
 app.get('/api/test', (req, res) => {
   res.send('✅ API is working!');
 });
