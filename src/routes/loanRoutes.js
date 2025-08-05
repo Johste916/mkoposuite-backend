@@ -1,19 +1,19 @@
 const express = require('express');
 const router = express.Router();
 const loanController = require('../controllers/loanController');
-const { authenticateToken } = require('../middleware/authMiddleware');
+const { authenticateUser } = require('../middleware/authMiddleware');
 
-// Must be defined and exported!
-router.get('/disbursements/list', authenticateToken, loanController.getDisbursementList);
+router.post('/', authenticateUser, loanController.createLoan);
+router.get('/', authenticateUser, loanController.getAllLoans);
+router.get('/:id', authenticateUser, loanController.getLoanById);
+router.put('/:id', authenticateUser, loanController.updateLoan);
+router.delete('/:id', authenticateUser, loanController.deleteLoan);
 
-router.get('/:loanId/schedule', authenticateToken, loanController.getLoanSchedule);
-router.post('/', authenticateToken, loanController.createLoan);
-router.get('/', authenticateToken, loanController.getAllLoans);
-router.get('/:id', authenticateToken, loanController.getLoanById);
-router.put('/:id', authenticateToken, loanController.updateLoan);
-router.delete('/:id', authenticateToken, loanController.deleteLoan);
-router.post('/:id/approve', authenticateToken, loanController.approveLoan);
-router.post('/:id/reject', authenticateToken, loanController.rejectLoan);
-router.post('/:id/disburse', authenticateToken, loanController.disburseLoan);
+router.post('/:id/approve', authenticateUser, loanController.approveLoan);
+router.post('/:id/reject', authenticateUser, loanController.rejectLoan);
+router.post('/:id/disburse', authenticateUser, loanController.disburseLoan);
+
+router.get('/:loanId/schedule', authenticateUser, loanController.getLoanSchedule);
+router.get('/disbursements/list', authenticateUser, loanController.getDisbursementList);
 
 module.exports = router;

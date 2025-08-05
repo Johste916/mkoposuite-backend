@@ -11,7 +11,7 @@ exports.login = async (req, res) => {
   try {
     const user = await User.findOne({
       where: { email },
-      attributes: ['id', 'name', 'email', 'password', 'role'] // 👈 force-load mapped password
+      attributes: ['id', 'name', 'email', 'password_hash', 'role'] // ✅ correct field
     });
 
     if (!user) {
@@ -20,10 +20,10 @@ exports.login = async (req, res) => {
     }
 
     console.log("✅ User found:", user.email);
-    console.log("🔐 Hashed password from DB:", user.password);
+    console.log("🔐 Hashed password from DB:", user.password_hash);
     console.log("🔑 Password entered by user:", password);
 
-    const isMatch = await bcrypt.compare(password, user.password); // 👈 fixed here
+    const isMatch = await bcrypt.compare(password, user.password_hash); // ✅ fixed field
 
     if (!isMatch) {
       console.log("❌ Password mismatch");
