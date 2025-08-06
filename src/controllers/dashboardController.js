@@ -1,22 +1,94 @@
-// controllers/dashboardController.js
-const { Borrower, Loan, LoanRepayment, SavingsTransaction } = require('../models');
+const { Borrower, Loan, LoanRepayment, SavingsTransaction, User, Branch } = require('../models');
 const { Op } = require('sequelize');
-const { startOfMonth, endOfMonth } = require('date-fns');
+const {
+  startOfDay,
+  endOfDay,
+  startOfWeek,
+  endOfWeek,
+  startOfMonth,
+  endOfMonth,
+  startOfQuarter,
+  endOfQuarter,
+  startOfYear,
+  endOfYear,
+  parseISO
+} = require('date-fns');
+
+// Helper to compute date range
+const getDateRange = (timeRange, startDate, endDate) => {
+  const now = new Date();
+  switch (timeRange) {
+    case 'today':
+      return [startOfDay(now), endOfDay(now)];
+    case 'week':
+      return [startOfWeek(now), endOfWeek(now)];
+    case 'month':
+      return [startOfMonth(now), endOfMonth(now)];
+    case 'quarter':
+      return [startOfQuarter(now), endOfQuarter(now)];
+    case 'semiAnnual':
+      const month = now.getMonth();
+      if (month < 6) {
+        return [new Date(now.getFullYear(), 0, 1), new Date(now.getFullYear(), 5, 30)];
+      } else {
+        return [new Date(now.getFullYear(), 6, 1), new Date(now.getFullYear(), 11, 31)];
+      }
+    case 'annual':
+      return [startOfYear(now), endOfYear(now)];
+    case 'custom':
+      return [parseISO(startDate), parseISO(endDate)];
+    default:
+      return [null, null];
+  }
+};
 
 // GET /api/dashboard/summary
 exports.getDashboardSummary = async (req, res) => {
   try {
-    const [totalBorrowers, totalLoans, totalPaid, totalRepaid, savingsTxs] = await Promise.all([
-      Borrower.count(),
-      Loan.count(),
-      LoanRepayment.sum('total') || 0,
-      LoanRepayment.sum('balance') || 0,
-      SavingsTransaction.findAll()
+    const { branchId, officerId, timeRange, startDate, endDate } = req.query;
+
+    const loanFilter = {};
+    const repaymentFilter = {};
+    const borrowerFilter = {};
+    const savingsFilter = {};
+
+    if (branchId) {
+      loanFilter.branchId = branchId;
+      borrowerFilter.branchId = branchId;
+    }
+    if (officerId) {
+      loanFilter.initiatedBy = officerId;
+    }
+
+    const [start, end] = getDateRange(timeRange, startDate, endDate);
+
+    if (start && end) {
+      loanFilter.createdAt = { [Op.between]: [start, end] };
+      repaymentFilter.date = { [Op.between]: [start, end] };
+      savingsFilter.date = { [Op.between]: [start, end] };
+      loanFilter.disbursementDate = { [Op.between]: [start, end] };
+    }
+
+    const [
+      totalBorrowers,
+      totalLoans,
+      totalPaid,
+      totalRepaid,
+      totalExpectedRepayments,
+      savingsTxs,
+      totalDisbursed
+    ] = await Promise.all([
+      Borrower.count({ where: borrowerFilter }),
+      Loan.count({ where: loanFilter }),
+      LoanRepayment.sum('total', { where: repaymentFilter }) || 0,
+      LoanRepayment.sum('balance', { where: repaymentFilter }) || 0,
+      LoanRepayment.sum('amount', { where: repaymentFilter }) || 0,
+      SavingsTransaction.findAll({ where: savingsFilter }),
+      Loan.sum('amount', { where: { ...loanFilter, status: 'disbursed' } })
     ]);
 
     let totalDeposits = 0;
     let totalWithdrawals = 0;
-
     for (let tx of savingsTxs) {
       if (tx.type === 'deposit') totalDeposits += tx.amount;
       else if (tx.type === 'withdrawal') totalWithdrawals += tx.amount;
@@ -27,9 +99,11 @@ exports.getDashboardSummary = async (req, res) => {
       totalLoans,
       totalPaid,
       totalRepaid,
+      totalExpectedRepayments,
       totalDeposits,
       totalWithdrawals,
       netSavings: totalDeposits - totalWithdrawals,
+      totalDisbursed: totalDisbursed || 0
     });
   } catch (error) {
     console.error('Dashboard summary error:', error.message);
@@ -40,12 +114,19 @@ exports.getDashboardSummary = async (req, res) => {
 // GET /api/dashboard/defaulters
 exports.getDefaulters = async (req, res) => {
   try {
+    const { branchId, officerId } = req.query;
+
+    const whereLoan = {};
+    if (branchId) whereLoan.branchId = branchId;
+    if (officerId) whereLoan.initiatedBy = officerId;
+
     const defaulters = await LoanRepayment.findAll({
       where: { status: 'overdue' },
       include: [
         {
           model: Loan,
           attributes: ['id', 'amount', 'borrowerId'],
+          where: whereLoan,
           include: [
             {
               model: Borrower,
@@ -84,7 +165,7 @@ exports.getMonthlyTrends = async (req, res) => {
       }),
       LoanRepayment.sum('amountPaid', {
         where: { date: { [Op.between]: [start, end] } }
-      }),
+      })
     ]);
 
     res.json({
@@ -92,7 +173,7 @@ exports.getMonthlyTrends = async (req, res) => {
       year: now.getFullYear(),
       monthlyLoans,
       monthlyDeposits: monthlyDeposits || 0,
-      monthlyRepayments: monthlyRepayments || 0,
+      monthlyRepayments: monthlyRepayments || 0
     });
   } catch (error) {
     console.error('Monthly trends error:', error.message);

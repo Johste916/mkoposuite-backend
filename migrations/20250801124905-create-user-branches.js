@@ -1,23 +1,46 @@
 'use strict';
+
 module.exports = {
   up: async (queryInterface, Sequelize) => {
     await queryInterface.createTable('UserBranches', {
-      id: { allowNull: false, autoIncrement: true, primaryKey: true, type: Sequelize.INTEGER },
+      id: {
+        allowNull: false,
+        primaryKey: true,
+        type: Sequelize.UUID,
+        defaultValue: Sequelize.UUIDV4
+      },
       userId: {
-        type: Sequelize.INTEGER,
-        references: { model: 'Users', key: 'id' },
-        onDelete: 'CASCADE',
+        type: Sequelize.UUID,
+        allowNull: false,
+        references: {
+          model: 'Users',
+          key: 'id'
+        },
+        onDelete: 'CASCADE'
       },
       branchId: {
         type: Sequelize.INTEGER,
-        references: { model: 'Branches', key: 'id' },
-        onDelete: 'CASCADE',
+        allowNull: false,
+        references: {
+          model: 'Branches',
+          key: 'id'
+        },
+        onDelete: 'CASCADE'
       },
-      createdAt: { allowNull: false, type: Sequelize.DATE },
-      updatedAt: { allowNull: false, type: Sequelize.DATE },
+      createdAt: {
+        allowNull: false,
+        type: Sequelize.DATE,
+        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP')
+      },
+      updatedAt: {
+        allowNull: false,
+        type: Sequelize.DATE,
+        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP')
+      }
     });
   },
+
   down: async (queryInterface) => {
     await queryInterface.dropTable('UserBranches');
-  },
+  }
 };

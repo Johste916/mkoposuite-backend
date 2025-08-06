@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { User } = require('../models');
+const { sequelize } = require('../models'); // ⬅️ Make sure you import sequelize directly
 require('dotenv').config();
 
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -9,10 +9,16 @@ exports.login = async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    const user = await User.findOne({
-      where: { email },
-      attributes: ['id', 'name', 'email', 'password_hash', 'role'] // ✅ correct field
-    });
+    // 🔥 Use raw SQL query instead of Sequelize findOne
+    const [users] = await sequelize.query(
+      `SELECT id, name, email, role, password_hash FROM "Users" WHERE email = :email LIMIT 1`,
+      {
+        replacements: { email },
+        type: sequelize.QueryTypes.SELECT
+      }
+    );
+
+    const user = users;
 
     if (!user) {
       console.log("❌ No user found with email:", email);
@@ -23,7 +29,7 @@ exports.login = async (req, res) => {
     console.log("🔐 Hashed password from DB:", user.password_hash);
     console.log("🔑 Password entered by user:", password);
 
-    const isMatch = await bcrypt.compare(password, user.password_hash); // ✅ fixed field
+    const isMatch = await bcrypt.compare(password, user.password_hash);
 
     if (!isMatch) {
       console.log("❌ Password mismatch");
@@ -50,7 +56,7 @@ exports.login = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Login error:', error.message);
+    console.error('❌ Login error (raw SQL):', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
