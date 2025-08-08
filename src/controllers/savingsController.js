@@ -1,5 +1,5 @@
-const { SavingsTransaction, Borrower } = require('../models');
-const { Op } = require('sequelize');
+// controllers/savingsController.js
+const { SavingsTransaction } = require('../models');
 
 // Record a deposit, withdrawal, charge, or interest
 exports.createTransaction = async (req, res) => {
@@ -44,24 +44,19 @@ exports.getSavingsByBorrower = async (req, res) => {
 
     const balance = transactions.reduce((total, tx) => {
       if (tx.reversed) return total;
-      if (tx.type === 'deposit' || tx.type === 'interest') return total + tx.amount;
-      if (tx.type === 'withdrawal' || tx.type === 'charge') return total - tx.amount;
+      if (tx.type === 'deposit' || tx.type === 'interest') return total + Number(tx.amount || 0);
+      if (tx.type === 'withdrawal' || tx.type === 'charge') return total - Number(tx.amount || 0);
       return total;
     }, 0);
 
-    const totals = {
-      deposits: 0,
-      withdrawals: 0,
-      charges: 0,
-      interest: 0,
-    };
-
+    const totals = { deposits: 0, withdrawals: 0, charges: 0, interest: 0 };
     transactions.forEach((tx) => {
       if (tx.reversed) return;
-      if (tx.type === 'deposit') totals.deposits += tx.amount;
-      if (tx.type === 'withdrawal') totals.withdrawals += tx.amount;
-      if (tx.type === 'charge') totals.charges += tx.amount;
-      if (tx.type === 'interest') totals.interest += tx.amount;
+      const amt = Number(tx.amount || 0);
+      if (tx.type === 'deposit') totals.deposits += amt;
+      if (tx.type === 'withdrawal') totals.withdrawals += amt;
+      if (tx.type === 'charge') totals.charges += amt;
+      if (tx.type === 'interest') totals.interest += amt;
     });
 
     res.json({ transactions, balance, totals });

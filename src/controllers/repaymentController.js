@@ -1,9 +1,8 @@
 // controllers/repaymentController.js
-
 const { Op } = require('sequelize');
 const { LoanRepayment, Loan, Borrower, LoanSchedule, sequelize } = require('../models');
 
-/** Normalize receipt shape for the frontend */
+/** Build a receipt-friendly shape */
 const shapeReceipt = (repayment, allocation = []) => {
   const totals = allocation.reduce(
     (acc, a) => ({
@@ -30,10 +29,7 @@ const shapeReceipt = (repayment, allocation = []) => {
     loan: {
       id: loan.id,
       reference: loan.reference || `L-${loan.id}`,
-      borrowerName:
-        borrower?.fullName ||
-        borrower?.name ||
-        `${borrower?.firstName || ''} ${borrower?.lastName || ''}`.trim(),
+      borrowerName: borrower?.name || '',
     },
     postedBy: repayment.postedBy
       ? { name: repayment.postedByName || 'User', email: repayment.postedByEmail || '' }
@@ -43,10 +39,78 @@ const shapeReceipt = (repayment, allocation = []) => {
   };
 };
 
-// ===================================
-// GET /api/repayments
-// query: q, loanId, borrowerId, dateFrom, dateTo, page=1, pageSize=20
-// ===================================
+/** Internal: compute allocation from schedule */
+async function computeAllocations({ loanId, amount, date, strategy = 'oldest_due_first', customOrder, waivePenalties = false }) {
+  if (!loanId || !Number(amount)) {
+    return { allocations: [], totals: { principal: 0, interest: 0, fees: 0, penalties: 0 } };
+  }
+
+  if (!LoanSchedule) {
+    // If you don't maintain a schedule table, replace this with your logic
+    return { allocations: [], totals: { principal: 0, interest: 0, fees: 0, penalties: 0 } };
+  }
+
+  const schedule = await LoanSchedule.findAll({
+    where: { loanId },
+    order: [['dueDate', 'ASC'], ['period', 'ASC']],
+    raw: true,
+  });
+
+  if (!schedule.length) {
+    return { allocations: [], totals: { principal: 0, interest: 0, fees: 0, penalties: 0 } };
+  }
+
+  const items = schedule.map(s => ({
+    period: s.period,
+    dueDate: s.dueDate,
+    remaining: {
+      principal: Math.max(0, Number(s.principal || 0) - Number(s.principalPaid || 0)),
+      interest:  Math.max(0, Number(s.interest  || 0) - Number(s.interestPaid  || 0)),
+      fees:      Math.max(0, Number(s.fees      || 0) - Number(s.feesPaid      || 0)),
+      penalties: waivePenalties ? 0 : Math.max(0, Number(s.penalties || s.penalty || 0) - Number(s.penaltiesPaid || 0)),
+    },
+  }));
+
+  let order;
+  if (strategy === 'principal_first') order = ['principal', 'interest', 'fees', 'penalties'];
+  else if (strategy === 'interest_first') order = ['interest', 'fees', 'penalties', 'principal'];
+  else if (strategy === 'fees_first') order = ['fees', 'interest', 'penalties', 'principal'];
+  else if (strategy === 'custom') order = String(customOrder || '').split(',').map(x => x.trim()).filter(Boolean);
+  else order = ['penalties', 'interest', 'fees', 'principal']; // default: oldest_due_first
+
+  if (waivePenalties) order = order.filter(x => x !== 'penalties');
+
+  let left = Number(amount);
+  const allocations = [];
+  const totals = { principal: 0, interest: 0, fees: 0, penalties: 0 };
+
+  for (const it of items) {
+    if (left <= 0) break;
+    const line = { period: it.period, principal: 0, interest: 0, fees: 0, penalties: 0 };
+
+    for (const cat of order) {
+      if (left <= 0) break;
+      const need = Math.max(0, it.remaining[cat] || 0);
+      if (!need) continue;
+      const take = Math.min(need, left);
+      line[cat] += take;
+      totals[cat] += take;
+      it.remaining[cat] -= take;
+      left -= take;
+    }
+
+    if (line.principal || line.interest || line.fees || line.penalties) {
+      allocations.push(line);
+    }
+  }
+
+  return { allocations, totals };
+}
+
+/* ===========================
+   GET /api/repayments
+   query: q, loanId, borrowerId, dateFrom, dateTo, page=1, pageSize=20
+=========================== */
 exports.getAllRepayments = async (req, res) => {
   try {
     const {
@@ -69,7 +133,7 @@ exports.getAllRepayments = async (req, res) => {
     const include = [
       {
         model: Loan,
-        include: [{ model: Borrower }],
+        include: [{ model: Borrower, attributes: ['id', 'name', 'phone', 'email'] }],
         where: {},
       },
     ];
@@ -78,13 +142,7 @@ exports.getAllRepayments = async (req, res) => {
 
     if (q) {
       include[0].required = true;
-      include[0].include[0].where = {
-        [Op.or]: [
-          { fullName:  { [Op.iLike]: `%${q}%` } },
-          { firstName: { [Op.iLike]: `%${q}%` } },
-          { lastName:  { [Op.iLike]: `%${q}%` } },
-        ],
-      };
+      include[0].include[0].where = { name: { [Op.iLike]: `%${q}%` } }; // Postgres
     }
 
     const limit = Math.max(1, Number(pageSize));
@@ -105,9 +163,9 @@ exports.getAllRepayments = async (req, res) => {
   }
 };
 
-// ===================================
-// GET /api/repayments/borrower/:borrowerId
-// ===================================
+/* ===========================
+   GET /api/repayments/borrower/:borrowerId
+=========================== */
 exports.getRepaymentsByBorrower = async (req, res) => {
   try {
     const { borrowerId } = req.params;
@@ -115,7 +173,7 @@ exports.getRepaymentsByBorrower = async (req, res) => {
       include: {
         model: Loan,
         where: { borrowerId },
-        include: [{ model: Borrower }],
+        include: [{ model: Borrower, attributes: ['id', 'name', 'phone', 'email'] }],
       },
       order: [['date', 'DESC'], ['createdAt', 'DESC']],
     });
@@ -126,15 +184,15 @@ exports.getRepaymentsByBorrower = async (req, res) => {
   }
 };
 
-// ===================================
-// GET /api/repayments/loan/:loanId
-// ===================================
+/* ===========================
+   GET /api/repayments/loan/:loanId
+=========================== */
 exports.getRepaymentsByLoan = async (req, res) => {
   try {
     const { loanId } = req.params;
     const repayments = await LoanRepayment.findAll({
       where: { loanId },
-      include: [{ model: Loan, include: [Borrower] }],
+      include: [{ model: Loan, include: [{ model: Borrower, attributes: ['id', 'name', 'phone', 'email'] }] }],
       order: [['date', 'DESC'], ['createdAt', 'DESC']],
     });
     res.json(repayments);
@@ -144,9 +202,9 @@ exports.getRepaymentsByLoan = async (req, res) => {
   }
 };
 
-// ===================================
-// GET /api/repayments/:id  (Receipt view)
-// ===================================
+/* ===========================
+   GET /api/repayments/:id (receipt view)
+=========================== */
 exports.getRepaymentById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -155,7 +213,7 @@ exports.getRepaymentById = async (req, res) => {
     });
     if (!repayment) return res.status(404).json({ error: 'Repayment not found' });
 
-    const allocation = repayment.allocation || []; // JSONB column recommended
+    const allocation = repayment.allocation || []; // JSONB recommended
     return res.json(shapeReceipt(repayment, allocation));
   } catch (err) {
     console.error(err);
@@ -163,92 +221,29 @@ exports.getRepaymentById = async (req, res) => {
   }
 };
 
-// ===================================
-// POST /api/repayments/preview-allocation
-// body: { loanId, amount, date, strategy, customOrder?, waivePenalties? }
-// ===================================
+/* ===========================
+   POST /api/repayments/preview-allocation
+   body: { loanId, amount, date, strategy, customOrder?, waivePenalties? }
+=========================== */
 exports.previewAllocation = async (req, res) => {
   try {
-    const { loanId, amount, date, strategy = 'oldest_due_first', customOrder, waivePenalties = false } = req.body;
-
-    if (!loanId || !Number(amount)) {
-      return res.status(400).json({ error: 'loanId and amount are required' });
-    }
-
-    // Requires schedule data
-    if (!LoanSchedule) {
-      return res.status(501).json({ error: 'Schedule model not available. Implement preview against your schedule source.' });
-    }
-
-    const schedule = await LoanSchedule.findAll({
-      where: { loanId },
-      order: [['dueDate', 'ASC'], ['period', 'ASC']],
-      raw: true,
-    });
-
-    if (!schedule.length) {
-      return res.json({ allocations: [], totals: { principal: 0, interest: 0, fees: 0, penalties: 0 } });
-    }
-
-    const items = schedule.map(s => ({
-      period: s.period,
-      dueDate: s.dueDate,
-      remaining: {
-        principal: Math.max(0, Number(s.principal || 0) - Number(s.principalPaid || 0)),
-        interest:  Math.max(0, Number(s.interest  || 0) - Number(s.interestPaid  || 0)),
-        fees:      Math.max(0, Number(s.fees      || 0) - Number(s.feesPaid      || 0)),
-        penalties: waivePenalties ? 0 : Math.max(0, Number(s.penalties || s.penalty || 0) - Number(s.penaltiesPaid || 0)),
-      },
-    }));
-
-    let order;
-    if (strategy === 'principal_first') order = ['principal', 'interest', 'fees', 'penalties'];
-    else if (strategy === 'interest_first') order = ['interest', 'fees', 'penalties', 'principal'];
-    else if (strategy === 'fees_first') order = ['fees', 'interest', 'penalties', 'principal'];
-    else if (strategy === 'custom') order = String(customOrder || '').split(',').map(x => x.trim()).filter(Boolean);
-    else order = ['penalties', 'interest', 'fees', 'principal']; // default: oldest_due_first
-
-    if (waivePenalties) order = order.filter(x => x !== 'penalties');
-
-    let left = Number(amount);
-    const allocations = [];
-    const totals = { principal: 0, interest: 0, fees: 0, penalties: 0 };
-
-    for (const it of items) {
-      if (left <= 0) break;
-      const line = { period: it.period, principal: 0, interest: 0, fees: 0, penalties: 0 };
-
-      for (const cat of order) {
-        if (left <= 0) break;
-        const need = Math.max(0, it.remaining[cat] || 0);
-        if (!need) continue;
-        const take = Math.min(need, left);
-        line[cat] += take;
-        totals[cat] += take;
-        it.remaining[cat] -= take;
-        left -= take;
-      }
-
-      if (line.principal || line.interest || line.fees || line.penalties) {
-        allocations.push(line);
-      }
-    }
-
-    return res.json({ allocations, totals });
+    const { loanId, amount, date, strategy, customOrder, waivePenalties } = req.body;
+    const result = await computeAllocations({ loanId, amount, date, strategy, customOrder, waivePenalties });
+    return res.json(result);
   } catch (err) {
     console.error('previewAllocation error:', err);
     res.status(500).json({ error: 'Preview allocation failed' });
   }
 };
 
-// ===================================
-// POST /api/repayments/manual
-// body: { loanId, amount, date, method, reference?, notes?, strategy, customOrder?, waivePenalties?, issueReceipt? }
-// ===================================
+/* ===========================
+   POST /api/repayments/manual
+   body: { loanId, amount, date, method, reference?, notes?, strategy, customOrder?, waivePenalties?, issueReceipt? }
+=========================== */
 exports.createRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    // Minimal role gate (adjust as needed)
+    // Adjust role check to your app
     const { role } = req.user || {};
     if (!role || !['Admin', 'LoanOfficer'].includes(role)) {
       await t.rollback();
@@ -273,22 +268,12 @@ exports.createRepayment = async (req, res) => {
       return res.status(400).json({ error: 'loanId, amount and date are required' });
     }
 
-    // Compute allocation via the preview logic
-    const previewReq = { body: { loanId, amount, date, strategy, customOrder, waivePenalties } };
-    const previewRes = {
-      payload: null,
-      _status: 200,
-      json(payload) { this.payload = payload; },
-      status(code) { this._status = code; return this; },
-    };
-    await exports.previewAllocation(previewReq, previewRes);
-    if (previewRes._status >= 400) {
-      await t.rollback();
-      return res.status(previewRes._status).json(previewRes.payload || { error: 'Preview failed' });
-    }
-    const { allocations = [], totals = {} } = previewRes.payload || {};
+    // Compute allocation
+    const { allocations, totals } = await computeAllocations({
+      loanId, amount, date, strategy, customOrder, waivePenalties
+    });
 
-    // Create repayment row
+    // Create repayment
     const repayment = await LoanRepayment.create({
       loanId,
       amount: Number(amount),
@@ -303,7 +288,7 @@ exports.createRepayment = async (req, res) => {
       postedByEmail: req.user?.email,
     }, { transaction: t });
 
-    // Apply allocation to the schedule if present
+    // Apply allocation to schedule (if present)
     if (LoanSchedule && allocations.length) {
       for (const line of allocations) {
         const row = await LoanSchedule.findOne(
@@ -337,9 +322,14 @@ exports.createRepayment = async (req, res) => {
 
     await t.commit();
 
+    // Load loan+borrower for the receipt shape (optional)
+    const repFull = await LoanRepayment.findByPk(repayment.id, {
+      include: [{ model: Loan, include: [{ model: Borrower, attributes: ['id', 'name'] }] }],
+    });
+
     return res.status(201).json({
       repaymentId: repayment.id,
-      receipt: issueReceipt ? shapeReceipt(repayment, allocations) : undefined,
+      receipt: issueReceipt ? shapeReceipt(repFull || repayment, allocations) : undefined,
       totals,
     });
   } catch (err) {
@@ -349,9 +339,9 @@ exports.createRepayment = async (req, res) => {
   }
 };
 
-// ===================================
-// PUT /api/repayments/:id
-// ===================================
+/* ===========================
+   PUT /api/repayments/:id
+=========================== */
 exports.updateRepayment = async (req, res) => {
   try {
     const { id } = req.params;
@@ -375,9 +365,9 @@ exports.updateRepayment = async (req, res) => {
   }
 };
 
-// ===================================
-// DELETE /api/repayments/:id
-// ===================================
+/* ===========================
+   DELETE /api/repayments/:id
+=========================== */
 exports.deleteRepayment = async (req, res) => {
   try {
     const { id } = req.params;
