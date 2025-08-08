@@ -3,6 +3,8 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateUser } = require('../middleware/authMiddleware');
+// If you have role-based guard, uncomment and use it on the comms routes
+// const { authorizeRole } = require('../middleware/authorizeRole');
 
 // ==============================
 // 📦 Controllers
@@ -24,6 +26,9 @@ const dashboardSettingsController = require('../controllers/settings/dashboardSe
 const loanSectorSettingsController = require('../controllers/settings/loanSectorSettingsController');
 const incomeSourceSettingsController = require('../controllers/settings/incomeSourceSettingsController');
 const holidaySettingsController = require('../controllers/settings/holidaySettingsController');
+
+// ✅ NEW: Communications settings controller
+const communicationSettingsController = require('../controllers/settings/communicationSettingsController');
 
 // ==============================
 // 📁 Loan Categories
@@ -148,6 +153,30 @@ router.route('/income-source-settings')
 router.route('/holiday-settings')
   .get(authenticateUser, holidaySettingsController.getHolidaySettings)
   .put(authenticateUser, holidaySettingsController.updateHolidaySettings);
+
+// ==============================
+// 📢 Communications Settings (NEW)
+// Multiple records + attachments; prefer admin-only roles.
+// ==============================
+// If you have role-based auth, use: [authenticateUser, authorizeRole(['admin','superadmin'])]
+router.route('/communications')
+  .get(authenticateUser, communicationSettingsController.listCommunications)
+  .post(authenticateUser, communicationSettingsController.createCommunication);
+
+router.route('/communications/:id')
+  .get(authenticateUser, communicationSettingsController.getCommunication)
+  .put(authenticateUser, communicationSettingsController.updateCommunication)
+  .delete(authenticateUser, communicationSettingsController.deleteCommunication);
+
+router.post('/communications/:id/attachments',
+  authenticateUser,
+  communicationSettingsController.addAttachment
+);
+
+router.delete('/communications/:id/attachments/:attId',
+  authenticateUser,
+  communicationSettingsController.removeAttachment
+);
 
 // ==============================
 // ✅ Export

@@ -1,4 +1,4 @@
-const Sequelize = require('sequelize');
+const { Sequelize, DataTypes } = require('sequelize');
 require('dotenv').config();
 
 const sequelize = new Sequelize(process.env.DATABASE_URL, {
@@ -13,13 +13,16 @@ const sequelize = new Sequelize(process.env.DATABASE_URL, {
 
 const db = {};
 
-// Load models
-db.User = require('./user')(sequelize, Sequelize.DataTypes);
-db.Branch = require('./branch')(sequelize, Sequelize.DataTypes);
-db.Borrower = require('./borrower')(sequelize, Sequelize.DataTypes);
-db.Loan = require('./loan')(sequelize, Sequelize.DataTypes);
-db.LoanRepayment = require('./loanrepayment')(sequelize, Sequelize.DataTypes);
-db.LoanPayment = require('./loanpayment')(sequelize, Sequelize.DataTypes);
+// ======================
+// ✅ Load All Models
+// ======================
+db.User = require('./user')(sequelize, DataTypes);
+db.Branch = require('./branch')(sequelize, DataTypes);
+db.Borrower = require('./borrower')(sequelize, DataTypes);
+db.Loan = require('./loan')(sequelize, DataTypes);
+db.LoanRepayment = require('./loanrepayment')(sequelize, DataTypes);
+db.LoanPayment = require('./loanpayment')(sequelize, DataTypes);
+db.Setting = require('./setting')(sequelize, DataTypes); // ✅ Include Setting model
 
 // ======================
 // ✅ Model Associations
@@ -60,7 +63,7 @@ if (db.LoanPayment && db.User) {
 }
 
 // ======================
-// Finalize
+// ✅ Finalize Export
 // ======================
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;
