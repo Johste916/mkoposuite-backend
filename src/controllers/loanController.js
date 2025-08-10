@@ -1,5 +1,4 @@
-// src/controllers/loanController.js
-const { Loan, Borrower, Branch, User } = require("../models");
+const { Loan, Borrower, Branch, User, LoanProduct } = require("../models");
 const {
   generateFlatRateSchedule,
   generateReducingBalanceSchedule,
@@ -12,6 +11,46 @@ const BORROWER_ATTRS = ["id", "name", "nationalId", "phone"];
 // =========================
 const createLoan = async (req, res) => {
   try {
+    // ✅ Validate against product limits if productId is provided
+    if (req.body.productId) {
+      const product = await LoanProduct.findByPk(req.body.productId);
+      if (!product) {
+        return res.status(400).json({ error: "Invalid loan product selected" });
+      }
+
+      // Check min/max principal
+      if (product.minPrincipal && Number(req.body.amount) < Number(product.minPrincipal)) {
+        return res.status(400).json({
+          error: `Amount must be at least ${product.minPrincipal}`,
+        });
+      }
+      if (product.maxPrincipal && Number(req.body.amount) > Number(product.maxPrincipal)) {
+        return res.status(400).json({
+          error: `Amount must not exceed ${product.maxPrincipal}`,
+        });
+      }
+
+      // Check min/max term months
+      if (product.minTermMonths && Number(req.body.termMonths) < Number(product.minTermMonths)) {
+        return res.status(400).json({
+          error: `Term must be at least ${product.minTermMonths} months`,
+        });
+      }
+      if (product.maxTermMonths && Number(req.body.termMonths) > Number(product.maxTermMonths)) {
+        return res.status(400).json({
+          error: `Term must not exceed ${product.maxTermMonths} months`,
+        });
+      }
+
+      // Auto-fill interest details if missing
+      if (!req.body.interestMethod) {
+        req.body.interestMethod = product.interestMethod || "flat";
+      }
+      if (!req.body.interestRate) {
+        req.body.interestRate = product.interestRate || 0;
+      }
+    }
+
     const loan = await Loan.create({
       ...req.body,
       initiatedBy: req.user?.id || null,
@@ -78,6 +117,50 @@ const updateLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+    // ✅ Validate against product limits if productId is provided or already on loan
+    const productIdToCheck = req.body.productId || loan.productId;
+    if (productIdToCheck) {
+      const product = await LoanProduct.findByPk(productIdToCheck);
+      if (!product) {
+        return res.status(400).json({ error: "Invalid loan product selected" });
+      }
+
+      const amountToCheck = req.body.amount ?? loan.amount;
+      const termToCheck = req.body.termMonths ?? loan.termMonths;
+
+      // Check min/max principal
+      if (product.minPrincipal && Number(amountToCheck) < Number(product.minPrincipal)) {
+        return res.status(400).json({
+          error: `Amount must be at least ${product.minPrincipal}`,
+        });
+      }
+      if (product.maxPrincipal && Number(amountToCheck) > Number(product.maxPrincipal)) {
+        return res.status(400).json({
+          error: `Amount must not exceed ${product.maxPrincipal}`,
+        });
+      }
+
+      // Check min/max term months
+      if (product.minTermMonths && Number(termToCheck) < Number(product.minTermMonths)) {
+        return res.status(400).json({
+          error: `Term must be at least ${product.minTermMonths} months`,
+        });
+      }
+      if (product.maxTermMonths && Number(termToCheck) > Number(product.maxTermMonths)) {
+        return res.status(400).json({
+          error: `Term must not exceed ${product.maxTermMonths} months`,
+        });
+      }
+
+      // Auto-fill interest details if missing in request
+      if (req.body.interestMethod === undefined) {
+        req.body.interestMethod = loan.interestMethod || product.interestMethod || "flat";
+      }
+      if (req.body.interestRate === undefined) {
+        req.body.interestRate = loan.interestRate || product.interestRate || 0;
+      }
+    }
 
     await loan.update(req.body);
     res.json(loan);
