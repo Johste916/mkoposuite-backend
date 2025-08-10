@@ -1,22 +1,24 @@
+// src/routes/dashboardRoutes.js
 const express = require('express');
 const router = express.Router();
-const {
-  getDashboardSummary,
-  getDefaulters,
-  getMonthlyTrends,
-  getActivityFeed,
-  addActivityComment,
-  assignActivityTask,
-  getGeneralCommunications, // must match controller export
-} = require('../controllers/dashboardController');
+const dc = require('../controllers/dashboardController');
 const { authenticateUser } = require('../middleware/authMiddleware');
 
-router.get('/summary', authenticateUser, getDashboardSummary);
-router.get('/defaulters', authenticateUser, getDefaulters);
-router.get('/monthly-trends', authenticateUser, getMonthlyTrends);
-router.get('/activity', authenticateUser, getActivityFeed);
-router.post('/activity/:id/comment', authenticateUser, addActivityComment);
-router.post('/activity/:id/assign', authenticateUser, assignActivityTask);
-router.get('/communications', authenticateUser, getGeneralCommunications);
+// Guard: return 501 if a controller fn is missing to avoid "callback undefined" crashes
+const safe = (fn, name) =>
+  typeof fn === 'function'
+    ? fn
+    : (_req, res) => res.status(501).json({ error: `${name} not implemented` });
+
+// Routes
+router.get('/summary', authenticateUser, safe(dc.getDashboardSummary, 'getDashboardSummary'));
+router.get('/defaulters', authenticateUser, safe(dc.getDefaulters, 'getDefaulters'));
+router.get('/monthly-trends', authenticateUser, safe(dc.getMonthlyTrends, 'getMonthlyTrends'));
+
+router.get('/activity', authenticateUser, safe(dc.getActivityFeed, 'getActivityFeed'));
+router.post('/activity/:id/comment', authenticateUser, safe(dc.addActivityComment, 'addActivityComment'));
+router.post('/activity/:id/assign', authenticateUser, safe(dc.assignActivityTask, 'assignActivityTask'));
+
+router.get('/communications', authenticateUser, safe(dc.getGeneralCommunications, 'getGeneralCommunications'));
 
 module.exports = router;
