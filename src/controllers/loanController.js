@@ -1,4 +1,5 @@
-const { Loan, Borrower, Branch, User, LoanProduct } = require("../models");
+// backend/src/controllers/loanController.js
+const { Loan, Borrower, Branch, LoanProduct } = require("../models");
 const {
   generateFlatRateSchedule,
   generateReducingBalanceSchedule,
@@ -6,49 +7,28 @@ const {
 
 const BORROWER_ATTRS = ["id", "name", "nationalId", "phone"];
 
-// =========================
-// CREATE LOAN
-// =========================
+// ===== CREATE LOAN =====
 const createLoan = async (req, res) => {
   try {
-    // ✅ Validate against product limits if productId is provided
     if (req.body.productId) {
       const product = await LoanProduct.findByPk(req.body.productId);
-      if (!product) {
-        return res.status(400).json({ error: "Invalid loan product selected" });
-      }
+      if (!product) return res.status(400).json({ error: "Invalid loan product selected" });
 
-      // Check min/max principal
-      if (product.minPrincipal && Number(req.body.amount) < Number(product.minPrincipal)) {
-        return res.status(400).json({
-          error: `Amount must be at least ${product.minPrincipal}`,
-        });
-      }
-      if (product.maxPrincipal && Number(req.body.amount) > Number(product.maxPrincipal)) {
-        return res.status(400).json({
-          error: `Amount must not exceed ${product.maxPrincipal}`,
-        });
-      }
+      const amt = Number(req.body.amount);
+      const term = Number(req.body.termMonths);
 
-      // Check min/max term months
-      if (product.minTermMonths && Number(req.body.termMonths) < Number(product.minTermMonths)) {
-        return res.status(400).json({
-          error: `Term must be at least ${product.minTermMonths} months`,
-        });
-      }
-      if (product.maxTermMonths && Number(req.body.termMonths) > Number(product.maxTermMonths)) {
-        return res.status(400).json({
-          error: `Term must not exceed ${product.maxTermMonths} months`,
-        });
-      }
+      if (product.minPrincipal && amt < Number(product.minPrincipal))
+        return res.status(400).json({ error: `Amount must be at least ${product.minPrincipal}` });
+      if (product.maxPrincipal && amt > Number(product.maxPrincipal))
+        return res.status(400).json({ error: `Amount must not exceed ${product.maxPrincipal}` });
 
-      // Auto-fill interest details if missing
-      if (!req.body.interestMethod) {
-        req.body.interestMethod = product.interestMethod || "flat";
-      }
-      if (!req.body.interestRate) {
-        req.body.interestRate = product.interestRate || 0;
-      }
+      if (product.minTermMonths && term < Number(product.minTermMonths))
+        return res.status(400).json({ error: `Term must be at least ${product.minTermMonths} months` });
+      if (product.maxTermMonths && term > Number(product.maxTermMonths))
+        return res.status(400).json({ error: `Term must not exceed ${product.maxTermMonths} months` });
+
+      if (!req.body.interestMethod) req.body.interestMethod = product.interestMethod || "flat";
+      if (!req.body.interestRate)   req.body.interestRate   = product.interestRate   || 0;
     }
 
     const loan = await Loan.create({
@@ -63,19 +43,14 @@ const createLoan = async (req, res) => {
   }
 };
 
-// =========================
-// GET ALL LOANS
-// =========================
+// ===== GET ALL LOANS =====
 const getAllLoans = async (_req, res) => {
   try {
     const loans = await Loan.findAll({
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch, as: "branch" },
-        { model: User, as: "initiator", attributes: ["id", "name"] },
-        { model: User, as: "approver", attributes: ["id", "name"] },
-        { model: User, as: "rejector", attributes: ["id", "name"] },
-        { model: User, as: "disburser", attributes: ["id", "name"] },
+        { model: Branch },
+        { model: LoanProduct, attributes: ["id", "name", "code", "interestMethod", "interestRate"] },
       ],
       order: [["createdAt", "DESC"]],
       limit: 500,
@@ -83,83 +58,56 @@ const getAllLoans = async (_req, res) => {
     res.json(loans || []);
   } catch (err) {
     console.error("Fetch loans error:", err);
-    res.status(500).json({ error: "Failed to fetch loans" });
+    res.status(500).json({ error: err.message || "Failed to fetch loans" });
   }
 };
 
-// =========================
-// GET LOAN BY ID
-// =========================
+// ===== GET LOAN BY ID =====
 const getLoanById = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id, {
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch, as: "branch" },
-        { model: User, as: "initiator", attributes: ["id", "name"] },
-        { model: User, as: "approver", attributes: ["id", "name"] },
-        { model: User, as: "rejector", attributes: ["id", "name"] },
-        { model: User, as: "disburser", attributes: ["id", "name"] },
+        { model: Branch },
+        { model: LoanProduct, attributes: ["id", "name", "code", "interestMethod", "interestRate"] },
       ],
     });
     if (!loan) return res.status(404).json({ error: "Loan not found" });
     res.json(loan);
   } catch (err) {
     console.error("Get loan by id error:", err);
-    res.status(500).json({ error: "Error fetching loan" });
+    res.status(500).json({ error: err.message || "Error fetching loan" });
   }
 };
 
-// =========================
-// UPDATE LOAN
-// =========================
+// ===== UPDATE LOAN =====
 const updateLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
-    // ✅ Validate against product limits if productId is provided or already on loan
     const productIdToCheck = req.body.productId || loan.productId;
     if (productIdToCheck) {
       const product = await LoanProduct.findByPk(productIdToCheck);
-      if (!product) {
-        return res.status(400).json({ error: "Invalid loan product selected" });
-      }
+      if (!product) return res.status(400).json({ error: "Invalid loan product selected" });
 
-      const amountToCheck = req.body.amount ?? loan.amount;
-      const termToCheck = req.body.termMonths ?? loan.termMonths;
+      const amountToCheck = Number(req.body.amount ?? loan.amount);
+      const termToCheck   = Number(req.body.termMonths ?? loan.termMonths);
 
-      // Check min/max principal
-      if (product.minPrincipal && Number(amountToCheck) < Number(product.minPrincipal)) {
-        return res.status(400).json({
-          error: `Amount must be at least ${product.minPrincipal}`,
-        });
-      }
-      if (product.maxPrincipal && Number(amountToCheck) > Number(product.maxPrincipal)) {
-        return res.status(400).json({
-          error: `Amount must not exceed ${product.maxPrincipal}`,
-        });
-      }
+      if (product.minPrincipal && amountToCheck < Number(product.minPrincipal))
+        return res.status(400).json({ error: `Amount must be at least ${product.minPrincipal}` });
+      if (product.maxPrincipal && amountToCheck > Number(product.maxPrincipal))
+        return res.status(400).json({ error: `Amount must not exceed ${product.maxPrincipal}` });
 
-      // Check min/max term months
-      if (product.minTermMonths && Number(termToCheck) < Number(product.minTermMonths)) {
-        return res.status(400).json({
-          error: `Term must be at least ${product.minTermMonths} months`,
-        });
-      }
-      if (product.maxTermMonths && Number(termToCheck) > Number(product.maxTermMonths)) {
-        return res.status(400).json({
-          error: `Term must not exceed ${product.maxTermMonths} months`,
-        });
-      }
+      if (product.minTermMonths && termToCheck < Number(product.minTermMonths))
+        return res.status(400).json({ error: `Term must be at least ${product.minTermMonths} months` });
+      if (product.maxTermMonths && termToCheck > Number(product.maxTermMonths))
+        return res.status(400).json({ error: `Term must not exceed ${product.maxTermMonths} months` });
 
-      // Auto-fill interest details if missing in request
-      if (req.body.interestMethod === undefined) {
+      if (req.body.interestMethod === undefined)
         req.body.interestMethod = loan.interestMethod || product.interestMethod || "flat";
-      }
-      if (req.body.interestRate === undefined) {
-        req.body.interestRate = loan.interestRate || product.interestRate || 0;
-      }
+      if (req.body.interestRate === undefined)
+        req.body.interestRate   = loan.interestRate   || product.interestRate   || 0;
     }
 
     await loan.update(req.body);
@@ -170,9 +118,7 @@ const updateLoan = async (req, res) => {
   }
 };
 
-// =========================
-// DELETE LOAN
-// =========================
+// ===== DELETE LOAN =====
 const deleteLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
@@ -186,9 +132,7 @@ const deleteLoan = async (req, res) => {
   }
 };
 
-// =========================
-// APPROVE LOAN
-// =========================
+// ===== APPROVE / REJECT / DISBURSE =====
 const approveLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
@@ -201,7 +145,6 @@ const approveLoan = async (req, res) => {
       approvalDate: new Date(),
       approvalComments: req.body.approvalComments || "",
     });
-
     res.json({ message: "Loan approved" });
   } catch (err) {
     console.error("Approve loan error:", err);
@@ -209,9 +152,6 @@ const approveLoan = async (req, res) => {
   }
 };
 
-// =========================
-// REJECT LOAN
-// =========================
 const rejectLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
@@ -224,7 +164,6 @@ const rejectLoan = async (req, res) => {
       rejectionDate: new Date(),
       rejectionComments: req.body.rejectionComments || "",
     });
-
     res.json({ message: "Loan rejected" });
   } catch (err) {
     console.error("Reject loan error:", err);
@@ -232,9 +171,6 @@ const rejectLoan = async (req, res) => {
   }
 };
 
-// =========================
-// DISBURSE LOAN
-// =========================
 const disburseLoan = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.id);
@@ -247,7 +183,6 @@ const disburseLoan = async (req, res) => {
       disbursementDate: new Date(),
       disbursementMethod: req.body.disbursementMethod || "cash",
     });
-
     res.json({ message: "Loan disbursed" });
   } catch (err) {
     console.error("Disburse loan error:", err);
@@ -255,9 +190,7 @@ const disburseLoan = async (req, res) => {
   }
 };
 
-// =========================
-// GET LOAN SCHEDULE
-// =========================
+// ===== SCHEDULE =====
 const getLoanSchedule = async (req, res) => {
   try {
     const loan = await Loan.findByPk(req.params.loanId);
@@ -266,12 +199,7 @@ const getLoanSchedule = async (req, res) => {
     const msPerMonth = 1000 * 60 * 60 * 24 * 30;
     const duration = loan.termMonths
       ? loan.termMonths
-      : Math.max(
-          1,
-          Math.ceil(
-            (new Date(loan.endDate) - new Date(loan.startDate)) / msPerMonth
-          )
-        );
+      : Math.max(1, Math.ceil((new Date(loan.endDate) - new Date(loan.startDate)) / msPerMonth));
 
     const input = {
       amount: Number(loan.amount || 0),
@@ -287,8 +215,7 @@ const getLoanSchedule = async (req, res) => {
         ? generateReducingBalanceSchedule(input)
         : [];
 
-    if (!schedule.length)
-      return res.status(400).json({ error: "Invalid interest method" });
+    if (!schedule.length) return res.status(400).json({ error: "Invalid interest method" });
 
     res.json({ loanId: loan.id, interestMethod: loan.interestMethod, schedule });
   } catch (err) {
@@ -297,17 +224,14 @@ const getLoanSchedule = async (req, res) => {
   }
 };
 
-// =========================
-// GET DISBURSEMENT LIST
-// =========================
+// ===== DISBURSED LIST / BY BORROWER =====
 const getDisbursementList = async (_req, res) => {
   try {
     const loans = await Loan.findAll({
       where: { status: "disbursed" },
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch, as: "branch" },
-        { model: User, as: "initiator", attributes: ["id", "name"] },
+        { model: Branch },
       ],
       order: [["disbursementDate", "DESC"]],
       limit: 500,
@@ -319,23 +243,17 @@ const getDisbursementList = async (_req, res) => {
   }
 };
 
-// =========================
-// GET LOANS BY BORROWER
-// =========================
 const getLoansByBorrower = async (req, res) => {
   try {
     const { borrowerId } = req.params;
-
     const loans = await Loan.findAll({
       where: { borrowerId },
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch, as: "branch" },
-        { model: User, as: "initiator", attributes: ["id", "name"] },
+        { model: Branch },
       ],
       order: [["createdAt", "DESC"]],
     });
-
     res.json(loans || []);
   } catch (err) {
     console.error("Get loans by borrower error:", err);
