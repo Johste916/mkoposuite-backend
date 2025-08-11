@@ -16,7 +16,7 @@ module.exports = {
         onUpdate: "CASCADE", onDelete: "CASCADE",
       },
       loanId: {
-        type: S.INTEGER, references: { model: "Loans", key: "id" },
+        type: S.INTEGER, references: { model: "loans", key: "id" },
         onUpdate: "CASCADE", onDelete: "CASCADE",
       },
       amount: { type: S.DECIMAL(18,2), defaultValue: 0 },

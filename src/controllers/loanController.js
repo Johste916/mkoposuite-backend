@@ -38,7 +38,6 @@ const writeAudit = async ({ entityId, action, before, after, req }) => {
       ip: req.ip,
     });
   } catch (e) {
-    // don’t block main flow on audit failure
     console.warn("audit write failed:", e.message);
   }
 };
@@ -314,7 +313,7 @@ const getLoanSchedule = async (req, res) => {
 };
 
 /* ===========================
-   STATUS UPDATE (strict) + SNAPSHOT ON DISBURSE + CLOSE RULES
+   STATUS UPDATE
 =========================== */
 const updateLoanStatus = async (req, res) => {
   const t = await sequelize.transaction();
@@ -343,7 +342,6 @@ const updateLoanStatus = async (req, res) => {
       fields.disbursedBy = req.user?.id || null;
       fields.disbursementDate = new Date();
 
-      // Snapshot schedule once on disbursement if not present
       const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
       if (count === 0) {
         const input = {
@@ -367,8 +365,7 @@ const updateLoanStatus = async (req, res) => {
           interest: Number(s.interest || 0),
           fees: Number(s.fees || 0),
           penalties: 0,
-          total:
-            Number(s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)),
+          total: Number(s.total ?? (Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0))),
         }));
 
         if (rows.length) {
@@ -389,6 +386,7 @@ const updateLoanStatus = async (req, res) => {
     }
 
     await loan.update(fields, { transaction: t });
+
     await writeAudit({
       entityId: loan.id,
       action: `status:${status}`,
@@ -398,7 +396,19 @@ const updateLoanStatus = async (req, res) => {
     });
 
     await t.commit();
-    res.json(loan);
+
+    const updatedLoan = await Loan.findByPk(req.params.id, {
+      include: [
+        { model: Borrower, attributes: BORROWER_ATTRS },
+        { model: Branch, as: "branch" },
+        { model: LoanProduct, as: "product", attributes: ["id", "name", "code"] },
+      ]
+    });
+
+    res.json({
+      message: `Loan ${status} successfully`,
+      loan: updatedLoan
+    });
   } catch (err) {
     await t.rollback();
     console.error("Update loan status error:", err);

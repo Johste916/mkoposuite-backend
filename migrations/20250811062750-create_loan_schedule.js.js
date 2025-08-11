@@ -7,7 +7,7 @@ module.exports = {
       loanId: {
         type: Sequelize.INTEGER,
         allowNull: false,
-        references: { model: "Loans", key: "id" },
+        references: { model: "loans", key: "id" },
         onUpdate: "CASCADE",
         onDelete: "CASCADE",
       },
