@@ -1,34 +1,20 @@
-// src/routes/loanRoutes.js
+// backend/routes/loanRoutes.js
 const express = require("express");
 const router = express.Router();
-const loanController = require("../controllers/loanController");
 const { authenticateUser } = require("../middleware/authMiddleware");
+const ctrl = require("../controllers/loanController");
 
-// =========================
-// 📥 LIST & VIEW
-// =========================
-router.get("/", authenticateUser, loanController.getAllLoans);
-router.get("/:id", authenticateUser, loanController.getLoanById);
-router.get("/borrower/:borrowerId", authenticateUser, loanController.getLoansByBorrower);
+// Loan CRUD
+router.get("/", authenticateUser, ctrl.getAllLoans);
+router.post("/", authenticateUser, ctrl.createLoan);
+router.get("/:id", authenticateUser, ctrl.getLoanById);
+router.put("/:id", authenticateUser, ctrl.updateLoan);
+router.delete("/:id", authenticateUser, ctrl.deleteLoan);
 
-// =========================
-// 💰 CREATE, UPDATE, DELETE
-// =========================
-router.post("/", authenticateUser, loanController.createLoan);
-router.put("/:id", authenticateUser, loanController.updateLoan);
-router.delete("/:id", authenticateUser, loanController.deleteLoan);
+// Status update (generic)
+router.patch("/:id/status", authenticateUser, ctrl.updateLoanStatus);
 
-// =========================
-// ✅ STATUS CHANGES
-// =========================
-router.post("/:id/approve", authenticateUser, loanController.approveLoan);
-router.post("/:id/reject", authenticateUser, loanController.rejectLoan);
-router.post("/:id/disburse", authenticateUser, loanController.disburseLoan);
-
-// =========================
-// 📅 SCHEDULE & REPORTS
-// =========================
-router.get("/:loanId/schedule", authenticateUser, loanController.getLoanSchedule);
-router.get("/reports/disbursements/list", authenticateUser, loanController.getDisbursementList);
+// Loan schedule
+router.get("/:loanId/schedule", authenticateUser, ctrl.getLoanSchedule);
 
 module.exports = router;

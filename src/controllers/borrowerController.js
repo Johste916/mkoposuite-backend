@@ -1,8 +1,6 @@
-// src/controllers/borrowerController.js
 const { Op } = require('sequelize');
 const models = require('../models');
 
-// Prefer safely reading models (they might not all exist yet)
 const Borrower = models.Borrower || null;
 const Loan = models.Loan || null;
 const LoanRepayment = models.LoanRepayment || null;
@@ -12,7 +10,6 @@ const GroupMember = models.BorrowerGroupMember || models.GroupMember || null;
 const BorrowerComment = models.BorrowerComment || null;
 const KYCDocument = models.KYCDocument || null;
 
-// ---------- helpers ----------
 const toApi = (b) => {
   if (!b) return null;
   const json = b.toJSON ? b.toJSON() : b;
@@ -128,7 +125,7 @@ exports.deleteBorrower = async (req, res) => {
   }
 };
 
-// ---------- nested: loans / repayments ----------
+// ---------- Nested ----------
 exports.getLoansByBorrower = async (req, res) => {
   try {
     if (!Loan) return res.json([]);
@@ -159,7 +156,7 @@ exports.getRepaymentsByBorrower = async (req, res) => {
   }
 };
 
-// ---------- comments ----------
+// ---------- Comments ----------
 exports.listComments = async (req, res) => {
   try {
     if (!BorrowerComment) return res.json([]);
@@ -185,7 +182,6 @@ exports.addComment = async (req, res) => {
     if (!b) return res.status(404).json({ error: 'Borrower not found' });
 
     if (!BorrowerComment) {
-      // graceful fallback: echo back what would have been saved
       return res.status(201).json({
         id: 0,
         borrowerId: req.params.id,
@@ -207,7 +203,7 @@ exports.addComment = async (req, res) => {
   }
 };
 
-// ---------- savings (snapshot for borrower details) ----------
+// ---------- Savings ----------
 exports.getSavingsByBorrower = async (req, res) => {
   try {
     if (!SavingsTransaction) {
@@ -227,17 +223,14 @@ exports.getSavingsByBorrower = async (req, res) => {
     }
     const balance = deposits - withdrawals;
 
-    res.json({
-      balance,
-      transactions: txs,
-    });
+    res.json({ balance, transactions: txs });
   } catch (error) {
     console.error('getSavingsByBorrower error:', error);
     res.status(500).json({ error: 'Failed to fetch savings' });
   }
 };
 
-// ---------- blacklist ----------
+// ---------- Blacklist ----------
 exports.blacklist = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: 'Borrower model not available' });
@@ -264,6 +257,17 @@ exports.unblacklist = async (req, res) => {
   }
 };
 
+exports.listBlacklisted = async (_req, res) => {
+  try {
+    if (!Borrower) return res.json([]);
+    const borrowers = await Borrower.findAll({ where: { status: 'blacklisted' } });
+    res.json(borrowers.map(toApi));
+  } catch (error) {
+    console.error('listBlacklisted error:', error);
+    res.status(500).json({ error: 'Failed to fetch blacklisted borrowers' });
+  }
+};
+
 // ---------- KYC ----------
 exports.uploadKyc = async (req, res) => {
   try {
@@ -271,8 +275,6 @@ exports.uploadKyc = async (req, res) => {
     const b = await Borrower.findByPk(req.params.id);
     if (!b) return res.status(404).json({ error: 'Borrower not found' });
 
-    // If you have a KYCDocument model & file storage pipeline, persist here.
-    // For now, return a minimal echo of uploaded files.
     const files = (req.files || []).map(f => ({
       field: f.fieldname,
       originalName: f.originalname,
@@ -287,7 +289,7 @@ exports.uploadKyc = async (req, res) => {
           fileName: f.originalName,
           mimeType: f.mimeType,
           size: f.size,
-          storageKey: null, // fill with your storage path/key
+          storageKey: null,
         })
       ));
       return res.status(201).json({ borrowerId: b.id, items: created });
@@ -317,6 +319,17 @@ exports.listKyc = async (req, res) => {
   } catch (error) {
     console.error('listKyc error:', error);
     res.status(500).json({ error: 'Failed to load KYC docs' });
+  }
+};
+
+exports.listKycQueue = async (_req, res) => {
+  try {
+    if (!Borrower) return res.json([]);
+    const borrowers = await Borrower.findAll({ where: { status: 'pending_kyc' } });
+    res.json(borrowers.map(toApi));
+  } catch (error) {
+    console.error('listKycQueue error:', error);
+    res.status(500).json({ error: 'Failed to fetch KYC queue' });
   }
 };
 
@@ -415,13 +428,69 @@ exports.removeGroupMember = async (req, res) => {
   }
 };
 
-// ---------- Import (CSV/XLSX) ----------
+exports.groupReports = async (_req, res) => {
+  try {
+    if (!Group) return res.json([]);
+    const groups = await Group.findAll({ include: [{ model: GroupMember }] });
+
+    const results = await Promise.all(groups.map(async (g) => {
+      const membersCount = g.GroupMembers?.length || 0;
+      let totalLoans = 0, totalLoanAmount = 0;
+      if (Loan) {
+        totalLoans = await Loan.count({
+          where: { borrowerId: g.GroupMembers.map(m => m.borrowerId) }
+        });
+        totalLoanAmount = await Loan.sum('amount', {
+          where: { borrowerId: g.GroupMembers.map(m => m.borrowerId) }
+        }) || 0;
+      }
+      return { id: g.id, name: g.name, membersCount, totalLoans, totalLoanAmount };
+    }));
+
+    res.json(results);
+  } catch (error) {
+    console.error('groupReports error:', error);
+    res.status(500).json({ error: 'Failed to fetch group reports' });
+  }
+};
+
+exports.importGroupMembers = async (req, res) => {
+  try {
+    if (!Group || !GroupMember) return res.status(501).json({ error: 'Group membership not available' });
+    const g = await Group.findByPk(req.params.groupId);
+    if (!g) return res.status(404).json({ error: 'Group not found' });
+
+    if (!req.file) return res.status(400).json({ error: 'file is required' });
+    const buf = req.file.buffer;
+    const text = buf.toString('utf8');
+    const lines = text.split(/\r?\n/).filter(Boolean);
+
+    const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+    const borrowerIdIdx = header.indexOf('borrowerid');
+    if (borrowerIdIdx === -1) return res.status(400).json({ error: 'CSV must include a "borrowerId" column' });
+
+    let added = 0;
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(',').map(c => c.trim());
+      const borrowerId = cols[borrowerIdIdx];
+      if (!borrowerId) continue;
+
+      await GroupMember.findOrCreate({ where: { groupId: g.id, borrowerId } });
+      added++;
+    }
+    res.json({ ok: true, added });
+  } catch (error) {
+    console.error('importGroupMembers error:', error);
+    res.status(500).json({ error: 'Failed to import group members' });
+  }
+};
+
+// ---------- Import Borrowers ----------
 exports.importBorrowers = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: 'Borrower model not available' });
     if (!req.file) return res.status(400).json({ error: 'file is required' });
 
-    // Minimal CSV parser (UTF-8). For XLSX, wire up 'xlsx' when ready.
     const buf = req.file.buffer;
     const text = buf.toString('utf8');
 
@@ -445,7 +514,7 @@ exports.importBorrowers = async (req, res) => {
 
       const b = await Borrower.create({ name, phone, nationalId, status: 'active' });
       created.push(toApi(b));
-      if (created.length >= 1000) break; // safety cap
+      if (created.length >= 1000) break;
     }
 
     res.status(202).json({ received: true, count: created.length, items: created });
@@ -455,21 +524,19 @@ exports.importBorrowers = async (req, res) => {
   }
 };
 
-// ---------- Per-borrower quick report ----------
+// ---------- Reports ----------
 exports.summaryReport = async (req, res) => {
   try {
     if (!Borrower) return res.status(404).json({ error: 'Borrower not found' });
     const b = await Borrower.findByPk(req.params.id);
     if (!b) return res.status(404).json({ error: 'Borrower not found' });
 
-    // Loans
     let loans = [];
     if (Loan) {
       loans = await Loan.findAll({ where: { borrowerId: b.id } });
     }
     const totalDisbursed = loans.reduce((acc, l) => acc + safeNum(l.amount), 0);
 
-    // Repayments
     let reps = [];
     if (LoanRepayment && Loan) {
       reps = await LoanRepayment.findAll({
@@ -478,7 +545,6 @@ exports.summaryReport = async (req, res) => {
     }
     const totalRepayments = reps.reduce((acc, r) => acc + safeNum(r.amount || r.amountPaid), 0);
 
-    // Savings
     let balance = 0;
     let txCount = 0;
     if (SavingsTransaction) {
@@ -503,5 +569,42 @@ exports.summaryReport = async (req, res) => {
   } catch (error) {
     console.error('summaryReport error:', error);
     res.status(500).json({ error: 'Failed to build report' });
+  }
+};
+
+exports.globalBorrowerReport = async (req, res) => {
+  try {
+    if (!Borrower) return res.json([]);
+    const { branchId, status } = req.query;
+
+    const where = {};
+    if (branchId) where.branchId = branchId;
+    if (status) where.status = status;
+
+    const borrowers = await Borrower.findAll({ where });
+
+    const report = await Promise.all(borrowers.map(async (b) => {
+      let loans = Loan ? await Loan.count({ where: { borrowerId: b.id } }) : 0;
+      let totalLoanAmount = Loan ? await Loan.sum('amount', { where: { borrowerId: b.id } }) || 0 : 0;
+      let totalRepayments = 0;
+      if (LoanRepayment && Loan) {
+        totalRepayments = await LoanRepayment.sum('amount', {
+          include: [{ model: Loan, where: { borrowerId: b.id }, attributes: [] }]
+        }) || 0;
+      }
+      return {
+        id: b.id,
+        name: b.name,
+        status: b.status,
+        loansCount: loans,
+        loansTotal: totalLoanAmount,
+        repaymentsTotal: totalRepayments
+      };
+    }));
+
+    res.json({ items: report, total: report.length });
+  } catch (error) {
+    console.error('globalBorrowerReport error:', error);
+    res.status(500).json({ error: 'Failed to generate borrower report' });
   }
 };
