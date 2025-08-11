@@ -1,8 +1,7 @@
-// src/controllers/groupReportsController.js
 const { Op } = require('sequelize');
 const models = require('../models');
 
-const Group = models.BorrowerGroup || models.Group || null;
+const BorrowerGroup = models.BorrowerGroup || models.Group || null;
 const GroupMember = models.BorrowerGroupMember || models.GroupMember || null;
 const Loan = models.Loan || null;
 const Borrower = models.Borrower || null;
@@ -11,56 +10,61 @@ const safeNum = (v) => Number(v || 0);
 
 exports.getGroupSummary = async (req, res) => {
   try {
-    if (!Group) return res.status(501).json({ error: 'Group model not available' });
+    let result = {
+      totalGroups: 0,
+      activeGroups: 0,
+      totalLoans: 0,
+      par: '0%'
+    };
 
     // Total groups
-    const totalGroups = await Group.count();
+    if (BorrowerGroup) {
+      result.totalGroups = await BorrowerGroup.count();
+    }
 
-    // Active groups (groups that have at least one member or active loan)
-    let activeGroups = 0;
-    if (GroupMember) {
-      const activeGroupIds = await GroupMember.findAll({
+    // Active groups (groups with at least one active loan)
+    if (BorrowerGroup && Loan) {
+      const activeGroupIds = await Loan.findAll({
         attributes: ['groupId'],
-        group: ['groupId'],
+        where: { status: 'active', groupId: { [Op.ne]: null } },
+        group: ['groupId']
       });
-      activeGroups = activeGroupIds.length;
+      result.activeGroups = activeGroupIds.length;
     }
 
-    // Total loans issued to groups
-    let totalLoans = 0;
-    if (Loan && Borrower && GroupMember) {
-      const groupMemberBorrowerIds = await GroupMember.findAll({
-        attributes: ['borrowerId'],
-      });
-
-      const borrowerIds = groupMemberBorrowerIds.map((m) => m.borrowerId);
-      if (borrowerIds.length > 0) {
-        const loans = await Loan.findAll({
-          where: { borrowerId: { [Op.in]: borrowerIds } },
-          attributes: ['amount'],
-        });
-        totalLoans = loans.reduce((acc, loan) => acc + safeNum(loan.amount), 0);
-      }
-    }
-
-    // PAR (Portfolio at Risk) — simplistic version
-    let par = '0%';
+    // Total loan balances for groups
     if (Loan) {
-      const overdueLoans = await Loan.count({
-        where: { status: 'overdue' },
-      });
-      const totalLoanCount = await Loan.count();
-      par = totalLoanCount > 0 ? `${((overdueLoans / totalLoanCount) * 100).toFixed(2)}%` : '0%';
+      const loans = await Loan.findAll({ where: { groupId: { [Op.ne]: null } } });
+      result.totalLoans = loans.reduce((sum, l) => sum + safeNum(l.amount), 0);
     }
 
-    return res.json({
-      totalGroups,
-      activeGroups,
-      totalLoans,
-      par,
-    });
+    // Portfolio at Risk (PAR) for group loans
+    if (Loan) {
+      const overdueLoans = await Loan.findAll({
+        where: {
+          groupId: { [Op.ne]: null },
+          status: 'active',
+          dueDate: { [Op.lt]: new Date() },
+          balance: { [Op.gt]: 0 }
+        }
+      });
+      const overdueAmount = overdueLoans.reduce((sum, l) => sum + safeNum(l.balance), 0);
+
+      const parValue = result.totalLoans > 0
+        ? ((overdueAmount / result.totalLoans) * 100).toFixed(2)
+        : 0;
+
+      result.par = `${parValue}%`;
+    }
+
+    return res.json(result);
   } catch (error) {
     console.error('getGroupSummary error:', error);
-    res.status(500).json({ error: 'Failed to load group report data' });
+    return res.json({
+      totalGroups: 0,
+      activeGroups: 0,
+      totalLoans: 0,
+      par: '0%'
+    });
   }
 };

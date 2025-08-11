@@ -3,9 +3,7 @@ const router = express.Router();
 const { authenticateUser } = require('../middleware/authMiddleware');
 const groupReportsCtrl = require('../controllers/groupReportsController');
 
-// Existing group routes here...
-
-// 📌 New Reports Endpoint
+// Other group routes...
 router.get('/reports/summary', authenticateUser, groupReportsCtrl.getGroupSummary);
 
 module.exports = router;

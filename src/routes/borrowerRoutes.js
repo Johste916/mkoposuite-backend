@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { authenticateUser } = require('../middleware/authMiddleware');
 const ctrl = require('../controllers/borrowerController');
+const borrowerReportsCtrl = require('../controllers/borrowerReportsController');
+const groupReportsCtrl = require('../controllers/groupReportsController'); // ✅ force import
 
 let multer;
 try { multer = require('multer'); } catch {}
@@ -16,10 +18,24 @@ const requireMulterSingleFile = hasMulter
   ? upload.single('file')
   : (req, res) => res.status(501).json({ error: 'File upload not enabled.' });
 
-// Borrowers CRUD
+/* ---------------- Reports BEFORE :id routes ---------------- */
+router.get('/reports/summary', authenticateUser, borrowerReportsCtrl.getBorrowerSummary);
+router.get('/groups/reports/summary', authenticateUser, groupReportsCtrl.getGroupSummary);
+router.get('/reports', authenticateUser, ctrl.globalBorrowerReport);
+
+/* ---------------- Groups ---------------- */
+router.get('/groups', authenticateUser, ctrl.listGroups);
+router.post('/groups', authenticateUser, ctrl.createGroup);
+router.get('/groups/:groupId', authenticateUser, ctrl.getGroup);
+router.put('/groups/:groupId', authenticateUser, ctrl.updateGroup);
+router.post('/groups/:groupId/members', authenticateUser, ctrl.addGroupMember);
+router.delete('/groups/:groupId/members/:borrowerId', authenticateUser, ctrl.removeGroupMember);
+router.get('/groups/reports', authenticateUser, ctrl.groupReports);
+router.post('/groups/:groupId/import', authenticateUser, requireMulterSingleFile, ctrl.importGroupMembers);
+
+/* ---------------- Borrowers CRUD ---------------- */
 router.get('/', authenticateUser, ctrl.getAllBorrowers);
 router.post('/', authenticateUser, ctrl.createBorrower);
-router.get('/:id', authenticateUser, ctrl.getBorrowerById);
 router.put('/:id', authenticateUser, ctrl.updateBorrower);
 router.delete('/:id', authenticateUser, ctrl.deleteBorrower);
 
@@ -44,21 +60,11 @@ router.post('/:id/kyc', authenticateUser, requireMulterAny, ctrl.uploadKyc);
 router.get('/:id/kyc', authenticateUser, ctrl.listKyc);
 router.get('/kyc/queue', authenticateUser, ctrl.listKycQueue);
 
-// Groups
-router.get('/groups', authenticateUser, ctrl.listGroups);
-router.post('/groups', authenticateUser, ctrl.createGroup);
-router.get('/groups/:groupId', authenticateUser, ctrl.getGroup);
-router.put('/groups/:groupId', authenticateUser, ctrl.updateGroup);
-router.post('/groups/:groupId/members', authenticateUser, ctrl.addGroupMember);
-router.delete('/groups/:groupId/members/:borrowerId', authenticateUser, ctrl.removeGroupMember);
-router.get('/groups/reports', authenticateUser, ctrl.groupReports);
-router.post('/groups/:groupId/import', authenticateUser, requireMulterSingleFile, ctrl.importGroupMembers);
-
 // Import borrowers
 router.post('/import', authenticateUser, requireMulterSingleFile, ctrl.importBorrowers);
 
-// Reports
-router.get('/reports', authenticateUser, ctrl.globalBorrowerReport);
+// Per borrower summary
+router.get('/:id', authenticateUser, ctrl.getBorrowerById);
 router.get('/:id/report/summary', authenticateUser, ctrl.summaryReport);
 
 module.exports = router;
