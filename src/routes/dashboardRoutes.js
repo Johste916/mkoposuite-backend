@@ -1,24 +1,35 @@
 // src/routes/dashboardRoutes.js
-const express = require('express');
-const router = express.Router();
-const dc = require('../controllers/dashboardController');
-const { authenticateUser } = require('../middleware/authMiddleware');
+"use strict";
 
-// Guard: return 501 if a controller fn is missing to avoid "callback undefined" crashes
+const express = require("express");
+const router = express.Router();
+const dc = require("../controllers/dashboardController");
+const { authenticateUser } = require("../middleware/authMiddleware");
+
+/**
+ * Safe wrapper for missing controller functions
+ * Prevents "callback undefined" crashes by returning 501
+ */
 const safe = (fn, name) =>
-  typeof fn === 'function'
+  typeof fn === "function"
     ? fn
     : (_req, res) => res.status(501).json({ error: `${name} not implemented` });
 
-// Routes
-router.get('/summary', authenticateUser, safe(dc.getDashboardSummary, 'getDashboardSummary'));
-router.get('/defaulters', authenticateUser, safe(dc.getDefaulters, 'getDefaulters'));
-router.get('/monthly-trends', authenticateUser, safe(dc.getMonthlyTrends, 'getMonthlyTrends'));
+// ======================
+// Dashboard Routes
+// ======================
 
-router.get('/activity', authenticateUser, safe(dc.getActivityFeed, 'getActivityFeed'));
-router.post('/activity/:id/comment', authenticateUser, safe(dc.addActivityComment, 'addActivityComment'));
-router.post('/activity/:id/assign', authenticateUser, safe(dc.assignActivityTask, 'assignActivityTask'));
+// Summary & Trends
+router.get("/summary", authenticateUser, safe(dc.getDashboardSummary, "getDashboardSummary"));
+router.get("/defaulters", authenticateUser, safe(dc.getDefaulters, "getDefaulters"));
+router.get("/monthly-trends", authenticateUser, safe(dc.getMonthlyTrends, "getMonthlyTrends"));
 
-router.get('/communications', authenticateUser, safe(dc.getGeneralCommunications, 'getGeneralCommunications'));
+// Activity & Tasks
+router.get("/activity", authenticateUser, safe(dc.getActivityFeed, "getActivityFeed"));
+router.post("/activity/:id/comment", authenticateUser, safe(dc.addActivityComment, "addActivityComment"));
+router.post("/activity/:id/assign", authenticateUser, safe(dc.assignActivityTask, "assignActivityTask"));
+
+// Communications
+router.get("/communications", authenticateUser, safe(dc.getGeneralCommunications, "getGeneralCommunications"));
 
 module.exports = router;

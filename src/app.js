@@ -3,23 +3,25 @@ const express = require('express');
 const path = require('path');
 const app = express();
 
-// Optional deps
+/* ------------------------------ Optional deps ------------------------------ */
 let helmet, compression, morgan;
 try { helmet = require('helmet'); } catch {}
 try { compression = require('compression'); } catch {}
 try { morgan = require('morgan'); } catch {}
 
+/* ---------------------------- App base settings ---------------------------- */
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 
-// Security & perf
+/* -------------------------- Security & performance ------------------------- */
 if (helmet) {
+  // Allow serving uploaded files cross-origin (for Netlify/Vite dev)
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 }
 if (compression) app.use(compression());
 if (process.env.NODE_ENV !== 'production' && morgan) app.use(morgan('dev'));
 
-// ---- CORS ----
+/* ----------------------------------- CORS ---------------------------------- */
 const defaultOrigins = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
@@ -58,18 +60,55 @@ app.use((req, res, next) => {
   next();
 });
 
-// Parsers
+/* --------------------------------- Parsers --------------------------------- */
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Static uploads
+/* ----------------------------- Static /uploads ----------------------------- */
 const uploadsDir = path.resolve(__dirname, '../uploads');
 app.use('/uploads', express.static(uploadsDir, {
   maxAge: '1d',
   setHeaders: (res) => res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin'),
 }));
 
-// ---- Routes ----
+/* ------------------------ Helpers: safe route loading ----------------------- */
+/**
+ * Returns a dummy router that serves predictable sample data.
+ * Use this when the real routes don't exist yet, so the frontend never renders blank.
+ */
+function makeDummyRouter(sample) {
+  const r = express.Router();
+  r.get('/', (_req, res) => res.json(sample));
+  // Optionally stabilize "details" views so clicking rows won't 404:
+  r.get('/:id', (req, res) => {
+    const id = Number(req.params.id) || req.params.id;
+    if (Array.isArray(sample)) {
+      const found = sample.find(x => String(x.id) === String(id)) || sample[0] || null;
+      return res.json(found);
+    }
+    return res.json(sample);
+  });
+  return r;
+}
+
+/**
+ * Tries to require a routes module at `routePath`. If not found,
+ * returns the provided dummy router instead (with console notice).
+ */
+function safeLoadRoutes(routePath, dummyRouter) {
+  try {
+    // eslint-disable-next-line import/no-dynamic-require, global-require
+    const mod = require(routePath);
+    return mod && mod.default ? mod.default : mod;
+  } catch (e) {
+    const pretty = routePath.replace(__dirname, '…');
+    console.warn(`⚠️  Using dummy routes for ${pretty} — create this file to enable real API.`);
+    return dummyRouter;
+  }
+}
+
+/* --------------------------------- Routes ---------------------------------- */
+/* Existing, already in your project */
 const authRoutes = require('./routes/authRoutes');
 const borrowerRoutes = require('./routes/borrowerRoutes');
 const loanRoutes = require('./routes/loanRoutes');
@@ -86,6 +125,91 @@ const userRoleRoutes = require('./routes/userRoleRoutes');
 const userBranchRoutes = require('./routes/userBranchRoutes');
 const loanProductRoutes = require('./routes/loanProductRoutes'); // ✔ mounted below
 
+/* New modules (LoanDisk parity) — try to load real files, else mount dummy */
+const collateralRoutes = safeLoadRoutes(
+  './routes/collateralRoutes',
+  makeDummyRouter([
+    { id: 1, borrower: 'John Doe', item: 'Laptop', model: 'Dell', status: 'Active' },
+    { id: 2, borrower: 'Jane Smith', item: 'Car', model: 'Toyota', status: 'Released' },
+  ])
+);
+
+const collectionSheetsRoutes = safeLoadRoutes(
+  './routes/collectionSheetsRoutes',
+  makeDummyRouter([
+    { id: 1, type: 'daily', date: '2025-08-01', count: 12 },
+    { id: 2, type: 'missed', date: '2025-08-02', count: 5 },
+  ])
+);
+
+const savingsTransactionsRoutes = safeLoadRoutes(
+  './routes/savingsTransactionsRoutes',
+  makeDummyRouter([
+    { id: 1, borrower: 'John Doe', type: 'deposit', amount: 150, date: '2025-08-01' },
+    { id: 2, borrower: 'Jane Smith', type: 'withdrawal', amount: 80, date: '2025-08-03' },
+  ])
+);
+
+const investorsRoutes = safeLoadRoutes(
+  './routes/investorsRoutes',
+  makeDummyRouter([
+    { id: 1, name: 'Alpha Capital', phone: '255700000001', products: 2 },
+    { id: 2, name: 'Beta Partners', phone: '255700000002', products: 1 },
+  ])
+);
+
+const esignaturesRoutes = safeLoadRoutes(
+  './routes/esignaturesRoutes',
+  makeDummyRouter([
+    { id: 1, name: 'Loan Agreement #1', sent: '2025-08-01', status: 'Signed' },
+    { id: 2, name: 'Loan Agreement #2', sent: '2025-08-03', status: 'Pending' },
+  ])
+);
+
+const payrollRoutes = safeLoadRoutes(
+  './routes/payrollRoutes',
+  makeDummyRouter([
+    { id: 1, period: '2025-07', staffCount: 8, total: 4200000 },
+    { id: 2, period: '2025-08', staffCount: 9, total: 4450000 },
+  ])
+);
+
+const expensesRoutes = safeLoadRoutes(
+  './routes/expensesRoutes',
+  makeDummyRouter([
+    { id: 1, type: 'Office Rent', amount: 900000, date: '2025-08-01' },
+    { id: 2, type: 'Fuel', amount: 120000, date: '2025-08-04' },
+  ])
+);
+
+const otherIncomeRoutes = safeLoadRoutes(
+  './routes/otherIncomeRoutes',
+  makeDummyRouter([
+    { id: 1, source: 'Training Fees', amount: 250000, date: '2025-08-02' },
+    { id: 2, source: 'Sale of Scrap', amount: 60000, date: '2025-08-05' },
+  ])
+);
+
+const assetManagementRoutes = safeLoadRoutes(
+  './routes/assetManagementRoutes',
+  makeDummyRouter([
+    { id: 1, name: 'Branch Laptop 01', category: 'Electronics', status: 'In Use' },
+    { id: 2, name: 'Motorcycle 02', category: 'Vehicle', status: 'Maintenance' },
+  ])
+);
+
+const accountingRoutes = safeLoadRoutes(
+  './routes/accountingRoutes',
+  makeDummyRouter({
+    cashflowMonthly: [
+      { month: 'Jan', inflow: 5000000, outflow: 3200000 },
+      { month: 'Feb', inflow: 6200000, outflow: 4100000 },
+    ],
+    trialBalance: [{ account: '1000 Cash', debit: 1200000, credit: 0 }],
+  })
+);
+
+/* --------------------------------- Mounting -------------------------------- */
 app.use('/api/login', authRoutes);
 app.use('/api/borrowers', borrowerRoutes);
 app.use('/api/loans', loanRoutes);
@@ -102,7 +226,19 @@ app.use('/api/user-roles', userRoleRoutes);
 app.use('/api/user-branches', userBranchRoutes);
 app.use('/api/loan-products', loanProductRoutes); // ✔ fixes 404
 
-// Legacy redirects
+// New mounts (work with real route files OR dummy routers)
+app.use('/api/collateral', collateralRoutes);
+app.use('/api/collections', collectionSheetsRoutes);
+app.use('/api/savings-transactions', savingsTransactionsRoutes);
+app.use('/api/investors', investorsRoutes);
+app.use('/api/esignatures', esignaturesRoutes);
+app.use('/api/payroll', payrollRoutes);
+app.use('/api/expenses', expensesRoutes);
+app.use('/api/other-income', otherIncomeRoutes);
+app.use('/api/assets', assetManagementRoutes);
+app.use('/api/accounting', accountingRoutes);
+
+/* ------------------------------ Legacy redirects --------------------------- */
 app.get('/api/loans/borrower/:id', (req, res) =>
   res.redirect(307, `/api/borrowers/${encodeURIComponent(req.params.id)}/loans`)
 );
@@ -116,7 +252,7 @@ app.get('/api/savings/borrower/:id', (req, res) =>
   res.redirect(307, `/api/borrowers/${encodeURIComponent(req.params.id)}/savings`)
 );
 
-// Health checks
+/* -------------------------------- Healthchecks ----------------------------- */
 app.get('/api/test', (_req, res) => res.send('✅ API is working!'));
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
@@ -136,7 +272,7 @@ try {
   // models not available during some build steps — ignore
 }
 
-// 404
+/* ----------------------------------- 404 ----------------------------------- */
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ error: 'Not found' });
@@ -144,7 +280,7 @@ app.use((req, res) => {
   res.status(404).send('Not found');
 });
 
-// Error handler
+/* ------------------------------- Error handler ----------------------------- */
 app.use((err, _req, res, _next) => {
   const status = err.status || 500;
   const message = err.expose ? err.message : (status === 500 ? 'Internal server error' : err.message);
