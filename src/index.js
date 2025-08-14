@@ -1,6 +1,7 @@
-// src/index.js
+// backend/src/index.js
 const app = require("./app");
-const { sequelize } = require("./models");
+const db = require("./models"); // <- bring full db so we can target models
+const { sequelize } = db;
 
 // 🛡 Auth middleware (JWT)
 const { authenticateUser } = require("./middleware/authMiddleware");
@@ -16,7 +17,6 @@ const cron = require("node-cron");
 let penaltiesTask;
 try {
   const { runPenaltiesJob } = require("./jobs/penaltiesJob");
-  // Every night at 02:00 server time
   penaltiesTask = cron.schedule("0 2 * * *", async () => {
     console.log("[cron] penalties job started");
     try {
@@ -27,7 +27,6 @@ try {
     }
   });
 } catch (e) {
-  // If the job file doesn’t exist yet, don’t crash the app
   console.warn("⚠️ penaltiesJob not wired (optional):", e.message);
 }
 
@@ -39,14 +38,25 @@ let server;
     await sequelize.authenticate();
     console.log("✅ Connected to the database");
 
+    /**
+     * 🧩 SCHEMA MANAGEMENT
+     * - Never use global sequelize.sync() on a DB managed by migrations.
+     * - If you only need the 'settings' table created, enable SYNC_SETTINGS_ONLY=true once.
+     */
+    const syncSettingsOnly = process.env.SYNC_SETTINGS_ONLY === "true";
+
+    if (syncSettingsOnly) {
+      console.log("🔧 Syncing ONLY Setting model to ensure 'settings' table exists…");
+      // This will create 'settings' if missing and won't touch other tables.
+      await db.Setting.sync(); // no { alter } – keep non-destructive
+      console.log("✅ Setting model sync completed");
+    } else {
+      console.log("⏭  Skipping schema sync (use migrations or set SYNC_SETTINGS_ONLY=true to sync only settings)");
+    }
+
     server = app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
     });
-
-    // If you use migrations via CLI, keep sync off.
-    // if (process.env.NODE_ENV !== 'production') {
-    //   await sequelize.sync({ alter: false });
-    // }
   } catch (err) {
     console.error("❌ Unable to connect to the database:", err);
     process.exit(1);
@@ -73,7 +83,6 @@ async function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-
 process.on("unhandledRejection", (reason) => {
   console.error("⚠️ Unhandled Rejection:", reason);
 });

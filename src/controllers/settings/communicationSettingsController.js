@@ -1,9 +1,8 @@
-// controllers/settings/communicationSettingsController.js
-const { Communication, CommunicationAttachment } = require('../../models');
-const { Op } = require('sequelize');
+const db = require('../../models');
+const { Communication, CommunicationAttachment } = db;
+const { Op } = db.Sequelize;
 
-// Helper for case-insensitive LIKE across dialects
-const likeOp = Op.iLike || Op.substring;
+const likeOp = db.sequelize.getDialect() === 'postgres' ? Op.iLike : Op.like;
 
 exports.listCommunications = async (req, res) => {
   try {
@@ -20,10 +19,7 @@ exports.listCommunications = async (req, res) => {
     } = req.query;
 
     const where = {};
-    if (q) where[Op.or] = [
-      { title: { [likeOp]: `%${q}%` } },
-      { text:  { [likeOp]: `%${q}%` } },
-    ];
+    if (q) where[Op.or] = [{ title: { [likeOp]: `%${q}%` } }, { text: { [likeOp]: `%${q}%` } }];
     if (type) where.type = type;
     if (priority) where.priority = priority;
     if (typeof isActive !== 'undefined') where.isActive = String(isActive) === 'true';
@@ -49,10 +45,10 @@ exports.listCommunications = async (req, res) => {
 exports.createCommunication = async (req, res) => {
   try {
     const payload = {
-      title: req.body.title,
-      text: req.body.text,
-      type: req.body.type || 'notice',             // 'notice','policy','alert','guideline'
-      priority: req.body.priority || 'normal',     // 'low','normal','high','critical'
+      title: req.body.title?.trim(),
+      text: req.body.text?.trim(),
+      type: req.body.type || 'notice',
+      priority: req.body.priority || 'normal',
       audienceRole: req.body.audienceRole || null,
       audienceBranchId: req.body.audienceBranchId || null,
       startAt: req.body.startAt || null,
@@ -115,12 +111,10 @@ exports.deleteCommunication = async (req, res) => {
   }
 };
 
-// Attachments (assumes FE handles file upload to storage and posts metadata)
 exports.addAttachment = async (req, res) => {
   try {
     const { id } = req.params;
     const { fileName, mimeType, size, fileUrl } = req.body;
-
     if (!fileName || !mimeType || !size || !fileUrl) {
       return res.status(400).json({ error: 'fileName, mimeType, size, fileUrl are required' });
     }
@@ -128,10 +122,7 @@ exports.addAttachment = async (req, res) => {
     const comm = await Communication.findByPk(id);
     if (!comm) return res.status(404).json({ error: 'Communication not found' });
 
-    const att = await CommunicationAttachment.create({
-      communicationId: id,
-      fileName, mimeType, size, fileUrl
-    });
+    const att = await CommunicationAttachment.create({ communicationId: id, fileName, mimeType, size, fileUrl });
     res.status(201).json(att);
   } catch (e) {
     console.error('addAttachment error:', e);
@@ -142,9 +133,7 @@ exports.addAttachment = async (req, res) => {
 exports.removeAttachment = async (req, res) => {
   try {
     const { id, attId } = req.params;
-    const att = await CommunicationAttachment.findOne({
-      where: { id: attId, communicationId: id }
-    });
+    const att = await CommunicationAttachment.findOne({ where: { id: attId, communicationId: id } });
     if (!att) return res.status(404).json({ error: 'Attachment not found' });
 
     await att.destroy();

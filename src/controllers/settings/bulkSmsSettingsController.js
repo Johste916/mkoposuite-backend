@@ -1,67 +1,44 @@
 const db = require('../../models');
 const Setting = db.Setting;
 
-const BULK_SMS_KEY = 'bulkSmsSettings';
+const KEY = 'bulkSmsSettings';
 
 /**
- * @desc    Get Bulk SMS Settings
- * @route   GET /api/settings/bulk-sms-settings
- * @access  Private
+ * @desc GET /api/settings/bulk-sms-settings
  */
-const getBulkSmsSettings = async (req, res) => {
+const getBulkSmsSettings = async (_req, res) => {
   try {
-    const setting = await Setting.findOne({ where: { key: BULK_SMS_KEY } });
-
-    res.status(200).json(setting?.value || {});
+    const row = await Setting.findOne({ where: { key: KEY } });
+    const val = row?.value || {};
+    res.status(200).json(val);
   } catch (err) {
     console.error('❌ Error fetching Bulk SMS settings:', err);
-    res.status(500).json({
-      message: 'Failed to fetch Bulk SMS settings',
-      error: err.message
-    });
+    res.status(500).json({ message: 'Failed to fetch Bulk SMS settings', error: err.message });
   }
 };
 
 /**
- * @desc    Update Bulk SMS Settings
- * @route   PUT /api/settings/bulk-sms-settings
- * @access  Private
+ * @desc PUT /api/settings/bulk-sms-settings
  */
 const updateBulkSmsSettings = async (req, res) => {
   try {
-    const {
-      gatewayUrl = '',
-      senderId = '',
-      apiKey = '',
-      enableSmsNotifications = false,
-      messageTemplate = ''
-    } = req.body;
+    const existing = await Setting.findOne({ where: { key: KEY } });
+    const curr = existing?.value || {};
 
-    const [updated] = await Setting.upsert({
-      key: BULK_SMS_KEY,
-      value: {
-        gatewayUrl,
-        senderId,
-        apiKey,
-        enableSmsNotifications,
-        messageTemplate
-      }
-    });
+    const next = {
+      gatewayUrl: req.body.gatewayUrl ?? curr.gatewayUrl ?? '',
+      senderId: req.body.senderId ?? curr.senderId ?? '',
+      apiKey: req.body.apiKey ?? curr.apiKey ?? '',
+      enableSmsNotifications: !!(req.body.enableSmsNotifications ?? curr.enableSmsNotifications ?? false),
+      messageTemplate: req.body.messageTemplate ?? curr.messageTemplate ?? '',
+    };
 
-    res.status(200).json({
-      message: 'Bulk SMS settings updated successfully',
-      settings: updated?.value || req.body
-    });
+    await Setting.upsert({ key: KEY, value: next, updatedBy: req.user?.id || null });
+    res.status(200).json({ message: 'Bulk SMS settings updated successfully', settings: next });
   } catch (err) {
     console.error('❌ Error updating Bulk SMS settings:', err);
-    res.status(500).json({
-      message: 'Failed to update Bulk SMS settings',
-      error: err.message
-    });
+    res.status(500).json({ message: 'Failed to update Bulk SMS settings', error: err.message });
   }
 };
 
-module.exports = {
-  getBulkSmsSettings,
-  updateBulkSmsSettings
-};
+module.exports = { getBulkSmsSettings, updateBulkSmsSettings };

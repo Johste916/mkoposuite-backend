@@ -1,74 +1,39 @@
 const db = require('../../models');
 const Setting = db.Setting;
 
-const SETTING_KEY = 'savingAccountSettings';
+const KEY = 'savingAccountSettings';
 
-/**
- * @desc    Get Saving Account Settings
- * @route   GET /api/settings/saving-settings
- * @access  Private
- */
-exports.getSavingAccountSettings = async (req, res) => {
+const DEFAULTS = {
+  minOpeningBalance: 0,
+  interestRate: 0,
+  allowOverdraft: false,
+  overdraftLimit: 0,
+};
+
+exports.getSavingAccountSettings = async (_req, res) => {
   try {
-    const setting = await Setting.findOne({
-      where: { key: SETTING_KEY }
-    });
-
-    const defaultSettings = {
-      minOpeningBalance: 0,
-      interestRate: 0,
-      allowOverdraft: false,
-      overdraftLimit: 0
-    };
-
-    res.status(200).json(setting?.value || defaultSettings);
+    const row = await Setting.findOne({ where: { key: KEY } });
+    res.status(200).json({ ...DEFAULTS, ...(row?.value || {}) });
   } catch (error) {
     console.error('❌ Error fetching saving account settings:', error);
-    res.status(500).json({
-      message: 'Failed to retrieve saving account settings',
-      error: error.message
-    });
+    res.status(500).json({ message: 'Failed to retrieve saving account settings', error: error.message });
   }
 };
 
-/**
- * @desc    Update Saving Account Settings
- * @route   PUT /api/settings/saving-settings
- * @access  Private
- */
 exports.updateSavingAccountSettings = async (req, res) => {
   try {
-    const {
-      minOpeningBalance = 0,
-      interestRate = 0,
-      allowOverdraft = false,
-      overdraftLimit = 0
-    } = req.body;
+    const existing = await Setting.findOne({ where: { key: KEY } });
+    const curr = existing?.value || {};
+    const next = {
+      ...DEFAULTS,
+      ...curr,
+      ...req.body,
+    };
 
-    const [updated] = await Setting.upsert({
-      key: SETTING_KEY,
-      value: {
-        minOpeningBalance,
-        interestRate,
-        allowOverdraft,
-        overdraftLimit
-      }
-    });
-
-    res.status(200).json({
-      message: 'Saving account settings updated successfully',
-      settings: {
-        minOpeningBalance,
-        interestRate,
-        allowOverdraft,
-        overdraftLimit
-      }
-    });
+    await Setting.upsert({ key: KEY, value: next, updatedBy: req.user?.id || null });
+    res.status(200).json({ message: 'Saving account settings updated successfully', settings: next });
   } catch (error) {
     console.error('❌ Error updating saving account settings:', error);
-    res.status(500).json({
-      message: 'Failed to update saving account settings',
-      error: error.message
-    });
+    res.status(500).json({ message: 'Failed to update saving account settings', error: error.message });
   }
 };

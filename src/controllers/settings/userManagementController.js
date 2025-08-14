@@ -1,37 +1,26 @@
+// backend/src/controllers/settings/userManagementController.js
 const db = require('../../models');
 const Setting = db.Setting;
 
-// Prefix used for all user management related keys
-const USER_KEY_PREFIX = 'userManagement';
+const KEY = 'userManagementSettings';
 
-const USER_KEYS = [
-  'defaultRole',
-  'roleApprovalRequired',
-  'allowMultipleBranchAccess',
-  'accountLockThreshold'
-];
+const DEFAULTS = {
+  defaultRole: 'user',              // 'user' | 'manager' | 'admin' ... (your roles)
+  roleApprovalRequired: false,      // require admin approval when role changes
+  allowMultipleBranchAccess: false, // can a user belong to multiple branches
+  accountLockThreshold: 5,          // failed logins before lock
+};
 
 /**
  * @desc    Get user management settings
  * @route   GET /api/settings/user-management
  * @access  Private
  */
-const getUsers = async (req, res) => {
+const getUsers = async (_req, res) => {
   try {
-    const keys = USER_KEYS.map(k => `${USER_KEY_PREFIX}_${k}`);
-
-    const settings = await Setting.findAll({
-      where: { key: keys }
-    });
-
-    const response = {};
-    USER_KEYS.forEach(k => {
-      const fullKey = `${USER_KEY_PREFIX}_${k}`;
-      const found = settings.find(s => s.key === fullKey);
-      response[k] = found ? found.value : null;
-    });
-
-    res.status(200).json(response);
+    const row = await Setting.findOne({ where: { key: KEY } });
+    const value = { ...DEFAULTS, ...(row?.value || {}) };
+    res.status(200).json(value);
   } catch (error) {
     console.error('❌ Error fetching user management settings:', error);
     res.status(500).json({ message: 'Failed to fetch user management settings', error: error.message });
@@ -39,27 +28,33 @@ const getUsers = async (req, res) => {
 };
 
 /**
- * @desc    Update user management settings
+ * @desc    Update user management settings (partial merge)
  * @route   PUT /api/settings/user-management
  * @access  Private
  */
 const updateUser = async (req, res) => {
   try {
-    const updates = req.body;
+    // whitelist only known fields
+    const payload = {};
+    if (typeof req.body.defaultRole !== 'undefined') payload.defaultRole = String(req.body.defaultRole);
+    if (typeof req.body.roleApprovalRequired !== 'undefined') payload.roleApprovalRequired = !!req.body.roleApprovalRequired;
+    if (typeof req.body.allowMultipleBranchAccess !== 'undefined') payload.allowMultipleBranchAccess = !!req.body.allowMultipleBranchAccess;
+    if (typeof req.body.accountLockThreshold !== 'undefined') {
+      const n = Number(req.body.accountLockThreshold);
+      payload.accountLockThreshold = Number.isFinite(n) && n >= 0 ? n : DEFAULTS.accountLockThreshold;
+    }
 
-    const operations = USER_KEYS
-      .filter(key => Object.prototype.hasOwnProperty.call(updates, key))
-      .map(key => {
-        const fullKey = `${USER_KEY_PREFIX}_${key}`;
-        return Setting.upsert({
-          key: fullKey,
-          value: updates[key]
-        });
-      });
+    const existing = await Setting.findOne({ where: { key: KEY } });
+    const curr = existing?.value || {};
+    const next = { ...DEFAULTS, ...curr, ...payload };
 
-    await Promise.all(operations);
+    await Setting.upsert({
+      key: KEY,
+      value: next,
+      updatedBy: req.user?.id || null,
+    });
 
-    res.status(200).json({ message: 'User management settings updated successfully' });
+    res.status(200).json({ message: 'User management settings updated successfully', settings: next });
   } catch (error) {
     console.error('❌ Error updating user management settings:', error);
     res.status(500).json({ message: 'Failed to update user management settings', error: error.message });
@@ -68,5 +63,5 @@ const updateUser = async (req, res) => {
 
 module.exports = {
   getUsers,
-  updateUser
+  updateUser,
 };

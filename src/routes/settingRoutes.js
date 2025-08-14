@@ -1,19 +1,16 @@
-// routes/settingRoutes.js
-
+// backend/src/routes/settingRoutes.js
 const express = require('express');
 const router = express.Router();
 const { authenticateUser } = require('../middleware/authMiddleware');
-// If you have role-based guard, uncomment and use it on the comms routes
-// const { authorizeRole } = require('../middleware/authorizeRole');
 
-// ==============================
-// 📦 Controllers
-// ==============================
+/* ==============================
+   Controllers (existing)
+   ============================== */
 const loanCategoriesController = require('../controllers/settings/loanCategoriesController');
 const loanSettingsController = require('../controllers/settings/loanSettingsController');
 const systemSettingsController = require('../controllers/settings/systemSettingsController');
 const penaltySettingsController = require('../controllers/settings/penaltySettingsController');
-const integrationSettingsController = require('../controllers/settings/integrationSettingsController');
+const integrationSettingsOldController = require('../controllers/settings/integrationSettingsController');
 const branchSettingsController = require('../controllers/settings/branchSettingsController');
 const borrowerSettingsController = require('../controllers/settings/borrowerSettingsController');
 const userManagementController = require('../controllers/settings/userManagementController');
@@ -26,13 +23,28 @@ const dashboardSettingsController = require('../controllers/settings/dashboardSe
 const loanSectorSettingsController = require('../controllers/settings/loanSectorSettingsController');
 const incomeSourceSettingsController = require('../controllers/settings/incomeSourceSettingsController');
 const holidaySettingsController = require('../controllers/settings/holidaySettingsController');
-
-// ✅ NEW: Communications settings controller
 const communicationSettingsController = require('../controllers/settings/communicationSettingsController');
 
-// ==============================
-// 📁 Loan Categories
-// ==============================
+/* ==============================
+   NEW controllers (Batch 1)
+   ============================== */
+const generalSettingsController = require('../controllers/settings/generalSettingsController');
+const apiSettingsController = require('../controllers/settings/apiSettingsController');
+const smsSettingsController = require('../controllers/settings/smsSettingsController');
+const emailSettingsController = require('../controllers/settings/emailSettingsController');
+const loanFeesController = require('../controllers/settings/loanFeesController');
+const loanRemindersController = require('../controllers/settings/loanRemindersController');
+
+/* ==============================
+   NEW controllers (Loans batch 2)
+   ============================== */
+const loanCyclesController = require('../controllers/settings/loanCyclesController');
+const loanTemplatesController = require('../controllers/settings/loanTemplatesController');
+const loanApprovalsController = require('../controllers/settings/loanApprovalsController');
+
+/* ==============================
+   Loan Categories
+   ============================== */
 router.route('/loan-categories')
   .get(authenticateUser, loanCategoriesController.getLoanCategories)
   .post(authenticateUser, loanCategoriesController.createLoanCategory);
@@ -41,124 +53,124 @@ router.route('/loan-categories/:id')
   .put(authenticateUser, loanCategoriesController.updateLoanCategory)
   .delete(authenticateUser, loanCategoriesController.deleteLoanCategory);
 
-// ==============================
-// 📁 Loan Settings
-// ==============================
+/* ==============================
+   Loan Settings
+   ============================== */
 router.route('/loan-settings')
   .get(authenticateUser, loanSettingsController.getLoanSettings)
   .put(authenticateUser, loanSettingsController.updateLoanSettings);
 
-// ==============================
-// 📁 System Settings
-// ==============================
+/* ==============================
+   System Settings
+   ============================== */
 router.route('/system-settings')
   .get(authenticateUser, systemSettingsController.getSystemSettings)
   .put(authenticateUser, systemSettingsController.updateSystemSettings);
 
-// ==============================
-// 📁 Penalty Settings
-// ==============================
+/* ==============================
+   Penalty Settings
+   ============================== */
 router.route('/penalty-settings')
   .get(authenticateUser, penaltySettingsController.getPenaltySettings)
   .put(authenticateUser, penaltySettingsController.updatePenaltySettings);
 
-// ==============================
-// 📁 Integration Settings
-// ==============================
+/* ==============================
+   Integration Settings (legacy)
+   ============================== */
 router.route('/integration-settings')
-  .get(authenticateUser, integrationSettingsController.getIntegrationSettings)
-  .put(authenticateUser, integrationSettingsController.updateIntegrationSettings);
+  .get(authenticateUser, integrationSettingsOldController.getIntegrationSettings)
+  .put(authenticateUser, integrationSettingsOldController.updateIntegrationSettings);
 
-// ==============================
-// 📁 Branch Settings
-// ==============================
+/* ==============================
+   Branch Settings
+   ============================== */
 router.route('/branch-settings')
-  .get(authenticateUser, branchSettingsController.getBranchSettings)
-  .put(authenticateUser, branchSettingsController.updateBranchSettings);
+  .get(authenticateUser, branchSettingsController.getBranchSettings);
+router.put('/branch-settings/:id',
+  authenticateUser,
+  branchSettingsController.updateBranchSettings
+);
 
-// ==============================
-// 📁 Borrower Settings
-// ==============================
+/* ==============================
+   Borrower Settings
+   ============================== */
 router.route('/borrower-settings')
   .get(authenticateUser, borrowerSettingsController.getBorrowerSettings)
   .put(authenticateUser, borrowerSettingsController.updateBorrowerSettings);
 
-// ==============================
-// 📁 User Management
-// ==============================
+/* ==============================
+   User Management Settings
+   ============================== */
 router.route('/user-management')
-  .get(authenticateUser, userManagementController.getUsers);
+  .get(authenticateUser, userManagementController.getUsers)
+  .put(authenticateUser, userManagementController.updateUser);
 
-router.put('/user-management/:id', authenticateUser, userManagementController.updateUser);
-
-// ==============================
-// 📁 Bulk SMS Settings ✅
-// ==============================
+/* ==============================
+   Bulk SMS (basic gateway config)
+   ============================== */
 router.route('/bulk-sms-settings')
   .get(authenticateUser, bulkSmsSettingsController.getBulkSmsSettings)
   .put(authenticateUser, bulkSmsSettingsController.updateBulkSmsSettings);
 
-// ==============================
-// 📁 Saving Account Settings
-// ==============================
+/* ==============================
+   Saving Account Settings
+   ============================== */
 router.route('/saving-settings')
   .get(authenticateUser, savingAccountSettingsController.getSavingAccountSettings)
   .put(authenticateUser, savingAccountSettingsController.updateSavingAccountSettings);
 
-// ==============================
-// 📁 Payroll Settings
-// ==============================
+/* ==============================
+   Payroll Settings
+   ============================== */
 router.route('/payroll-settings')
   .get(authenticateUser, payrollSettingsController.getPayrollSettings)
   .put(authenticateUser, payrollSettingsController.updatePayrollSettings);
 
-// ==============================
-// 📁 Payment Settings
-// ==============================
+/* ==============================
+   Payment Settings
+   ============================== */
 router.route('/payment-settings')
   .get(authenticateUser, paymentSettingsController.getPaymentSettings)
   .put(authenticateUser, paymentSettingsController.updatePaymentSettings);
 
-// ==============================
-// 📁 Comment Settings
-// ==============================
+/* ==============================
+   Comment Settings
+   ============================== */
 router.route('/comment-settings')
   .get(authenticateUser, commentSettingsController.getCommentSettings)
   .put(authenticateUser, commentSettingsController.updateCommentSettings);
 
-// ==============================
-// 📁 Dashboard Settings
-// ==============================
+/* ==============================
+   Dashboard Settings
+   ============================== */
 router.route('/dashboard-settings')
   .get(authenticateUser, dashboardSettingsController.getDashboardSettings)
   .put(authenticateUser, dashboardSettingsController.updateDashboardSettings);
 
-// ==============================
-// 📁 Loan Sector Settings
-// ==============================
+/* ==============================
+   Loan Sector Settings
+   ============================== */
 router.route('/loan-sector-settings')
   .get(authenticateUser, loanSectorSettingsController.getLoanSectorSettings)
   .put(authenticateUser, loanSectorSettingsController.updateLoanSectorSettings);
 
-// ==============================
-// 📁 Income Source Settings
-// ==============================
+/* ==============================
+   Income Source Settings
+   ============================== */
 router.route('/income-source-settings')
   .get(authenticateUser, incomeSourceSettingsController.getIncomeSourceSettings)
   .put(authenticateUser, incomeSourceSettingsController.updateIncomeSourceSettings);
 
-// ==============================
-// 📁 Holiday Settings
-// ==============================
+/* ==============================
+   Holiday Settings
+   ============================== */
 router.route('/holiday-settings')
   .get(authenticateUser, holidaySettingsController.getHolidaySettings)
   .put(authenticateUser, holidaySettingsController.updateHolidaySettings);
 
-// ==============================
-// 📢 Communications Settings (NEW)
-// Multiple records + attachments; prefer admin-only roles.
-// ==============================
-// If you have role-based auth, use: [authenticateUser, authorizeRole(['admin','superadmin'])]
+/* ==============================
+   Communications (announcements)
+   ============================== */
 router.route('/communications')
   .get(authenticateUser, communicationSettingsController.listCommunications)
   .post(authenticateUser, communicationSettingsController.createCommunication);
@@ -178,7 +190,55 @@ router.delete('/communications/:id/attachments/:attId',
   communicationSettingsController.removeAttachment
 );
 
-// ==============================
-// ✅ Export
-// ==============================
+/* ==============================
+   NEW — General
+   ============================== */
+router.route('/general')
+  .get(authenticateUser, generalSettingsController.getGeneral)
+  .put(authenticateUser, generalSettingsController.updateGeneral);
+
+/* ==============================
+   NEW — API (kept for parity)
+   ============================== */
+router.route('/api')
+  .get(authenticateUser, apiSettingsController.getApiSettings)
+  .put(authenticateUser, apiSettingsController.updateApiSettings);
+
+/* ==============================
+   NEW — SMS / Email
+   ============================== */
+router.route('/sms')
+  .get(authenticateUser, smsSettingsController.getSmsSettings)
+  .put(authenticateUser, smsSettingsController.updateSmsSettings);
+
+router.route('/email')
+  .get(authenticateUser, emailSettingsController.getEmailSettings)
+  .put(authenticateUser, emailSettingsController.updateEmailSettings);
+
+/* ==============================
+   NEW — Loan Fees / Reminders / Cycles / Templates / Approvals
+   ============================== */
+router.route('/loan-fees')
+  .get(authenticateUser, loanFeesController.getLoanFees)
+  .put(authenticateUser, loanFeesController.updateLoanFees);
+
+router.route('/loan-reminders')
+  .get(authenticateUser, loanRemindersController.getLoanReminders)
+  .put(authenticateUser, loanRemindersController.updateLoanReminders);
+
+router.route('/loan-repayment-cycles')
+  .get(authenticateUser, loanCyclesController.getLoanCycles)
+  .put(authenticateUser, loanCyclesController.updateLoanCycles);
+
+router.route('/loan-templates')
+  .get(authenticateUser, loanTemplatesController.getLoanTemplates)
+  .put(authenticateUser, loanTemplatesController.updateLoanTemplates);
+
+router.route('/loan-approvals')
+  .get(authenticateUser, loanApprovalsController.getLoanApprovals)
+  .put(authenticateUser, loanApprovalsController.updateLoanApprovals);
+
+/* ==============================
+   Export
+   ============================== */
 module.exports = router;

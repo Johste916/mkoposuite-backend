@@ -1,40 +1,33 @@
 const db = require('../../models');
 const Setting = db.Setting;
 
-const KEY = 'payment_settings';
+const KEY = 'paymentSettings';
 
-/**
- * @desc    Get payment settings
- * @route   GET /api/settings/payment-settings
- * @access  Private
- */
-exports.getPaymentSettings = async (req, res) => {
+const DEFAULTS = {
+  acceptedMethods: ['cash'], // ['cash','mobile','bank','card']
+  mobileMoney: { enabled: false, provider: 'manual' },
+  bankTransfer: { enabled: false, accounts: [] },
+  cardGateway: { enabled: false, provider: 'manual', publicKey: '', secretKey: '' },
+};
+
+exports.getPaymentSettings = async (_req, res) => {
   try {
-    const setting = await Setting.findOne({ where: { key: KEY } });
-
-    res.status(200).json(setting?.value || {});
+    const row = await Setting.findOne({ where: { key: KEY } });
+    res.status(200).json({ ...DEFAULTS, ...(row?.value || {}) });
   } catch (error) {
     console.error('❌ Error fetching payment settings:', error);
     res.status(500).json({ message: 'Failed to fetch payment settings' });
   }
 };
 
-/**
- * @desc    Update payment settings
- * @route   PUT /api/settings/payment-settings
- * @access  Private
- */
 exports.updatePaymentSettings = async (req, res) => {
   try {
-    const [updated] = await Setting.upsert({
-      key: KEY,
-      value: req.body
-    });
+    const existing = await Setting.findOne({ where: { key: KEY } });
+    const curr = existing?.value || {};
+    const next = { ...DEFAULTS, ...curr, ...(req.body || {}) };
 
-    res.status(200).json({
-      message: 'Payment settings updated successfully',
-      data: updated.value
-    });
+    await Setting.upsert({ key: KEY, value: next, updatedBy: req.user?.id || null });
+    res.status(200).json({ message: 'Payment settings updated successfully', settings: next });
   } catch (error) {
     console.error('❌ Error updating payment settings:', error);
     res.status(500).json({ message: 'Failed to update payment settings' });

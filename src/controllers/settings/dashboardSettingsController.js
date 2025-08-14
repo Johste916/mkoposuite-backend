@@ -1,17 +1,24 @@
 const db = require('../../models');
 const Setting = db.Setting;
 
-const DASHBOARD_SETTINGS_KEY = 'dashboardSettings';
+const KEY = 'dashboardSettings';
+
+// allow-listed keys the FE can control
+const ALLOWED = new Set([
+  'widgetsOrder',
+  'showParWidget',
+  'showDisbursementWidget',
+  'showCollectionsWidget',
+  'recentActivityLimit',
+]);
 
 /**
- * @desc    Get Dashboard Settings
- * @route   GET /api/settings/dashboard-settings
- * @access  Private
+ * @desc GET /api/settings/dashboard-settings
  */
-const getDashboardSettings = async (req, res) => {
+const getDashboardSettings = async (_req, res) => {
   try {
-    const setting = await Setting.findOne({ where: { key: DASHBOARD_SETTINGS_KEY } });
-    res.status(200).json(setting?.value || {});
+    const row = await Setting.findOne({ where: { key: KEY } });
+    res.status(200).json(row?.value || {});
   } catch (error) {
     console.error('❌ Error fetching dashboard settings:', error);
     res.status(500).json({ message: 'Failed to fetch dashboard settings' });
@@ -19,28 +26,24 @@ const getDashboardSettings = async (req, res) => {
 };
 
 /**
- * @desc    Update Dashboard Settings
- * @route   PUT /api/settings/dashboard-settings
- * @access  Private
+ * @desc PUT /api/settings/dashboard-settings
  */
 const updateDashboardSettings = async (req, res) => {
   try {
-    const [updated] = await Setting.upsert({
-      key: DASHBOARD_SETTINGS_KEY,
-      value: req.body
-    });
+    // merge + filter keys
+    const existing = await Setting.findOne({ where: { key: KEY } });
+    const curr = existing?.value || {};
+    const next = { ...curr };
+    for (const [k, v] of Object.entries(req.body || {})) {
+      if (ALLOWED.has(k)) next[k] = v;
+    }
 
-    res.status(200).json({
-      message: 'Dashboard settings updated successfully',
-      settings: updated?.value || req.body
-    });
+    await Setting.upsert({ key: KEY, value: next, updatedBy: req.user?.id || null });
+    res.status(200).json({ message: 'Dashboard settings updated successfully', settings: next });
   } catch (error) {
     console.error('❌ Error updating dashboard settings:', error);
     res.status(500).json({ message: 'Failed to update dashboard settings' });
   }
 };
 
-module.exports = {
-  getDashboardSettings,
-  updateDashboardSettings
-};
+module.exports = { getDashboardSettings, updateDashboardSettings };

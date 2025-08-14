@@ -1,34 +1,25 @@
 const db = require('../../models');
 const Setting = db.Setting;
 
-const INTEGRATION_KEYS = [
-  'quickbooks_credentials',
-  'sms_gateway_config',
-  'payment_gateway_config',
-  'nida_gateway_config',
-  'developer_api_keys'
-];
+const KEY = 'integrationSettings';
+
+// Default shape so FE always receives a stable object
+const DEFAULTS = {
+  quickbooks_credentials: { clientId: '', clientSecret: '', realmId: '', refreshToken: '' },
+  sms_gateway_config: { provider: 'custom', gatewayUrl: '', senderId: '', apiKey: '' },
+  payment_gateway_config: { provider: 'manual', publicKey: '', secretKey: '', webhookSecret: '' },
+  nida_gateway_config: { baseUrl: '', apiKey: '', enabled: false },
+  developer_api_keys: { restApiKey: '', webhookSigningSecret: '' },
+};
 
 /**
- * @desc    Get all integration settings
- * @route   GET /api/settings/integration-settings
- * @access  Private
+ * @desc GET /api/settings/integration-settings
  */
-const getIntegrationSettings = async (req, res) => {
+const getIntegrationSettings = async (_req, res) => {
   try {
-    const settings = await Setting.findAll({
-      where: {
-        key: INTEGRATION_KEYS
-      }
-    });
-
-    const response = INTEGRATION_KEYS.reduce((acc, key) => {
-      const found = settings.find(setting => setting.key === key);
-      acc[key] = found?.value || null;
-      return acc;
-    }, {});
-
-    res.status(200).json(response);
+    const row = await Setting.findOne({ where: { key: KEY } });
+    const value = row?.value || {};
+    res.status(200).json({ ...DEFAULTS, ...value });
   } catch (error) {
     console.error('❌ Error fetching integration settings:', error);
     res.status(500).json({ message: 'Failed to fetch integration settings' });
@@ -36,33 +27,26 @@ const getIntegrationSettings = async (req, res) => {
 };
 
 /**
- * @desc    Update integration settings
- * @route   PUT /api/settings/integration-settings
- * @access  Private
+ * @desc PUT /api/settings/integration-settings
+ * Accepts partial updates and merges into existing JSON.
  */
 const updateIntegrationSettings = async (req, res) => {
   try {
-    const updates = req.body;
+    const existing = await Setting.findOne({ where: { key: KEY } });
+    const currentValue = existing?.value || {};
 
-    const operations = INTEGRATION_KEYS
-      .filter(key => updates.hasOwnProperty(key))
-      .map(key =>
-        Setting.upsert({
-          key,
-          value: updates[key]
-        })
-      );
+    const next = {
+      ...DEFAULTS,
+      ...currentValue,
+      ...req.body, // allow updating nested objects by key: { sms_gateway_config: { senderId: 'XYZ' } }
+    };
 
-    await Promise.all(operations);
-
-    res.status(200).json({ message: 'Integration settings updated successfully' });
+    await Setting.upsert({ key: KEY, value: next, updatedBy: req.user?.id || null });
+    res.status(200).json({ message: 'Integration settings updated successfully', settings: next });
   } catch (error) {
     console.error('❌ Error updating integration settings:', error);
     res.status(500).json({ message: 'Failed to update integration settings' });
   }
 };
 
-module.exports = {
-  getIntegrationSettings,
-  updateIntegrationSettings
-};
+module.exports = { getIntegrationSettings, updateIntegrationSettings };

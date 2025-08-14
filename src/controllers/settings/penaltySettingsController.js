@@ -1,67 +1,50 @@
 const db = require('../../models');
 const Setting = db.Setting;
 
-// Penalty setting keys
-const PENALTY_KEYS = {
-  TYPE: 'penalty_type',             // "fixed" or "percentage"
-  AMOUNT: 'penalty_amount',         // number
-  APPLY_AFTER_DAYS: 'penalty_grace_days', // grace period
-  MAX_CAP: 'penalty_max_cap',       // optional max penalty
+const KEY = 'penaltySettings';
+
+const DEFAULTS = {
+  type: 'fixed',          // 'fixed' | 'percentage'
+  amount: 0,              // number
+  graceDays: 0,           // apply after N days late
+  maxCap: null,           // optional max penalty
+  applyMode: 'perInstallment', // 'perInstallment' | 'totalOutstanding'
 };
 
-/**
- * @desc    Get Penalty Settings
- * @route   GET /api/settings/penalty-settings
- * @access  Private
- */
-exports.getPenaltySettings = async (req, res) => {
+exports.getPenaltySettings = async (_req, res) => {
   try {
-    const settings = await Setting.findAll({
-      where: {
-        key: Object.values(PENALTY_KEYS)
-      }
-    });
-
-    const data = {};
-    settings.forEach(({ key, value }) => {
-      data[key] = value;
-    });
-
-    res.status(200).json(data);
+    const row = await Setting.findOne({ where: { key: KEY } });
+    res.status(200).json({ ...DEFAULTS, ...(row?.value || {}) });
   } catch (error) {
     console.error('❌ Error fetching penalty settings:', error);
     res.status(500).json({ message: 'Failed to retrieve penalty settings.' });
   }
 };
 
-/**
- * @desc    Update Penalty Settings
- * @route   PUT /api/settings/penalty-settings
- * @access  Private
- */
 exports.updatePenaltySettings = async (req, res) => {
   try {
-    const payload = req.body;
-    const updatedSettings = [];
+    // Backward-compat mapping (old keys → new shape)
+    const legacy = {
+      type: req.body.penalty_type,
+      amount: req.body.penalty_amount,
+      graceDays: req.body.penalty_grace_days,
+      maxCap: req.body.penalty_max_cap,
+    };
 
-    for (const key of Object.values(PENALTY_KEYS)) {
-      if (Object.prototype.hasOwnProperty.call(payload, key)) {
-        const [updated] = await Setting.upsert({
-          key,
-          value: payload[key]
-        });
+    const existing = await Setting.findOne({ where: { key: KEY } });
+    const curr = existing?.value || {};
 
-        updatedSettings.push({
-          key,
-          value: payload[key]
-        });
-      }
-    }
+    const next = {
+      ...DEFAULTS,
+      ...curr,
+      ...req.body,
+      ...Object.fromEntries(
+        Object.entries(legacy).filter(([, v]) => typeof v !== 'undefined')
+      ),
+    };
 
-    res.status(200).json({
-      message: 'Penalty settings updated successfully.',
-      data: updatedSettings,
-    });
+    await Setting.upsert({ key: KEY, value: next, updatedBy: req.user?.id || null });
+    res.status(200).json({ message: 'Penalty settings updated successfully.', settings: next });
   } catch (error) {
     console.error('❌ Error updating penalty settings:', error);
     res.status(500).json({ message: 'Failed to update penalty settings.' });

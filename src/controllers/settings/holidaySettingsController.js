@@ -1,17 +1,15 @@
 const db = require('../../models');
 const Setting = db.Setting;
 
-const HOLIDAY_SETTINGS_KEY = 'holidaySettings';
+const KEY = 'holidaySettings';
 
 /**
- * @desc    Get all holiday settings
- * @route   GET /api/settings/holiday-settings
- * @access  Private
+ * @desc GET /api/settings/holiday-settings
  */
-const getHolidaySettings = async (req, res) => {
+const getHolidaySettings = async (_req, res) => {
   try {
-    const setting = await Setting.findOne({ where: { key: HOLIDAY_SETTINGS_KEY } });
-    res.status(200).json(setting?.value || []);
+    const row = await Setting.findOne({ where: { key: KEY } });
+    res.status(200).json(Array.isArray(row?.value) ? row.value : []);
   } catch (error) {
     console.error('❌ Error fetching holiday settings:', error);
     res.status(500).json({ message: 'Failed to fetch holiday settings' });
@@ -19,36 +17,29 @@ const getHolidaySettings = async (req, res) => {
 };
 
 /**
- * @desc    Update holiday settings (array of holidays)
- * @route   PUT /api/settings/holiday-settings
- * @access  Private
+ * @desc PUT /api/settings/holiday-settings
+ * body: { holidays: [{ date: '2025-12-25', name: 'Christmas', branchId: null }] }
  */
 const updateHolidaySettings = async (req, res) => {
   try {
     const { holidays } = req.body;
-
     if (!Array.isArray(holidays)) {
-      return res.status(400).json({
-        message: 'Invalid format: holidays should be an array'
-      });
+      return res.status(400).json({ message: 'Invalid format: holidays should be an array' });
     }
 
-    const [updated] = await Setting.upsert({
-      key: HOLIDAY_SETTINGS_KEY,
-      value: holidays
-    });
+    const clean = holidays.map((h) => ({
+      date: String(h.date || '').trim(), // ISO date string suggested
+      name: String(h.name || '').trim(),
+      branchId: h.branchId ?? null,
+      recurring: !!h.recurring,
+    }));
 
-    res.status(200).json({
-      message: 'Holiday settings updated successfully',
-      settings: updated?.value || holidays
-    });
+    await Setting.upsert({ key: KEY, value: clean, updatedBy: req.user?.id || null });
+    res.status(200).json({ message: 'Holiday settings updated successfully', settings: clean });
   } catch (error) {
     console.error('❌ Error updating holiday settings:', error);
     res.status(500).json({ message: 'Failed to update holiday settings' });
   }
 };
 
-module.exports = {
-  getHolidaySettings,
-  updateHolidaySettings
-};
+module.exports = { getHolidaySettings, updateHolidaySettings };
