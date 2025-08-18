@@ -4,6 +4,8 @@ const db = require('./models');
 const { sequelize } = db;
 
 const cron = require('node-cron');
+
+/* ------------------------------ Optional cron ------------------------------ */
 let penaltiesTask;
 try {
   const { runPenaltiesJob } = require('./jobs/penaltiesJob');
@@ -39,6 +41,7 @@ async function ensureAclTablesAndSeed() {
   try {
     const { ensureRolesAndPerms } = require('./seed/ensureRolesAndPerms');
     await ensureRolesAndPerms(db);
+    console.log('✅ ensureRolesAndPerms: roles, permissions, and admin assignment ready');
     console.log('✅ ACL ready');
   } catch (e) {
     console.warn('⚠️ ensureRolesAndPerms not available:', e.message);
@@ -104,6 +107,7 @@ async function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
+
 process.on('unhandledRejection', (reason) => {
   console.error('⚠️ Unhandled Rejection:', reason);
 });
