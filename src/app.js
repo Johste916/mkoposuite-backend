@@ -30,9 +30,7 @@ const defaultOrigins = [
   'https://mkoposuite.netlify.app',
 ];
 const extraOrigins = (process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+  .split(',').map(s => s.trim()).filter(Boolean);
 const allowedOrigins = new Set([...defaultOrigins, ...extraOrigins]);
 
 function isAllowedOrigin(origin) {
@@ -72,14 +70,9 @@ app.use('/uploads', express.static(uploadsDir, {
 }));
 
 /* ------------------------ Helpers: safe route loading ----------------------- */
-/**
- * Returns a dummy router that serves predictable sample data.
- * Use this when the real routes don't exist yet, so the frontend never renders blank.
- */
 function makeDummyRouter(sample) {
   const r = express.Router();
   r.get('/', (_req, res) => res.json(sample));
-  // Optionally stabilize "details" views so clicking rows won't 404:
   r.get('/:id', (req, res) => {
     const id = Number(req.params.id) || req.params.id;
     if (Array.isArray(sample)) {
@@ -90,11 +83,6 @@ function makeDummyRouter(sample) {
   });
   return r;
 }
-
-/**
- * Tries to require a routes module at `routePath`. If not found,
- * returns the provided dummy router instead (with console notice).
- */
 function safeLoadRoutes(routePath, dummyRouter) {
   try {
     // eslint-disable-next-line import/no-dynamic-require, global-require
@@ -109,21 +97,27 @@ function safeLoadRoutes(routePath, dummyRouter) {
 
 /* --------------------------------- Routes ---------------------------------- */
 /* Existing, already in your project */
-const authRoutes = require('./routes/authRoutes');
-const borrowerRoutes = require('./routes/borrowerRoutes');
-const loanRoutes = require('./routes/loanRoutes');
-const dashboardRoutes = require('./routes/dashboardRoutes');
-const savingsRoutes = require('./routes/savingsRoutes');
-const disbursementRoutes = require('./routes/loanDisbursementRoutes');
-const repaymentRoutes = require('./routes/repaymentRoutes');
-const reportRoutes = require('./routes/reportRoutes');
-const settingRoutes = require('./routes/settingRoutes');
-const userRoutes = require('./routes/userRoutes');
-const roleRoutes = require('./routes/roleRoutes');
-const branchRoutes = require('./routes/branchRoutes');
-const userRoleRoutes = require('./routes/userRoleRoutes');
-const userBranchRoutes = require('./routes/userBranchRoutes');
-const loanProductRoutes = require('./routes/loanProductRoutes'); // ✔ mounted below
+const authRoutes          = require('./routes/authRoutes');
+const borrowerRoutes      = require('./routes/borrowerRoutes');
+const loanRoutes          = require('./routes/loanRoutes');
+const dashboardRoutes     = require('./routes/dashboardRoutes');
+const savingsRoutes       = require('./routes/savingsRoutes');
+const disbursementRoutes  = require('./routes/loanDisbursementRoutes');
+const repaymentRoutes     = require('./routes/repaymentRoutes');
+const reportRoutes        = require('./routes/reportRoutes');
+const settingRoutes       = require('./routes/settingRoutes');
+const userRoutes          = require('./routes/userRoutes');
+const roleRoutes          = require('./routes/roleRoutes');
+const branchRoutes        = require('./routes/branchRoutes');
+const userRoleRoutes      = require('./routes/userRoleRoutes');
+const userBranchRoutes    = require('./routes/userBranchRoutes');
+const loanProductRoutes   = require('./routes/loanProductRoutes');
+
+/* Admin modules */
+const adminStaffRoutes        = require('./routes/staffRoutes');
+const permissionRoutes        = require('./routes/permissionRoutes');
+const adminAuditRoutes        = require('./routes/admin/auditRoutes');
+const adminReportSubRoutes    = require('./routes/admin/reportSubscriptionRoutes');
 
 /* New modules (LoanDisk parity) — try to load real files, else mount dummy */
 const collateralRoutes = safeLoadRoutes(
@@ -133,7 +127,6 @@ const collateralRoutes = safeLoadRoutes(
     { id: 2, borrower: 'Jane Smith', item: 'Car', model: 'Toyota', status: 'Released' },
   ])
 );
-
 const collectionSheetsRoutes = safeLoadRoutes(
   './routes/collectionSheetsRoutes',
   makeDummyRouter([
@@ -141,7 +134,6 @@ const collectionSheetsRoutes = safeLoadRoutes(
     { id: 2, type: 'missed', date: '2025-08-02', count: 5 },
   ])
 );
-
 const savingsTransactionsRoutes = safeLoadRoutes(
   './routes/savingsTransactionsRoutes',
   makeDummyRouter([
@@ -149,7 +141,6 @@ const savingsTransactionsRoutes = safeLoadRoutes(
     { id: 2, borrower: 'Jane Smith', type: 'withdrawal', amount: 80, date: '2025-08-03' },
   ])
 );
-
 const investorsRoutes = safeLoadRoutes(
   './routes/investorsRoutes',
   makeDummyRouter([
@@ -157,7 +148,6 @@ const investorsRoutes = safeLoadRoutes(
     { id: 2, name: 'Beta Partners', phone: '255700000002', products: 1 },
   ])
 );
-
 const esignaturesRoutes = safeLoadRoutes(
   './routes/esignaturesRoutes',
   makeDummyRouter([
@@ -165,7 +155,6 @@ const esignaturesRoutes = safeLoadRoutes(
     { id: 2, name: 'Loan Agreement #2', sent: '2025-08-03', status: 'Pending' },
   ])
 );
-
 const payrollRoutes = safeLoadRoutes(
   './routes/payrollRoutes',
   makeDummyRouter([
@@ -173,7 +162,6 @@ const payrollRoutes = safeLoadRoutes(
     { id: 2, period: '2025-08', staffCount: 9, total: 4450000 },
   ])
 );
-
 const expensesRoutes = safeLoadRoutes(
   './routes/expensesRoutes',
   makeDummyRouter([
@@ -181,7 +169,6 @@ const expensesRoutes = safeLoadRoutes(
     { id: 2, type: 'Fuel', amount: 120000, date: '2025-08-04' },
   ])
 );
-
 const otherIncomeRoutes = safeLoadRoutes(
   './routes/otherIncomeRoutes',
   makeDummyRouter([
@@ -189,7 +176,6 @@ const otherIncomeRoutes = safeLoadRoutes(
     { id: 2, source: 'Sale of Scrap', amount: 60000, date: '2025-08-05' },
   ])
 );
-
 const assetManagementRoutes = safeLoadRoutes(
   './routes/assetManagementRoutes',
   makeDummyRouter([
@@ -197,7 +183,6 @@ const assetManagementRoutes = safeLoadRoutes(
     { id: 2, name: 'Motorcycle 02', category: 'Vehicle', status: 'Maintenance' },
   ])
 );
-
 const accountingRoutes = safeLoadRoutes(
   './routes/accountingRoutes',
   makeDummyRouter({
@@ -209,51 +194,83 @@ const accountingRoutes = safeLoadRoutes(
   })
 );
 
+/* -------------------------- Automatic audit hooks -------------------------- */
+/* Lazy-access AuditLog so we don't break if model is missing */
+let AuditLog;
+try { ({ AuditLog } = require('./models')); } catch {}
+
+/**
+ * Records successful non-GET API calls (POST/PUT/PATCH/DELETE).
+ * Skips OPTIONS, static, healthchecks, and the audit endpoints themselves.
+ * Uses req.user if set by downstream authenticateUser middleware.
+ */
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    try {
+      if (!AuditLog || typeof AuditLog.create !== 'function') return;
+      if (!req.path.startsWith('/api/')) return;
+      if (req.method === 'GET' || req.method === 'OPTIONS') return;
+      if (req.path.startsWith('/api/admin/audit') || req.path.startsWith('/api/audit-logs')) return;
+      if (req.path.startsWith('/uploads')) return;
+
+      const ok = res.statusCode >= 200 && res.statusCode < 400;
+      if (!ok) return;
+
+      const category = (req.path.split('/')[2] || 'api').toLowerCase();
+      AuditLog.create({
+        userId:   req.user?.id || null,
+        branchId: req.user?.branchId || null,
+        category,
+        action: `${req.method} ${req.path}`,
+        message: '',
+        ip: req.ip,
+        reversed: false,
+      }).catch(() => {});
+    } catch { /* no-op */ }
+  });
+  next();
+});
+
 /* --------------------------------- Mounting -------------------------------- */
-app.use('/api/login', authRoutes);
-app.use('/api/borrowers', borrowerRoutes);
-app.use('/api/loans', loanRoutes);
-app.use('/api/dashboard', dashboardRoutes);
-app.use('/api/savings', savingsRoutes);
-app.use('/api/disbursements', disbursementRoutes);
-app.use('/api/repayments', repaymentRoutes);
-app.use('/api/reports', reportRoutes);
-app.use('/api/settings', settingRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/roles', roleRoutes);
-app.use('/api/branches', branchRoutes);
-app.use('/api/user-roles', userRoleRoutes);
-app.use('/api/user-branches', userBranchRoutes);
-app.use('/api/loan-products', loanProductRoutes); // ✔ fixes 404
+app.use('/api/login',          authRoutes);
+app.use('/api/borrowers',      borrowerRoutes);
+app.use('/api/loans',          loanRoutes);
+app.use('/api/dashboard',      dashboardRoutes);
+app.use('/api/savings',        savingsRoutes);
+app.use('/api/disbursements',  disbursementRoutes);
+app.use('/api/repayments',     repaymentRoutes);
+app.use('/api/reports',        reportRoutes);
+app.use('/api/settings',       settingRoutes);
 
-// New mounts (work with real route files OR dummy routers)
-app.use('/api/collateral', collateralRoutes);
-app.use('/api/collections', collectionSheetsRoutes);
+/* Admin/ACL */
+app.use('/api/admin/staff',                 adminStaffRoutes);
+app.use('/api/permissions',                 permissionRoutes);
+app.use('/api/admin/audit',                 adminAuditRoutes);
+/* alias for current frontend (AuditManagement.jsx calls /audit-logs) */
+app.use('/api/audit-logs',                  adminAuditRoutes);
+
+/* Other core mounts */
+app.use('/api/users',          userRoutes);
+app.use('/api/roles',          roleRoutes);
+app.use('/api/branches',       branchRoutes);
+app.use('/api/user-roles',     userRoleRoutes);
+app.use('/api/user-branches',  userBranchRoutes);
+app.use('/api/loan-products',  loanProductRoutes);
+
+/* New modules (work with real route files OR dummy routers) */
+app.use('/api/collateral',           collateralRoutes);
+app.use('/api/collections',          collectionSheetsRoutes);
 app.use('/api/savings-transactions', savingsTransactionsRoutes);
-app.use('/api/investors', investorsRoutes);
-app.use('/api/esignatures', esignaturesRoutes);
-app.use('/api/payroll', payrollRoutes);
-app.use('/api/expenses', expensesRoutes);
-app.use('/api/other-income', otherIncomeRoutes);
-app.use('/api/assets', assetManagementRoutes);
-app.use('/api/accounting', accountingRoutes);
-
-/* ------------------------------ Legacy redirects --------------------------- */
-app.get('/api/loans/borrower/:id', (req, res) =>
-  res.redirect(307, `/api/borrowers/${encodeURIComponent(req.params.id)}/loans`)
-);
-app.get('/api/repayments/borrower/:id', (req, res) =>
-  res.redirect(307, `/api/borrowers/${encodeURIComponent(req.params.id)}/repayments`)
-);
-app.get('/api/comments/borrower/:id', (req, res) =>
-  res.redirect(307, `/api/borrowers/${encodeURIComponent(req.params.id)}/comments`)
-);
-app.get('/api/savings/borrower/:id', (req, res) =>
-  res.redirect(307, `/api/borrowers/${encodeURIComponent(req.params.id)}/savings`)
-);
+app.use('/api/investors',            investorsRoutes);
+app.use('/api/esignatures',          esignaturesRoutes);
+app.use('/api/payroll',              payrollRoutes);
+app.use('/api/expenses',             expensesRoutes);
+app.use('/api/other-income',         otherIncomeRoutes);
+app.use('/api/assets',               assetManagementRoutes);
+app.use('/api/accounting',           accountingRoutes);
 
 /* -------------------------------- Healthchecks ----------------------------- */
-app.get('/api/test', (_req, res) => res.send('✅ API is working!'));
+app.get('/api/test',   (_req, res) => res.send('✅ API is working!'));
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
 // DB health (helps diagnose 500s quickly)
@@ -268,9 +285,7 @@ try {
       res.status(500).json({ db: 'down', error: e.message });
     }
   });
-} catch {
-  // models not available during some build steps — ignore
-}
+} catch { /* ignore */ }
 
 /* ----------------------------------- 404 ----------------------------------- */
 app.use((req, res) => {

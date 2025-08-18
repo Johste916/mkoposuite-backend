@@ -1,29 +1,65 @@
-// src/middleware/permissions.js
-const { Permission } = require("../models");
+// backend/src/middleware/permissions.js
+const { Permission, Role, User } = require('../models');
 
-function allow(action) {
+/**
+ * allow('actionName') -> middleware that checks whether the current user's role
+ * is allowed for the given action (based on Permission table).
+ *
+ * Notes:
+ * - Accepts role from req.user.role (string), or from req.user.Roles[0].name,
+ *   or loads Roles via a JOIN if not present on the request.
+ * - Case-insensitive comparison of role names.
+ * - If no Permission row exists for an action, we ALLOW 'admin' by default (secure-but-practical).
+ */
+function allow(action, { defaultToAdmin = true } = {}) {
   return async (req, res, next) => {
     try {
-      const role = req.user?.role;
-      if (!role) return res.status(401).json({ error: "Unauthorized" });
+      const u = req.user;
+      if (!u) return res.status(401).json({ error: 'Unauthorized' });
 
-      // Admin bypasses
-      if (role === "Admin") return next();
+      // 1) Resolve user's role name reliably
+      let roleName =
+        (typeof u.role === 'string' && u.role) ||
+        (Array.isArray(u.Roles) && u.Roles[0] && u.Roles[0].name) ||
+        null;
 
-      const permission = await Permission.findOne({ where: { action } });
-      if (!permission) {
-        return res.status(404).json({ error: `Action "${action}" not found in permissions` });
+      if (!roleName && u.id) {
+        // Load user + Roles from DB (association alias in your models is 'Roles')
+        const dbUser = await User.findByPk(u.id, {
+          include: [{ model: Role, as: 'Roles', attributes: ['name'], through: { attributes: [] } }],
+          attributes: ['id'],
+        });
+        roleName = dbUser?.Roles?.[0]?.name || null;
       }
 
-      if (!permission.roles.includes(role)) {
-        return res
-          .status(403)
-          .json({ error: `Forbidden: ${action} requires one of [${permission.roles.join(", ")}]` });
+      if (!roleName) return res.status(403).json({ error: 'Forbidden' });
+
+      const roleNameLc = String(roleName).toLowerCase();
+
+      // 2) Fetch permission record for this action
+      const perm = await Permission.findOne({ where: { action } });
+
+      if (!perm) {
+        // If there is no row yet, allow admins only (so you don't lock yourself out)
+        if (defaultToAdmin && roleNameLc === 'admin') return next();
+        return res.status(403).json({ error: 'Forbidden' });
       }
+
+      // 3) Roles array check (case-insensitive)
+      const roles = Array.isArray(perm.roles) ? perm.roles.map((r) => String(r).toLowerCase()) : [];
+
+      // Support small conveniences
+      const whitelisted =
+        roles.includes(roleNameLc) ||
+        roles.includes('*') ||               // wildcard
+        (roles.includes('admin') && roleNameLc === 'admin');
+
+      if (!whitelisted) return res.status(403).json({ error: 'Forbidden' });
 
       next();
-    } catch (err) {
-      res.status(500).json({ error: err.message });
+    } catch (e) {
+      console.error('allow() error:', e);
+      res.status(500).json({ error: 'Permission check failed' });
     }
   };
 }

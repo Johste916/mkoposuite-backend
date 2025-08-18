@@ -1,44 +1,240 @@
-const { User, Role, Branch } = require('../models');
+const bcrypt = require('bcryptjs');
+const { Op } = require('sequelize');
+const {
+  sequelize,
+  User,
+  Role,
+  Branch,
+  UserRole,
+  StaffBranch,
+} = require('../models');
 
-// GET /api/users?role=loan_officer (role filter optional)
+/* ---------------------------- helpers ---------------------------- */
+const pickFirstKey = (obj, keys) => keys.find((k) => obj && Object.prototype.hasOwnProperty.call(obj, k));
+const resolveActiveColumn = () => pickFirstKey(User.rawAttributes, ['isActive', 'active', 'enabled', 'status']);
+const resolvePasswordHashColumn = () => pickFirstKey(User.rawAttributes, ['passwordHash', 'password_hash', 'password']);
+const sanitizeUser = (u) => {
+  if (!u) return u;
+  const json = u.toJSON ? u.toJSON() : u;
+  delete json.passwordHash; delete json.password_hash; delete json.password;
+  return json;
+};
+const buildIncludes = ({ roleId, branchId }) => {
+  const asns = User.associations || {};
+  const includes = [];
+
+  if (Role) {
+    const roleAssoc =
+      asns.roles || asns.Roles || asns.role || asns.Role ||
+      Object.values(asns).find((a) => a.target && a.target.name === Role.name);
+    if (roleAssoc) {
+      const isBTM = roleAssoc.associationType === 'BelongsToMany';
+      const inc = { model: Role, as: roleAssoc.as, attributes: ['id', 'name'], required: !!roleId };
+      if (isBTM) inc.through = { attributes: [] };
+      if (roleId) inc.where = { id: roleId };
+      includes.push(inc);
+    }
+  }
+
+  if (Branch) {
+    const branchAssoc =
+      asns.branches || asns.Branches || asns.branch || asns.Branch ||
+      Object.values(asns).find((a) => a.target && a.target.name === Branch.name);
+    if (branchAssoc) {
+      const isBTM = branchAssoc.associationType === 'BelongsToMany';
+      const inc = { model: Branch, as: branchAssoc.as, attributes: ['id', 'name', 'code'], required: !!branchId };
+      if (isBTM) inc.through = { attributes: [] };
+      if (branchId) inc.where = { id: branchId };
+      includes.push(inc);
+    }
+  }
+
+  return includes;
+};
+const setUserRoles = async (user, roleIds, t) => {
+  if (!Array.isArray(roleIds)) return;
+  if (typeof user.setRoles === 'function') {
+    await user.setRoles(roleIds, { transaction: t });
+  } else if (UserRole) {
+    await UserRole.destroy({ where: { userId: user.id }, transaction: t });
+    await UserRole.bulkCreate(roleIds.map((roleId) => ({ userId: user.id, roleId })), { transaction: t });
+  }
+};
+const setUserBranches = async (user, branchIds, t) => {
+  if (branchIds == null) return;
+  const asns = User.associations || {};
+  const branchAssoc =
+    asns.branches || asns.Branches || asns.branch || asns.Branch ||
+    Object.values(asns).find((a) => a.target && a.target.name === (Branch && Branch.name));
+
+  if (branchAssoc && branchAssoc.associationType === 'BelongsToMany') {
+    if (typeof user.setBranches === 'function') {
+      await user.setBranches(branchIds, { transaction: t });
+      return;
+    }
+    if (StaffBranch) {
+      await StaffBranch.destroy({ where: { userId: user.id }, transaction: t });
+      await StaffBranch.bulkCreate(branchIds.map((branchId) => ({ userId: user.id, branchId })), { transaction: t });
+      return;
+    }
+  }
+
+  const userBranchFk = pickFirstKey(User.rawAttributes, ['branchId', 'BranchId']);
+  if (userBranchFk) {
+    const first = Array.isArray(branchIds) ? branchIds[0] : branchIds;
+    await user.update({ [userBranchFk]: first || null }, { transaction: t });
+  }
+};
+const hashAndAssignPassword = async (payload) => {
+  const pwCol = resolvePasswordHashColumn();
+  if (!pwCol) return payload;
+  if (!payload.password && !payload[pwCol]) return payload;
+  const raw = payload.password ?? payload[pwCol];
+  const hash = await bcrypt.hash(String(raw), 10);
+  const clean = { ...payload };
+  delete clean.password; delete clean.password_hash; delete clean.passwordHash;
+  clean[pwCol] = hash;
+  return clean;
+};
+
+/* --------------------------------- GET /api/users --------------------------------- */
 exports.getUsers = async (req, res) => {
   try {
-    const { role } = req.query;
+    const { q = '', role, roleId, branchId, isActive, page = 1, limit = 200 } = req.query;
 
-    // If your User table has a 'role' column, this will work directly.
-    // If you use a Role table or many-to-many, we still include Role/Branch and filter in code.
-    const where = role ? { role } : {};
+    const where = {};
+    if (q) {
+      where[Op.or] = [
+        { name: { [Op.iLike]: `%${q}%` } },
+        { fullName: { [Op.iLike]: `%${q}%` } },
+        { email: { [Op.iLike]: `%${q}%` } },
+        { username: { [Op.iLike]: `%${q}%` } },
+        { phone: { [Op.iLike]: `%${q}%` } },
+      ];
+    }
+    const activeCol = resolveActiveColumn();
+    if (activeCol && typeof isActive !== 'undefined') {
+      where[activeCol] = String(isActive) === 'true';
+    }
 
-    const include = [];
-    if (Role) include.push({ model: Role, attributes: ['id', 'name'], through: { attributes: [] }, required: false });
-    if (Branch) include.push({ model: Branch, attributes: ['id', 'name'], through: { attributes: [] }, required: false });
+    // If FE passes ?role=loan_officer (filters), do a cheap filter
+    if (role && !roleId) {
+      where.role = role;
+    }
 
-    const users = await User.findAll({
+    const include = buildIncludes({ roleId, branchId });
+
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Math.min(1000, Math.max(1, Number(limit) || 200));
+    const offset = (pageNum - 1) * limitNum;
+
+    const { rows, count } = await User.findAndCountAll({
       where,
       include,
-      order: [['createdAt', 'DESC']],
-      limit: 200,
+      attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
+      order: [['name', 'ASC']],
+      limit: limitNum,
+      offset,
+      distinct: true,
     });
 
-    // If role was requested but you don't have a 'role' column, filter via joined Role name
-    const data = role && Role
-      ? users.filter(u => (u.role || u.Role?.name) === role || (Array.isArray(u.Roles) && u.Roles.some(r => r.name === role)))
-      : users;
-
-    res.json(data);
+    res.json(rows.map(sanitizeUser));
   } catch (err) {
     console.error('getUsers error:', err);
     res.status(500).json({ error: 'Failed to list users' });
   }
 };
 
-// POST /api/users
-exports.createUser = async (req, res) => {
+exports.getUserById = async (req, res) => {
   try {
-    const user = await User.create(req.body);
-    res.status(201).json(user);
+    const include = buildIncludes({});
+    const user = await User.findByPk(req.params.id, {
+      include,
+      attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
+    });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(sanitizeUser(user));
   } catch (err) {
+    console.error('getUserById error:', err);
+    res.status(500).json({ error: 'Failed to fetch user' });
+  }
+};
+
+exports.createUser = async (req, res) => {
+  const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
+  try {
+    const { roleIds = [], branchIds = [], ...rest } = req.body || {};
+    const payload = await hashAndAssignPassword(rest);
+    const user = await User.create(payload, { transaction: t });
+    await setUserRoles(user, roleIds, t);
+    await setUserBranches(user, branchIds, t);
+    await t.commit();
+    const fresh = await User.findByPk(user.id, {
+      include: buildIncludes({}),
+      attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
+    });
+    res.status(201).json(sanitizeUser(fresh));
+  } catch (err) {
+    await t.rollback();
     console.error('createUser error:', err);
     res.status(400).json({ error: 'Failed to create user' });
+  }
+};
+
+exports.updateUser = async (req, res) => {
+  const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
+  try {
+    const { id } = req.params;
+    const { roleIds, branchIds, password, ...rest } = req.body || {};
+    const user = await User.findByPk(id);
+    if (!user) { await t.rollback(); return res.status(404).json({ error: 'User not found' }); }
+    const payload = password ? await hashAndAssignPassword({ ...rest, password }) : rest;
+    await user.update(payload, { transaction: t });
+    if (Array.isArray(roleIds)) await setUserRoles(user, roleIds, t);
+    if (Array.isArray(branchIds) || typeof branchIds === 'number') await setUserBranches(user, branchIds, t);
+    await t.commit();
+    const fresh = await User.findByPk(id, {
+      include: buildIncludes({}),
+      attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
+    });
+    res.json(sanitizeUser(fresh));
+  } catch (err) {
+    await t.rollback();
+    console.error('updateUser error:', err);
+    res.status(400).json({ error: 'Failed to update user' });
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body || {};
+    if (!password || String(password).length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+    const user = await User.findByPk(id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const payload = await hashAndAssignPassword({ password });
+    await user.update(payload);
+    res.json({ message: 'Password updated' });
+  } catch (err) {
+    console.error('resetPassword error:', err);
+    res.status(400).json({ error: 'Failed to reset password' });
+  }
+};
+
+exports.toggleStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const activeCol = resolveActiveColumn();
+    if (!activeCol) return res.status(400).json({ error: 'Active/status column not found on User model' });
+    const user = await User.findByPk(id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const next = typeof req.body[activeCol] === 'boolean' ? req.body[activeCol] : !user[activeCol];
+    await user.update({ [activeCol]: next });
+    res.json({ id: user.id, [activeCol]: next });
+  } catch (err) {
+    console.error('toggleStatus error:', err);
+    res.status(400).json({ error: 'Failed to update status' });
   }
 };

@@ -1,42 +1,42 @@
-// src/controllers/permissionsController.js
-const { Permission } = require("../models");
+// backend/src/controllers/permissionsController.js
+const { Permission } = require('../models');
 
 // GET all permissions
-const getPermissions = async (req, res) => {
+const getPermissions = async (_req, res) => {
   try {
-    const permissions = await Permission.findAll();
-    res.json(permissions);
+    const rows = await Permission.findAll({ order: [['action', 'ASC']] });
+    res.json(rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('getPermissions error:', err);
+    res.status(500).json({ error: 'Failed to fetch permissions' });
   }
 };
 
-// UPDATE roles for an action
+// UPSERT a permission’s allowed roles (by action)
 const updatePermission = async (req, res) => {
   try {
     const { action } = req.params;
-    const { roles } = req.body;
+    const { roles, description } = req.body;
 
+    if (!action || typeof action !== 'string') {
+      return res.status(400).json({ error: 'Invalid action' });
+    }
     if (!Array.isArray(roles)) {
-      return res.status(400).json({ error: "Roles must be an array" });
+      return res.status(400).json({ error: 'Roles must be an array of role names' });
     }
 
-    const permission = await Permission.findOne({ where: { action } });
+    const payload = {
+      action: action.trim(),
+      roles: roles.map(String),
+      description: typeof description === 'string' ? description : '',
+    };
 
-    if (!permission) {
-      return res.status(404).json({ error: `Action "${action}" not found` });
-    }
-
-    permission.roles = roles;
-    await permission.save();
-
-    res.json({ message: `Permissions for "${action}" updated`, updatedRoles: roles });
+    const [row] = await Permission.upsert(payload);
+    res.json({ message: `Permissions for "${action}" saved.`, permission: row || payload });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('updatePermission error:', err);
+    res.status(500).json({ error: 'Failed to update permission' });
   }
 };
 
-module.exports = {
-  getPermissions,
-  updatePermission
-};
+module.exports = { getPermissions, updatePermission };
