@@ -1,5 +1,3 @@
-"use strict";
-
 const {
   Loan,
   Borrower,
@@ -43,73 +41,63 @@ const writeAudit = async ({ entityId, action, before, after, req }) => {
   }
 };
 
-/* ------------------------------------------------------------------
-   Helpers: figure out which FK columns actually exist on `loans`
-------------------------------------------------------------------- */
-let cachedLoanColumns = null;
+/* ====================================================================
+   Helpers: discover existing DB columns & build safe attributes/includes
+==================================================================== */
+let LOAN_COLUMNS_CACHE = null;
+
+const getLoansTableName = () => {
+  const t = Loan.getTableName ? Loan.getTableName() : "loans";
+  return typeof t === "string" ? t : t.tableName || "loans";
+};
 
 async function getLoanColumns() {
-  if (cachedLoanColumns) return cachedLoanColumns;
+  if (LOAN_COLUMNS_CACHE) return LOAN_COLUMNS_CACHE;
   try {
     const qi = sequelize.getQueryInterface();
-    cachedLoanColumns = await qi.describeTable("loans"); // { columnName: def }
-  } catch {
-    cachedLoanColumns = {};
+    const desc = await qi.describeTable(getLoansTableName());
+    LOAN_COLUMNS_CACHE = new Set(Object.keys(desc)); // snake_case column names
+  } catch (e) {
+    // Fallback: infer from model (may still include non-existent columns)
+    LOAN_COLUMNS_CACHE = new Set(
+      Object.values(Loan.rawAttributes || {}).map(a => a.field || a.fieldName || a)
+    );
   }
-  return cachedLoanColumns;
+  return LOAN_COLUMNS_CACHE;
 }
 
-/** Build a safe include list for list/detail endpoints. */
-async function buildIncludesBase() {
+/** Return list of *model attribute names* whose mapped DB field actually exists */
+async function getSafeLoanAttributeNames() {
   const cols = await getLoanColumns();
+  const attrs = Loan.rawAttributes || {};
+  return Object.keys(attrs).filter((name) => {
+    const field = attrs[name]?.field || name;
+    return cols.has(field);
+  });
+}
 
-  const includes = [
-    { model: Borrower, attributes: BORROWER_ATTRS },
-    { model: Branch }, // association in models/index.js has no alias
+function loanFkField(attrName) {
+  // Map a model attribute to the DB field name (snake_case) if defined
+  const attr = Loan.rawAttributes?.[attrName];
+  return attr?.field || attrName;
+}
+
+async function buildUserIncludesIfPossible() {
+  const cols = await getLoanColumns();
+  const includes = [];
+  const mapping = [
+    { as: "initiator", attr: "initiatedBy" },
+    { as: "approver",  attr: "approvedBy" },
+    { as: "rejector",  attr: "rejectedBy" },
+    { as: "disburser", attr: "disbursedBy" },
   ];
 
-  // ---- Conditionally include User associations (only if defined) ----
-  const a = Loan.associations || {};
-  if (a.initiator) includes.push({ association: a.initiator, attributes: ["id", "name"] });
-  if (a.approver)  includes.push({ association: a.approver,  attributes: ["id", "name"] });
-  if (a.rejector)  includes.push({ association: a.rejector,  attributes: ["id", "name"] });
-  if (a.disburser) includes.push({ association: a.disburser, attributes: ["id", "name"] });
-
-  // ---- Product join: detect the actual FK column present on loans ----
-  let productJoin = null;
-  if (cols.productId) {
-    productJoin = `"Loan"."productId" = "LoanProduct"."id"`;
-  } else if (cols.product_id) {
-    productJoin = `"Loan"."product_id" = "LoanProduct"."id"`;
-  } else if (cols.product) {
-    productJoin = `"Loan"."product" = "LoanProduct"."id"`;
+  for (const m of mapping) {
+    const field = loanFkField(m.attr);
+    if (field && cols.has(field)) {
+      includes.push({ model: User, as: m.as, attributes: ["id", "name"] });
+    }
   }
-
-  if (LoanProduct && productJoin) {
-    includes.push({
-      model: LoanProduct,
-      required: false,
-      attributes: [
-        "id",
-        "name",
-        "code",
-        "status",
-        "interestMethod",
-        "interestRate",
-        "minPrincipal",
-        "maxPrincipal",
-        "minTermMonths",
-        "maxTermMonths",
-        "penaltyRate",
-        "fees",
-        "eligibility",
-        "createdAt",
-        "updatedAt",
-      ],
-      on: sequelize.literal(productJoin), // manual ON avoids wrong FK guesses
-    });
-  }
-
   return includes;
 }
 
@@ -169,11 +157,18 @@ const getAllLoans = async (req, res) => {
     const where = {};
     if (req.query.status && req.query.status !== "all") where.status = req.query.status;
 
-    const includes = await buildIncludesBase();
+    const attributes = await getSafeLoanAttributeNames();
+    const userIncludes = await buildUserIncludesIfPossible();
 
     const loans = await Loan.findAll({
       where,
-      include: includes,
+      attributes, // avoid selecting non-existent columns like initiated_by if DB lacks them
+      include: [
+        { model: Borrower, attributes: BORROWER_ATTRS },
+        { model: Branch },            // no custom alias; matches association
+        { model: LoanProduct },       // no custom alias; matches association
+        ...userIncludes,              // only if the FK column exists in DB
+      ],
       order: [["createdAt", "DESC"]],
       limit: 500,
     });
@@ -193,9 +188,19 @@ const getLoanById = async (req, res) => {
     const { id } = req.params;
     const { includeRepayments = "true", includeSchedule = "true" } = req.query;
 
-    const includes = await buildIncludesBase();
+    const attributes = await getSafeLoanAttributeNames();
+    const userIncludes = await buildUserIncludesIfPossible();
 
-    const loan = await Loan.findByPk(id, { include: includes });
+    const loan = await Loan.findByPk(id, {
+      attributes,
+      include: [
+        { model: Borrower, attributes: BORROWER_ATTRS },
+        { model: Branch },
+        { model: LoanProduct },
+        ...userIncludes,
+      ],
+    });
+
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     let repayments = [];
@@ -211,18 +216,18 @@ const getLoanById = async (req, res) => {
     if (includeRepayments === "true") {
       repayments = await LoanRepayment.findAll({
         where: { loanId: loan.id },
-        order: [["date", "DESC"]],
+        order: [["dueDate", "DESC"], ["createdAt", "DESC"]], // use dueDate, not 'date'
       });
 
       for (const r of repayments) {
         const alloc = r.allocation || [];
         for (const a of alloc) {
           totals.principal += Number(a.principal || 0);
-          totals.interest += Number(a.interest || 0);
-          totals.fees += Number(a.fees || 0);
+          totals.interest  += Number(a.interest  || 0);
+          totals.fees      += Number(a.fees      || 0);
           totals.penalties += Number(a.penalties || 0);
         }
-        totals.totalPaid += Number(r.amount || 0);
+        totals.totalPaid += Number(r.amount || r.total || 0);
       }
 
       totals.outstanding = Math.max(
@@ -297,7 +302,7 @@ const updateLoan = async (req, res) => {
 
     res.json(loan);
   } catch (err) {
-    console.error("Error updating loan:", err);
+    console.error("Update loan error:", err);
     res.status(500).json({ error: "Error updating loan" });
   }
 };
@@ -380,12 +385,12 @@ const updateLoanStatus = async (req, res) => {
     const fields = { status };
 
     if (status === "approved") {
-      fields.approvedBy = req.user?.id || null;
+      if ("approvedBy" in Loan.rawAttributes) fields.approvedBy = req.user?.id || null;
       fields.approvalDate = new Date();
     }
 
     if (status === "disbursed") {
-      fields.disbursedBy = req.user?.id || null;
+      if ("disbursedBy" in Loan.rawAttributes) fields.disbursedBy = req.user?.id || null;
       fields.disbursementDate = new Date();
 
       const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
@@ -412,8 +417,7 @@ const updateLoanStatus = async (req, res) => {
           fees: Number(s.fees || 0),
           penalties: 0,
           total: Number(
-            s.total ??
-              (Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0))
+            s.total ?? (Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0))
           ),
         }));
 
@@ -429,7 +433,7 @@ const updateLoanStatus = async (req, res) => {
         await t.rollback();
         return res.status(400).json({ error: "Outstanding > 0, override required" });
       }
-      fields.closedBy = req.user?.id || null;
+      if ("closedBy" in Loan.rawAttributes) fields.closedBy = req.user?.id || null;
       fields.closedDate = new Date();
       if (override) fields.closeReason = "override";
     }
@@ -446,17 +450,26 @@ const updateLoanStatus = async (req, res) => {
 
     await t.commit();
 
+    const attributes = await getSafeLoanAttributeNames();
+    const userIncludes = await buildUserIncludesIfPossible();
+
     const updatedLoan = await Loan.findByPk(req.params.id, {
-      include: await buildIncludesBase(),
+      attributes,
+      include: [
+        { model: Borrower, attributes: BORROWER_ATTRS },
+        { model: Branch },
+        { model: LoanProduct },
+        ...userIncludes,
+      ]
     });
 
     res.json({
       message: `Loan ${status} successfully`,
-      loan: updatedLoan,
+      loan: updatedLoan
     });
   } catch (err) {
     await t.rollback();
-    console.error("Failed to update loan status:", err);
+    console.error("Update loan status error:", err);
     res.status(500).json({ error: "Failed to update loan status" });
   }
 };
