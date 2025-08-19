@@ -11,6 +11,8 @@ const {
   parseISO, isValid,
 } = require("date-fns");
 
+const sequelize = models.sequelize;
+
 /* ========================= Helpers ========================= */
 
 const getDateRange = (timeRange, startDate, endDate) => {
@@ -33,7 +35,72 @@ const getDateRange = (timeRange, startDate, endDate) => {
     default:         return [null, null];
   }
 };
-const safeNumber = v => Number(v || 0);
+
+const safeNumber = (v) => Number(v || 0);
+
+const safeSum = async (Model, field, where) => {
+  try {
+    if (!Model) return 0;
+    const v = await Model.sum(field, { where });
+    return safeNumber(v || 0);
+  } catch {
+    return 0;
+  }
+};
+
+const safeCount = async (Model, where) => {
+  try {
+    if (!Model) return 0;
+    const v = await Model.count({ where });
+    return Number(v || 0);
+  } catch {
+    return 0;
+  }
+};
+
+const safeFindAll = async (Model, opts) => {
+  try {
+    if (!Model) return [];
+    const rows = await Model.findAll(opts);
+    return rows || [];
+  } catch {
+    return [];
+  }
+};
+
+/** Count loans created in [start,end], trying both createdAt and created_at */
+async function countLoansCreatedBetween(start, end) {
+  const Loan = models.Loan || null;
+  if (!Loan) return 0;
+
+  // 1) Try createdAt (camel)
+  try {
+    return await Loan.count({ where: { createdAt: { [Op.between]: [start, end] } } });
+  } catch {}
+
+  // 2) Try raw column "Loan"."createdAt"
+  try {
+    return await Loan.count({
+      where: sequelize.where(sequelize.col('"Loan"."createdAt"'), { [Op.between]: [start, end] }),
+    });
+  } catch {}
+
+  // 3) Try raw column "Loan"."created_at"
+  try {
+    return await Loan.count({
+      where: sequelize.where(sequelize.col('"Loan"."created_at"'), { [Op.between]: [start, end] }),
+    });
+  } catch {}
+
+  // 4) As a last resort, try disbursementDate (common business metric)
+  try {
+    return await Loan.count({ where: { disbursementDate: { [Op.between]: [start, end] } } });
+  } catch {}
+
+  return 0;
+}
+
+/* ========= Internal: Communications ========= */
 
 async function fetchCommunications({ role, branchId, limit = 20 } = {}) {
   try {
@@ -83,7 +150,6 @@ async function fetchCommunications({ role, branchId, limit = 20 } = {}) {
       })),
     }));
   } catch {
-    // Friendly fallback so dashboard keeps working even if the table isn't present
     return [
       { id: "c1", text: "System notice: Collections review every Friday 16:00." },
       { id: "c2", text: "Reminder: Ensure KYC docs are complete before disbursement." },
@@ -146,10 +212,10 @@ exports.getDashboardSummary = async (req, res) => {
   try {
     const { branchId, officerId, timeRange, startDate, endDate } = req.query;
 
-    const whereLoan = {};
+    const whereLoan     = {};
     const whereBorrower = {};
-    const whereRepay = {};
-    const whereSavings = {};
+    const whereRepay    = {};
+    const whereSavings  = {};
     const wherePayments = {};
 
     if (branchId) {
@@ -163,29 +229,18 @@ exports.getDashboardSummary = async (req, res) => {
     const [start, end] = getDateRange(timeRange, startDate, endDate);
 
     if (start && end) {
-      // Loan creation / disbursement windows
-      whereLoan.createdAt = { [Op.between]: [start, end] };
-      whereLoan.disbursementDate = { [Op.between]: [start, end] };
-
-      // ✅ LoanRepayment uses dueDate (not "date")
-      whereRepay.dueDate = { [Op.between]: [start, end] };
-
-      // SavingsTransaction uses "date" (DATEONLY)
-      whereSavings.date = { [Op.between]: [start, end] };
-
-      // LoanPayment: fallback to createdAt
-      wherePayments.createdAt = { [Op.between]: [start, end] };
+      whereLoan.createdAt         = { [Op.between]: [start, end] };
+      whereLoan.disbursementDate  = { [Op.between]: [start, end] };
+      whereRepay.dueDate          = { [Op.between]: [start, end] };  // ✅ correct column
+      whereSavings.date           = { [Op.between]: [start, end] };
+      wherePayments.createdAt     = { [Op.between]: [start, end] };  // fallback for payments
     }
 
-    const Loan              = models.Loan || null;
-    const Borrower          = models.Borrower || null;
-    const LoanRepayment     = models.LoanRepayment || null;
-    const SavingsTransaction= models.SavingsTransaction || null;
-    const LoanPayment       = models.LoanPayment || null;
-
-    const safeSum   = async (M, field, where) => (M ? (await M.sum(field, { where })) || 0 : 0);
-    const safeCount = async (M, where) => (M ? (await M.count({ where })) || 0 : 0);
-    const safeAll   = async (M, opts)  => (M ? (await M.findAll(opts)) : []);
+    const Borrower           = models.Borrower || null;
+    const Loan               = models.Loan || null;
+    const LoanRepayment      = models.LoanRepayment || null;
+    const SavingsTransaction = models.SavingsTransaction || null;
+    const LoanPayment        = models.LoanPayment || null;
 
     const [
       totalBorrowers,
@@ -205,11 +260,10 @@ exports.getDashboardSummary = async (req, res) => {
       safeCount(Borrower, whereBorrower),
       safeCount(Loan, whereLoan),
       safeSum(Loan, "amount", { ...whereLoan, status: "disbursed" }),
+      // ✅ will return 0 if table doesn't exist
       safeSum(LoanPayment, "amount", wherePayments),
-      // expected = scheduled totals (use dueDate)
       safeSum(LoanRepayment, "total", whereRepay),
-      safeAll(SavingsTransaction, { where: whereSavings }),
-      // status-based sums (won’t throw if status not used)
+      safeFindAll(SavingsTransaction, { where: whereSavings }),
       safeSum(LoanRepayment, "principal", { ...whereRepay, status: "overdue" }),
       safeSum(LoanRepayment, "interest",  { ...whereRepay, status: "overdue" }),
       safeSum(LoanRepayment, "principal", { ...whereRepay, status: "pending" }),
@@ -221,7 +275,7 @@ exports.getDashboardSummary = async (req, res) => {
 
     let totalDeposits = 0, totalWithdrawals = 0;
     for (const tx of savingsTxs) {
-      if (tx.type === "deposit") totalDeposits += safeNumber(tx.amount);
+      if (tx.type === "deposit")   totalDeposits   += safeNumber(tx.amount);
       if (tx.type === "withdrawal") totalWithdrawals += safeNumber(tx.amount);
     }
 
@@ -264,9 +318,9 @@ exports.getDashboardSummary = async (req, res) => {
 exports.getDefaulters = async (req, res) => {
   try {
     const { branchId, officerId, page, pageSize } = req.query;
-    const Loan              = models.Loan || null;
-    const Borrower          = models.Borrower || null;
-    const LoanRepayment     = models.LoanRepayment || null;
+    const Loan          = models.Loan || null;
+    const Borrower      = models.Borrower || null;
+    const LoanRepayment = models.LoanRepayment || null;
 
     const whereLoan = {};
     if (branchId) whereLoan.branchId = branchId;
@@ -283,8 +337,7 @@ exports.getDefaulters = async (req, res) => {
           attributes: ["name", "phone", "email"],
         }] : [],
       }] : [],
-      // ✅ "date" doesn’t exist on LoanRepayment; use dueDate
-      order: [["dueDate", "ASC"]],
+      order: [["dueDate", "ASC"]], // ✅ correct column
     };
 
     if (page && pageSize) {
@@ -323,31 +376,42 @@ exports.getDefaulters = async (req, res) => {
 // GET /api/dashboard/monthly-trends
 exports.getMonthlyTrends = async (_req, res) => {
   try {
-    const Loan              = models.Loan || null;
-    const LoanRepayment     = models.LoanRepayment || null;
-    const SavingsTransaction= models.SavingsTransaction || null;
+    const Loan               = models.Loan || null;
+    const LoanRepayment      = models.LoanRepayment || null;
+    const SavingsTransaction = models.SavingsTransaction || null;
 
-    const now = new Date();
+    const now   = new Date();
     const start = startOfMonth(now);
     const end   = endOfMonth(now);
 
     const [monthlyLoans, monthlyDeposits, monthlyRepayments] = await Promise.all([
-      Loan ? Loan.count({ where: { createdAt: { [Op.between]: [start, end] } } }) : 0,
-      SavingsTransaction
-        ? (await SavingsTransaction.sum("amount", { where: { type: "deposit", date: { [Op.between]: [start, end] } } })) || 0
-        : 0,
-      // ✅ LoanRepayment uses "dueDate"; sum scheduled totals as proxy
-      LoanRepayment
-        ? (await LoanRepayment.sum("total", { where: { dueDate: { [Op.between]: [start, end] } } })) || 0
-        : 0,
+      countLoansCreatedBetween(start, end),
+      (async () => {
+        try {
+          if (!SavingsTransaction) return 0;
+          const v = await SavingsTransaction.sum("amount", {
+            where: { type: "deposit", date: { [Op.between]: [start, end] } },
+          });
+        return safeNumber(v || 0);
+        } catch { return 0; }
+      })(),
+      (async () => {
+        try {
+          if (!LoanRepayment) return 0;
+          const v = await LoanRepayment.sum("total", {
+            where: { dueDate: { [Op.between]: [start, end] } },
+          });
+          return safeNumber(v || 0);
+        } catch { return 0; }
+      })(),
     ]);
 
     res.json({
       month: now.toLocaleString("default", { month: "long" }),
       year:  now.getFullYear(),
       monthlyLoans,
-      monthlyDeposits: Number(monthlyDeposits || 0),
-      monthlyRepayments: Number(monthlyRepayments || 0),
+      monthlyDeposits,
+      monthlyRepayments,
     });
   } catch (error) {
     console.error("Monthly trends error:", error);
@@ -376,28 +440,38 @@ exports.getActivityFeed = async (req, res) => {
 
     const include = [];
     if (models.User) {
-      // IMPORTANT: alias must match association: as: 'User'
       include.push({ model: models.User, as: 'User', attributes: ["id", "name", "email"] });
     }
 
-    const { count, rows } = await models.ActivityLog.findAndCountAll({
-      where,
-      include,
-      order: [["createdAt", "DESC"]],
-      offset,
-      limit,
-    });
+    let count = 0, rows = [];
+    try {
+      ({ count, rows } = await models.ActivityLog.findAndCountAll({
+        where,
+        include,
+        order: [["createdAt", "DESC"]],
+        offset,
+        limit,
+      }));
+    } catch (e) {
+      // relation not found → return empty instead of 500
+      if (e?.parent?.code === '42P01') return res.json({ items: [], total: 0 });
+      throw e;
+    }
 
     const items = await Promise.all(rows.map(async a => {
       let comments = [];
       if (models.ActivityComment) {
         const cInclude = models.User ? [{ model: models.User, as: 'User', attributes: ["id", "name", "email"] }] : [];
-        comments = await models.ActivityComment.findAll({
-          where: { activityId: a.id },
-          include: cInclude,
-          order: [["createdAt", "DESC"]],
-          limit: 2,
-        });
+        try {
+          comments = await models.ActivityComment.findAll({
+            where: { activityId: a.id },
+            include: cInclude,
+            order: [["createdAt", "DESC"]],
+            limit: 2,
+          });
+        } catch {
+          comments = [];
+        }
       }
       return {
         id: a.id,
