@@ -1,14 +1,16 @@
+"use strict";
+
 const { Op } = require('sequelize');
 const models = require('../models');
 
-const Borrower = models.Borrower || null;
-const Loan = models.Loan || null;
-const LoanRepayment = models.LoanRepayment || null;
+const Borrower           = models.Borrower || null;
+const Loan               = models.Loan || null;
+const LoanRepayment      = models.LoanRepayment || null;
 const SavingsTransaction = models.SavingsTransaction || null;
-const Group = models.BorrowerGroup || models.Group || null;
-const GroupMember = models.BorrowerGroupMember || models.GroupMember || null;
-const BorrowerComment = models.BorrowerComment || null;
-const KYCDocument = models.KYCDocument || null;
+const Group              = models.BorrowerGroup || models.Group || null;
+const GroupMember        = models.BorrowerGroupMember || models.GroupMember || null;
+const BorrowerComment    = models.BorrowerComment || null;
+const KYCDocument        = models.KYCDocument || null;
 
 const toApi = (b) => {
   if (!b) return null;
@@ -21,15 +23,15 @@ const safeNum = (v) => Number(v || 0);
 // ---------- CRUD ----------
 exports.getAllBorrowers = async (req, res) => {
   try {
-    if (!Borrower) return res.json([]);
+    if (!Borrower) return res.json({ items: [], total: 0 });
     const { q = '', branchId, page = 1, pageSize = 50 } = req.query;
 
     const where = {};
     if (branchId) where.branchId = branchId;
     if (q) {
       where[Op.or] = [
-        { name: { [Op.iLike]: `%${q}%` } },
-        { phone: { [Op.iLike]: `%${q}%` } },
+        { name:       { [Op.iLike]: `%${q}%` } },
+        { phone:      { [Op.iLike]: `%${q}%` } },
         { nationalId: { [Op.iLike]: `%${q}%` } },
       ];
     }
@@ -37,8 +39,14 @@ exports.getAllBorrowers = async (req, res) => {
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
 
+    // Select a conservative set of attributes that are very likely to exist.
+    // (Excluding branchId keeps you safe if that column is absent in DB.)
+    const attributes = ['id', 'name', 'nationalId', 'phone', 'address', 'createdAt', 'updatedAt']
+      .filter(a => Borrower.rawAttributes[a]);
+
     const { rows, count } = await Borrower.findAndCountAll({
       where,
+      attributes,
       order: [['createdAt', 'DESC']],
       limit,
       offset,
@@ -55,19 +63,29 @@ exports.createBorrower = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: 'Borrower model not available' });
 
-    const { name, fullName, nationalId, phone, email, address, branchId } = req.body || {};
+    const { name, fullName, nationalId, phone, email, address } = req.body || {};
     if (!name && !fullName) return res.status(400).json({ error: 'name is required' });
 
-    const created = await Borrower.create({
+    // If model defines branchId and it's NOT NULL, require it from body or header.
+    const needsBranchId = !!Borrower.rawAttributes.branchId && Borrower.rawAttributes.branchId.allowNull === false;
+    const incomingBranchId = req.body?.branchId || req.headers['x-branch-id'] || req.user?.branchId || null;
+    if (needsBranchId && !incomingBranchId) {
+      return res.status(400).json({ error: 'branchId is required' });
+    }
+
+    const payload = {
       name: name || fullName || '',
       nationalId: nationalId || null,
       phone: phone || null,
       email: email || null,
       address: address || null,
-      branchId: branchId || null,
       status: 'active',
-    });
+    };
+    if (Borrower.rawAttributes.branchId && incomingBranchId) {
+      payload.branchId = incomingBranchId;
+    }
 
+    const created = await Borrower.create(payload);
     res.status(201).json(toApi(created));
   } catch (error) {
     console.error('createBorrower error:', error);
@@ -95,13 +113,13 @@ exports.updateBorrower = async (req, res) => {
 
     const { name, fullName, nationalId, phone, email, address, branchId, status } = req.body || {};
     await b.update({
-      name: name ?? fullName ?? b.name,
+      name:       (name ?? fullName) ?? b.name,
       nationalId: nationalId ?? b.nationalId,
-      phone: phone ?? b.phone,
-      email: email ?? b.email,
-      address: address ?? b.address,
-      branchId: branchId ?? b.branchId,
-      status: status ?? b.status,
+      phone:      phone ?? b.phone,
+      email:      email ?? b.email,
+      address:    address ?? b.address,
+      branchId:   (Borrower.rawAttributes.branchId ? (branchId ?? b.branchId) : b.branchId),
+      status:     status ?? b.status,
     });
 
     res.json(toApi(b));
@@ -146,7 +164,7 @@ exports.getRepaymentsByBorrower = async (req, res) => {
     if (!Loan || !LoanRepayment) return res.json([]);
     const rows = await LoanRepayment.findAll({
       include: [{ model: Loan, where: { borrowerId: req.params.id } }],
-      order: [['date', 'DESC'], ['createdAt', 'DESC']],
+      order: [['dueDate', 'DESC'], ['createdAt', 'DESC']], // ✅ dueDate not "date"
       limit: 500,
     });
     res.json(rows || []);
@@ -434,15 +452,13 @@ exports.groupReports = async (_req, res) => {
     const groups = await Group.findAll({ include: [{ model: GroupMember }] });
 
     const results = await Promise.all(groups.map(async (g) => {
-      const membersCount = g.GroupMembers?.length || 0;
+      const memberIds = (g.GroupMembers || []).map(m => m.borrowerId);
+      const membersCount = memberIds.length;
+
       let totalLoans = 0, totalLoanAmount = 0;
-      if (Loan) {
-        totalLoans = await Loan.count({
-          where: { borrowerId: g.GroupMembers.map(m => m.borrowerId) }
-        });
-        totalLoanAmount = await Loan.sum('amount', {
-          where: { borrowerId: g.GroupMembers.map(m => m.borrowerId) }
-        }) || 0;
+      if (Loan && membersCount) {
+        totalLoans = await Loan.count({ where: { borrowerId: memberIds } });
+        totalLoanAmount = (await Loan.sum('amount', { where: { borrowerId: memberIds } })) || 0;
       }
       return { id: g.id, name: g.name, membersCount, totalLoans, totalLoanAmount };
     }));
@@ -500,7 +516,7 @@ exports.importBorrowers = async (req, res) => {
     const header = lines[0].split(',').map(h => h.trim().toLowerCase());
     const nameIdx = header.indexOf('name');
     const phoneIdx = header.indexOf('phone');
-    const nidIdx = header.indexOf('nationalid');
+    const nidIdx   = header.indexOf('nationalid');
 
     if (nameIdx === -1) return res.status(400).json({ error: 'CSV must include a "name" column' });
 
@@ -509,8 +525,8 @@ exports.importBorrowers = async (req, res) => {
       const cols = lines[i].split(',').map(c => c.trim());
       const name = cols[nameIdx];
       if (!name) continue;
-      const phone = phoneIdx !== -1 ? cols[phoneIdx] : null;
-      const nationalId = nidIdx !== -1 ? cols[nidIdx] : null;
+      const phone      = phoneIdx !== -1 ? cols[phoneIdx] : null;
+      const nationalId = nidIdx   !== -1 ? cols[nidIdx]   : null;
 
       const b = await Borrower.create({ name, phone, nationalId, status: 'active' });
       created.push(toApi(b));
@@ -543,7 +559,8 @@ exports.summaryReport = async (req, res) => {
         include: [{ model: Loan, where: { borrowerId: b.id }, attributes: [] }],
       });
     }
-    const totalRepayments = reps.reduce((acc, r) => acc + safeNum(r.amount || r.amountPaid), 0);
+    // fallback to 'amount' if 'amountPaid' does not exist
+    const totalRepayments = reps.reduce((acc, r) => acc + safeNum(r.amountPaid ?? r.amount), 0);
 
     let balance = 0;
     let txCount = 0;
@@ -559,10 +576,10 @@ exports.summaryReport = async (req, res) => {
     }
 
     res.json({
-      borrower: { id: b.id, name: b.name, status: b.status },
-      loans: { count: loans.length, totalDisbursed },
-      repayments: { count: reps.length, total: totalRepayments },
-      savings: { balance, txCount },
+      borrower:   { id: b.id, name: b.name, status: b.status },
+      loans:      { count: loans.length, totalDisbursed },
+      repayments: { count: reps.length,  total: totalRepayments },
+      savings:    { balance, txCount },
       parPercent: Number(b.parPercent || 0),
       overdueAmount: Number(b.overdueAmount || 0),
     });
@@ -574,32 +591,27 @@ exports.summaryReport = async (req, res) => {
 
 exports.globalBorrowerReport = async (req, res) => {
   try {
-    if (!Borrower) return res.json([]);
+    if (!Borrower) return res.json({ items: [], total: 0 });
     const { branchId, status } = req.query;
 
     const where = {};
     if (branchId) where.branchId = branchId;
-    if (status) where.status = status;
+    if (status)   where.status   = status;
 
     const borrowers = await Borrower.findAll({ where });
 
     const report = await Promise.all(borrowers.map(async (b) => {
-      let loans = Loan ? await Loan.count({ where: { borrowerId: b.id } }) : 0;
-      let totalLoanAmount = Loan ? await Loan.sum('amount', { where: { borrowerId: b.id } }) || 0 : 0;
-      let totalRepayments = 0;
+      const id = b.id;
+      const loansCount  = Loan ? await Loan.count({ where: { borrowerId: id } }) : 0;
+      const loansTotal  = Loan ? (await Loan.sum('amount', { where: { borrowerId: id } })) || 0 : 0;
+
+      let repaymentsTotal = 0;
       if (LoanRepayment && Loan) {
-        totalRepayments = await LoanRepayment.sum('amount', {
-          include: [{ model: Loan, where: { borrowerId: b.id }, attributes: [] }]
-        }) || 0;
+        repaymentsTotal = (await LoanRepayment.sum('amount', {
+          include: [{ model: Loan, where: { borrowerId: id }, attributes: [] }]
+        })) || 0;
       }
-      return {
-        id: b.id,
-        name: b.name,
-        status: b.status,
-        loansCount: loans,
-        loansTotal: totalLoanAmount,
-        repaymentsTotal: totalRepayments
-      };
+      return { id, name: b.name, status: b.status, loansCount, loansTotal, repaymentsTotal };
     }));
 
     res.json({ items: report, total: report.length });

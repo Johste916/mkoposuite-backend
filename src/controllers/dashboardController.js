@@ -1,17 +1,7 @@
-// controllers/dashboardController.js
 "use strict";
 
-const {
-  Borrower,
-  Loan,
-  LoanRepayment,
-  SavingsTransaction,
-  LoanPayment,     // used if present
-  User,
-  sequelize,
-} = require("../models");
-const models = require("../models");
 const { Op } = require("sequelize");
+const models = require("../models");
 const {
   startOfDay, endOfDay,
   startOfWeek, endOfWeek,
@@ -26,21 +16,21 @@ const {
 const getDateRange = (timeRange, startDate, endDate) => {
   const now = new Date();
   switch (timeRange) {
-    case "today": return [startOfDay(now), endOfDay(now)];
-    case "week": return [startOfWeek(now), endOfWeek(now)];
-    case "month": return [startOfMonth(now), endOfMonth(now)];
-    case "quarter": return [startOfQuarter(now), endOfQuarter(now)];
+    case "today":    return [startOfDay(now), endOfDay(now)];
+    case "week":     return [startOfWeek(now), endOfWeek(now)];
+    case "month":    return [startOfMonth(now), endOfMonth(now)];
+    case "quarter":  return [startOfQuarter(now), endOfQuarter(now)];
     case "semiAnnual":
       return now.getMonth() < 6
-        ? [new Date(now.getFullYear(), 0, 1), new Date(now.getFullYear(), 5, 30)]
-        : [new Date(now.getFullYear(), 6, 1), new Date(now.getFullYear(), 11, 31)];
-    case "annual": return [startOfYear(now), endOfYear(now)];
+        ? [new Date(now.getFullYear(), 0, 1),  new Date(now.getFullYear(), 5, 30)]
+        : [new Date(now.getFullYear(), 6, 1),  new Date(now.getFullYear(), 11, 31)];
+    case "annual":   return [startOfYear(now), endOfYear(now)];
     case "custom": {
       const s = startDate ? parseISO(startDate) : null;
-      const e = endDate ? parseISO(endDate) : null;
+      const e = endDate   ? parseISO(endDate)   : null;
       return [s, e];
     }
-    default: return [null, null];
+    default:         return [null, null];
   }
 };
 const safeNumber = v => Number(v || 0);
@@ -53,7 +43,7 @@ async function fetchCommunications({ role, branchId, limit = 20 } = {}) {
     const timeWindow = {
       [Op.and]: [
         { [Op.or]: [{ startAt: null }, { startAt: { [Op.lte]: now } }] },
-        { [Op.or]: [{ endAt: null }, { endAt: { [Op.gte]: now } }] },
+        { [Op.or]: [{ endAt: null },   { endAt:   { [Op.gte]: now } }] },
       ],
     };
 
@@ -63,13 +53,7 @@ async function fetchCommunications({ role, branchId, limit = 20 } = {}) {
       : {};
 
     const rows = await models.Communication.findAll({
-      where: {
-        isActive: true,
-        showInTicker: true,
-        ...timeWindow,
-        ...roleClause,
-        ...branchClause,
-      },
+      where: { isActive: true, showInTicker: true, ...timeWindow, ...roleClause, ...branchClause },
       order: [
         [models.sequelize.literal(`
           CASE 
@@ -115,7 +99,7 @@ async function fetchDashboardMessage({ role, branchId } = {}) {
     const timeWindow = {
       [Op.and]: [
         { [Op.or]: [{ startAt: null }, { startAt: { [Op.lte]: now } }] },
-        { [Op.or]: [{ endAt: null }, { endAt: { [Op.gte]: now } }] },
+        { [Op.or]: [{ endAt: null },   { endAt:   { [Op.gte]: now } }] },
       ],
     };
 
@@ -125,13 +109,7 @@ async function fetchDashboardMessage({ role, branchId } = {}) {
       : {};
 
     const msg = await models.Communication.findOne({
-      where: {
-        isActive: true,
-        showOnDashboard: true,
-        ...timeWindow,
-        ...roleClause,
-        ...branchClause,
-      },
+      where: { isActive: true, showOnDashboard: true, ...timeWindow, ...roleClause, ...branchClause },
       order: [
         [models.sequelize.literal(`
           CASE 
@@ -192,29 +170,27 @@ exports.getDashboardSummary = async (req, res) => {
       // ✅ LoanRepayment uses dueDate (not "date")
       whereRepay.dueDate = { [Op.between]: [start, end] };
 
-      // SavingsTransaction uses "date" (DATEONLY) – OK
+      // SavingsTransaction uses "date" (DATEONLY)
       whereSavings.date = { [Op.between]: [start, end] };
 
-      // LoanPayment: unknown column, fall back to createdAt
+      // LoanPayment: fallback to createdAt
       wherePayments.createdAt = { [Op.between]: [start, end] };
     }
 
-    // Compute safely; any missing tables/columns won’t 500
-    const safeSum = async (Model, field, where) => {
-      try { return await Model.sum(field, { where }); } catch { return 0; }
-    };
-    const safeCount = async (Model, where) => {
-      try { return await Model.count({ where }); } catch { return 0; }
-    };
-    const safeFindAll = async (Model, opts) => {
-      try { return await Model.findAll(opts); } catch { return []; }
-    };
+    const Loan              = models.Loan || null;
+    const Borrower          = models.Borrower || null;
+    const LoanRepayment     = models.LoanRepayment || null;
+    const SavingsTransaction= models.SavingsTransaction || null;
+    const LoanPayment       = models.LoanPayment || null;
+
+    const safeSum   = async (M, field, where) => (M ? (await M.sum(field, { where })) || 0 : 0);
+    const safeCount = async (M, where) => (M ? (await M.count({ where })) || 0 : 0);
+    const safeAll   = async (M, opts)  => (M ? (await M.findAll(opts)) : []);
 
     const [
       totalBorrowers,
       totalLoans,
       totalDisbursedAmount,
-      // Prefer actual payments if LoanPayment exists; else 0 and we’ll fallback
       sumLoanPayments,
       sumExpectedAmount,
       savingsTxs,
@@ -229,11 +205,11 @@ exports.getDashboardSummary = async (req, res) => {
       safeCount(Borrower, whereBorrower),
       safeCount(Loan, whereLoan),
       safeSum(Loan, "amount", { ...whereLoan, status: "disbursed" }),
-      LoanPayment ? safeSum(LoanPayment, "amount", wherePayments) : 0,
-      // ✅ expected = scheduled totals within window (dueDate)
+      safeSum(LoanPayment, "amount", wherePayments),
+      // expected = scheduled totals (use dueDate)
       safeSum(LoanRepayment, "total", whereRepay),
-      safeFindAll(SavingsTransaction, { where: whereSavings }),
-      // These rely on your status values; they’ll just be 0 if you don’t mark them that way
+      safeAll(SavingsTransaction, { where: whereSavings }),
+      // status-based sums (won’t throw if status not used)
       safeSum(LoanRepayment, "principal", { ...whereRepay, status: "overdue" }),
       safeSum(LoanRepayment, "interest",  { ...whereRepay, status: "overdue" }),
       safeSum(LoanRepayment, "principal", { ...whereRepay, status: "pending" }),
@@ -243,14 +219,12 @@ exports.getDashboardSummary = async (req, res) => {
       fetchDashboardMessage({ role: req.user?.role, branchId }),
     ]);
 
-    // Savings totals
     let totalDeposits = 0, totalWithdrawals = 0;
     for (const tx of savingsTxs) {
-      if (tx.type === "deposit")   totalDeposits   += safeNumber(tx.amount);
+      if (tx.type === "deposit") totalDeposits += safeNumber(tx.amount);
       if (tx.type === "withdrawal") totalWithdrawals += safeNumber(tx.amount);
     }
 
-    // If we couldn’t read LoanPayment, fallback to scheduled (sumExpectedAmount)
     const totalPaid = safeNumber(sumLoanPayments || 0);
     const totalExpectedRepayments = safeNumber(sumExpectedAmount);
     const totalDisbursed = safeNumber(totalDisbursedAmount);
@@ -264,7 +238,7 @@ exports.getDashboardSummary = async (req, res) => {
       totalLoans,
       totalDisbursed,
       totalPaid,
-      totalRepaid: totalPaid, // keep payload shape
+      totalRepaid: totalPaid,
       totalExpectedRepayments,
       totalDeposits,
       totalWithdrawals,
@@ -290,6 +264,9 @@ exports.getDashboardSummary = async (req, res) => {
 exports.getDefaulters = async (req, res) => {
   try {
     const { branchId, officerId, page, pageSize } = req.query;
+    const Loan              = models.Loan || null;
+    const Borrower          = models.Borrower || null;
+    const LoanRepayment     = models.LoanRepayment || null;
 
     const whereLoan = {};
     if (branchId) whereLoan.branchId = branchId;
@@ -297,15 +274,15 @@ exports.getDefaulters = async (req, res) => {
 
     const baseQuery = {
       where: { status: "overdue" },
-      include: [{
-        model: models.Loan,
+      include: Loan ? [{
+        model: Loan,
         attributes: ["id", "amount", "borrowerId"],
         where: whereLoan,
-        include: [{
-          model: models.Borrower,
+        include: Borrower ? [{
+          model: Borrower,
           attributes: ["name", "phone", "email"],
-        }],
-      }],
+        }] : [],
+      }] : [],
       // ✅ "date" doesn’t exist on LoanRepayment; use dueDate
       order: [["dueDate", "ASC"]],
     };
@@ -314,7 +291,7 @@ exports.getDefaulters = async (req, res) => {
       const limit  = Number(pageSize);
       const offset = (Number(page) - 1) * limit;
 
-      const { count, rows } = await models.LoanRepayment.findAndCountAll({
+      const { count, rows } = await LoanRepayment.findAndCountAll({
         ...baseQuery,
         offset,
         limit,
@@ -330,7 +307,7 @@ exports.getDefaulters = async (req, res) => {
       });
     }
 
-    const rows = await models.LoanRepayment.findAll(baseQuery);
+    const rows = await LoanRepayment.findAll(baseQuery);
     res.json(rows.map(r => ({
       name:  r?.Loan?.Borrower?.name  || "Unknown",
       phone: r?.Loan?.Borrower?.phone || "",
@@ -344,18 +321,25 @@ exports.getDefaulters = async (req, res) => {
 };
 
 // GET /api/dashboard/monthly-trends
-exports.getMonthlyTrends = async (req, res) => {
+exports.getMonthlyTrends = async (_req, res) => {
   try {
+    const Loan              = models.Loan || null;
+    const LoanRepayment     = models.LoanRepayment || null;
+    const SavingsTransaction= models.SavingsTransaction || null;
+
     const now = new Date();
     const start = startOfMonth(now);
     const end   = endOfMonth(now);
 
     const [monthlyLoans, monthlyDeposits, monthlyRepayments] = await Promise.all([
-      Loan.count({ where: { createdAt: { [Op.between]: [start, end] } } }),
-      // SavingsTransaction has "date"
-      SavingsTransaction.sum("amount", { where: { type: "deposit", date: { [Op.between]: [start, end] } } }),
-      // ✅ LoanRepayment uses "dueDate" and does NOT have amountPaid; use scheduled totals as proxy
-      LoanRepayment.sum("total", { where: { dueDate: { [Op.between]: [start, end] } } }),
+      Loan ? Loan.count({ where: { createdAt: { [Op.between]: [start, end] } } }) : 0,
+      SavingsTransaction
+        ? (await SavingsTransaction.sum("amount", { where: { type: "deposit", date: { [Op.between]: [start, end] } } })) || 0
+        : 0,
+      // ✅ LoanRepayment uses "dueDate"; sum scheduled totals as proxy
+      LoanRepayment
+        ? (await LoanRepayment.sum("total", { where: { dueDate: { [Op.between]: [start, end] } } })) || 0
+        : 0,
     ]);
 
     res.json({
@@ -390,23 +374,31 @@ exports.getActivityFeed = async (req, res) => {
     const limit  = Number(pageSize);
     const offset = (Number(page) - 1) * limit;
 
+    const include = [];
+    if (models.User) {
+      // IMPORTANT: alias must match association: as: 'User'
+      include.push({ model: models.User, as: 'User', attributes: ["id", "name", "email"] });
+    }
+
     const { count, rows } = await models.ActivityLog.findAndCountAll({
       where,
-      include: [{ model: User, attributes: ["id", "name", "email"] }],
+      include,
       order: [["createdAt", "DESC"]],
       offset,
       limit,
     });
 
     const items = await Promise.all(rows.map(async a => {
-      const comments = models.ActivityComment
-        ? await models.ActivityComment.findAll({
-            where: { activityId: a.id },
-            include: [{ model: User, attributes: ["id", "name", "email"] }],
-            order: [["createdAt", "DESC"]],
-            limit: 2,
-          })
-        : [];
+      let comments = [];
+      if (models.ActivityComment) {
+        const cInclude = models.User ? [{ model: models.User, as: 'User', attributes: ["id", "name", "email"] }] : [];
+        comments = await models.ActivityComment.findAll({
+          where: { activityId: a.id },
+          include: cInclude,
+          order: [["createdAt", "DESC"]],
+          limit: 2,
+        });
+      }
       return {
         id: a.id,
         type: a.type,
