@@ -1,4 +1,3 @@
-// backend/src/models/Role.js
 module.exports = (sequelize, DataTypes) => {
   const Role = sequelize.define(
     'Role',
@@ -17,6 +16,12 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(255),
         allowNull: false,
         defaultValue: '',
+      },
+      // ✅ used by seeder; prevents “Unknown attributes (isSystem)” warning
+      isSystem: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
       },
     },
     {

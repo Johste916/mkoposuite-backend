@@ -1,4 +1,3 @@
-// backend/src/models/Permission.js
 module.exports = (sequelize, DataTypes) => {
   const JSON_TYPE =
     sequelize.getDialect && sequelize.getDialect() === 'postgres'
@@ -13,11 +12,14 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: DataTypes.UUIDV4,
         primaryKey: true,
       },
+      // action like "staff.read", "staff.create", etc.
       action: {
         type: DataTypes.STRING(120),
         allowNull: false,
         unique: true,
       },
+      // optional: list of role names that have this permission
+      // (works with your existing allow(...) middleware style)
       roles: {
         type: JSON_TYPE,
         allowNull: false,
@@ -27,6 +29,12 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(255),
         allowNull: false,
         defaultValue: '',
+      },
+      // ✅ used by seeder; prevents “Unknown attributes (isSystem)” warning
+      isSystem: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
       },
     },
     {
