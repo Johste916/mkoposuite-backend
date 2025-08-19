@@ -1,68 +1,51 @@
-"use strict";
-
+// src/models/loan.js
 module.exports = (sequelize, DataTypes) => {
   const Loan = sequelize.define(
-    "Loan",
+    'Loan',
     {
-      id: {
-        type: DataTypes.UUID,
-        defaultValue: DataTypes.UUIDV4,
-        primaryKey: true,
-      },
+      // FKs
+      borrowerId: { type: DataTypes.INTEGER, allowNull: false },
+      branchId:   { type: DataTypes.INTEGER, allowNull: true },
+      // map to loans.product_id in DB
+      productId:  { type: DataTypes.INTEGER, allowNull: true, field: 'product_id' },
 
-      // Actual DB column is camelCase borrowerId
-      borrowerId: {
-        type: DataTypes.UUID,
-        allowNull: false,
-        field: "borrowerId",
-      },
+      // Amounts / currency
+      amount:   { type: DataTypes.DECIMAL(14,2), allowNull: false, defaultValue: 0 },
+      currency: { type: DataTypes.STRING(8), allowNull: true, defaultValue: 'KES' },
 
-      // ✅ FIX: actual DB column is camelCase productId (not product_id)
-      productId: {
-        type: DataTypes.UUID,
-        allowNull: true,
-        field: "productId",
-      },
+      // Terms (snake_case columns in DB)
+      interestRate:       { type: DataTypes.DECIMAL(10,4), field: 'interest_rate' },
+      termMonths:         { type: DataTypes.INTEGER,       field: 'term_months' },
+      startDate:          { type: DataTypes.DATEONLY,      field: 'start_date' },
+      endDate:            { type: DataTypes.DATEONLY,      field: 'end_date' },
+      repaymentFrequency: { type: DataTypes.STRING,        field: 'repayment_frequency' },
+      interestMethod:     { type: DataTypes.STRING,        field: 'interest_method' },
 
-      // We already fixed branch to camelCase earlier
-      branchId: {
-        type: DataTypes.UUID,
-        allowNull: true,
-        field: "branchId",
-      },
+      status: { type: DataTypes.STRING },
 
-      amount: { type: DataTypes.DECIMAL(18, 2), allowNull: false },
-      currency: { type: DataTypes.STRING(10), allowNull: true, defaultValue: "KES" },
+      totalInterest: { type: DataTypes.DECIMAL(14,2), field: 'total_interest' },
+      outstanding:   { type: DataTypes.DECIMAL(14,2) },
 
-      interestRate: { type: DataTypes.DECIMAL(10, 4), allowNull: true, field: "interest_rate" },
-      termMonths: { type: DataTypes.INTEGER, allowNull: true, field: "term_months" },
-      startDate: { type: DataTypes.DATEONLY, allowNull: true, field: "start_date" },
-      endDate: { type: DataTypes.DATEONLY, allowNull: true, field: "end_date" },
-      repaymentFrequency: { type: DataTypes.STRING(20), allowNull: true, field: "repayment_frequency" },
-      interestMethod: { type: DataTypes.STRING(20), allowNull: true, field: "interest_method" },
+      // User traceability (UUIDs on loans table)
+      initiatedBy: { type: DataTypes.UUID, field: 'initiated_by' },
+      approvedBy:  { type: DataTypes.UUID, field: 'approved_by'  },
+      rejectedBy:  { type: DataTypes.UUID, field: 'rejected_by'  },
+      disbursedBy: { type: DataTypes.UUID, field: 'disbursed_by' },
+      closedBy:    { type: DataTypes.UUID, field: 'closed_by'    },
 
-      status: { type: DataTypes.STRING(20), allowNull: true },
+      approvalDate:       { type: DataTypes.DATE, field: 'approval_date' },
+      rejectionDate:      { type: DataTypes.DATE, field: 'rejection_date' },
+      disbursementDate:   { type: DataTypes.DATE, field: 'disbursement_date' },
+      closedDate:         { type: DataTypes.DATE, field: 'closed_date' },
 
-      initiatedBy: { type: DataTypes.UUID, allowNull: true, field: "initiated_by" },
-      approvedBy: { type: DataTypes.UUID, allowNull: true, field: "approved_by" },
-      approvalDate: { type: DataTypes.DATE, allowNull: true, field: "approval_date" },
-      approvalComments: { type: DataTypes.TEXT, allowNull: true, field: "approval_comments" },
-
-      rejectedBy: { type: DataTypes.UUID, allowNull: true, field: "rejected_by" },
-      rejectionDate: { type: DataTypes.DATE, allowNull: true, field: "rejection_date" },
-      rejectionComments: { type: DataTypes.TEXT, allowNull: true, field: "rejection_comments" },
-
-      disbursedBy: { type: DataTypes.UUID, allowNull: true, field: "disbursed_by" },
-      disbursementDate: { type: DataTypes.DATE, allowNull: true, field: "disbursement_date" },
-      disbursementMethod: { type: DataTypes.STRING(50), allowNull: true, field: "disbursement_method" },
-
-      totalInterest: { type: DataTypes.DECIMAL(18, 2), allowNull: true, field: "total_interest" },
-      outstanding: { type: DataTypes.DECIMAL(18, 2), allowNull: true, field: "outstanding" },
+      approvalComments:   { type: DataTypes.TEXT,   field: 'approval_comments' },
+      rejectionComments:  { type: DataTypes.TEXT,   field: 'rejection_comments' },
+      disbursementMethod: { type: DataTypes.STRING, field: 'disbursement_method' },
+      closeReason:        { type: DataTypes.STRING, field: 'close_reason' },
     },
     {
-      tableName: "loans",
-      underscored: true, // keeps created_at/updated_at
-      timestamps: true,
+      tableName: 'loans',
+      underscored: true, // created_at / updated_at
     }
   );
 
