@@ -1,44 +1,30 @@
-// backend/src/controllers/loanController.js
 "use strict";
 
-/**
- * Hardened Loan controller:
- * - Uses association introspection to include relations only when present.
- * - Uses correct alias for Branch if defined (commonly 'Branch'); otherwise no alias.
- * - Orders by createdAt with fallback to raw createdAt/created_at.
- * - Uses LoanRepayment.dueDate (not 'date') and tolerates missing fields (amount/allocations).
- * - Defensive audit logging (optional AuditLog model).
- */
+const {
+  Loan,
+  Borrower,
+  Branch,
+  User,
+  LoanProduct,
+  LoanRepayment,
+  LoanSchedule,
+  AuditLog,
+  sequelize,
+} = require("../models");
 
-const models = require("../models");
 const {
   generateFlatRateSchedule,
   generateReducingBalanceSchedule,
 } = require("../utils/generateSchedule");
 
-const sequelize = models.sequelize;
-
-// Prefer grabbing models from the registry so missing ones don't crash
-const Loan           = models.Loan || null;
-const Borrower       = models.Borrower || null;
-const Branch         = models.Branch || null;
-const User           = models.User || null;
-const LoanProduct    = models.LoanProduct || null;
-const LoanRepayment  = models.LoanRepayment || null;
-const LoanSchedule   = models.LoanSchedule || null;
-const AuditLog       = models.AuditLog || null;
-
 const BORROWER_ATTRS = ["id", "name", "nationalId", "phone"];
 
-// Allowed status transitions
 const ALLOWED = {
-  pending:   ["approved", "rejected"],
-  approved:  ["disbursed"],
+  pending: ["approved", "rejected"],
+  approved: ["disbursed"],
   disbursed: ["active", "closed"],
-  active:    ["closed"],
+  active: ["closed"],
 };
-
-/* -------------------------------- helpers -------------------------------- */
 
 const writeAudit = async ({ entityId, action, before, after, req }) => {
   try {
@@ -57,73 +43,92 @@ const writeAudit = async ({ entityId, action, before, after, req }) => {
   }
 };
 
-// Try to order by createdAt, then raw createdAt, then created_at
-function buildCreatedOrder(Model, direction = "DESC") {
-  const items = [];
-  // attribute if it exists
-  items.push(["createdAt", direction]);
-  // raw camel
-  items.push([sequelize.literal(`"${Model?.name || "Loan"}"."createdAt"`), direction]);
-  // raw snake
-  items.push([sequelize.literal(`"${Model?.name || "Loan"}"."created_at"`), direction]);
-  return items;
+/* ------------------------------------------------------------------
+   Helpers: figure out which FK columns actually exist on `loans`
+------------------------------------------------------------------- */
+let cachedLoanColumns = null;
+
+async function getLoanColumns() {
+  if (cachedLoanColumns) return cachedLoanColumns;
+  try {
+    const qi = sequelize.getQueryInterface();
+    cachedLoanColumns = await qi.describeTable("loans"); // { columnName: { ...def } }
+  } catch {
+    cachedLoanColumns = {};
+  }
+  return cachedLoanColumns;
 }
 
-// Build safe include array using existing associations only
-function buildLoanIncludes() {
-  if (!Loan) return [];
+/** Build a safe include list for list/detail endpoints.
+ *  - Branch/Borrower use standard associations.
+ *  - LoanProduct is attached using a manual ON clause if (and only if)
+ *    we detect a matching FK column on the loans table.
+ */
+async function buildIncludesForList() {
+  const cols = await getLoanColumns();
+  const includes = [
+    { model: Borrower, attributes: BORROWER_ATTRS },
+    { model: Branch }, // association in models/index.js has no alias
+    // Users with role-like relations
+    { model: User, as: "initiator", attributes: ["id", "name"] },
+    { model: User, as: "approver", attributes: ["id", "name"] },
+    { model: User, as: "rejector", attributes: ["id", "name"] },
+    { model: User, as: "disburser", attributes: ["id", "name"] },
+  ];
 
-  const assoc = Loan.associations || {};
-  const inc = [];
-
-  if (Borrower && (assoc.Borrower || assoc.borrower)) {
-    inc.push({ model: Borrower, attributes: BORROWER_ATTRS });
-  } else if (Borrower) {
-    // no alias specified in association — Sequelize's default is the Model name
-    inc.push({ model: Borrower, attributes: BORROWER_ATTRS });
+  // Try to discover the product FK actually present in DB
+  let productJoin = null;
+  if (cols.productId) {
+    productJoin = `"Loan"."productId" = "LoanProduct"."id"`;
+  } else if (cols.product_id) {
+    productJoin = `"Loan"."product_id" = "LoanProduct"."id"`;
+  } else if (cols.product) {
+    productJoin = `"Loan"."product" = "LoanProduct"."id"`;
   }
 
-  if (Branch && assoc.Branch) {
-    inc.push({ model: Branch, as: "Branch" }); // ✅ alias present
-  } else if (Branch && !assoc.Branch && !assoc.branch) {
-    // If association had no alias, include without 'as'
-    inc.push({ model: Branch });
-  } else if (Branch && assoc.branch) {
-    // Uncommon, but support lower-case alias if it exists
-    inc.push({ model: Branch, as: "branch" });
+  if (LoanProduct && productJoin) {
+    includes.push({
+      model: LoanProduct,
+      required: false,
+      attributes: [
+        "id",
+        "name",
+        "code",
+        "status",
+        "interestMethod",
+        "interestRate",
+        "minPrincipal",
+        "maxPrincipal",
+        "minTermMonths",
+        "maxTermMonths",
+        "penaltyRate",
+        "fees",
+        "eligibility",
+        "createdAt",
+        "updatedAt",
+      ],
+      // Use a manual join so we don't depend on the association FK name
+      on: sequelize.literal(productJoin),
+    });
   }
-
-  // LoanProduct — prefer whatever alias was registered
-  if (LoanProduct) {
-    if (assoc.LoanProduct) inc.push({ model: LoanProduct });           // no alias used at define-time
-    else if (assoc.product) inc.push({ model: LoanProduct, as: "product" });
-    else if (assoc.loanProduct) inc.push({ model: LoanProduct, as: "loanProduct" });
-    else inc.push({ model: LoanProduct }); // safest fallback
-  }
-
-  // Optional User relations if your Loan model defined them
-  if (User) {
-    if (assoc.initiator) inc.push({ model: User, as: "initiator", attributes: ["id", "name", "email"] });
-    if (assoc.approver)  inc.push({ model: User, as: "approver",  attributes: ["id", "name", "email"] });
-    if (assoc.rejector)  inc.push({ model: User, as: "rejector",  attributes: ["id", "name", "email"] });
-    if (assoc.disburser) inc.push({ model: User, as: "disburser", attributes: ["id", "name", "email"] });
-  }
-
-  return inc;
+  return includes;
 }
 
-const safeNum = (v) => Number(v || 0);
+async function buildIncludesForDetail() {
+  const base = await buildIncludesForList();
+  // For detail view we don't need the 4 user relations unless you want them;
+  // but keeping them is harmless and consistent.
+  return base;
+}
 
 /* ===========================
    CREATE LOAN
 =========================== */
 const createLoan = async (req, res) => {
   try {
-    if (!Loan) return res.status(501).json({ error: "Loan model not available" });
-
     const body = { ...req.body };
 
-    if (body.productId && LoanProduct) {
+    if (body.productId) {
       const p = await LoanProduct.findByPk(body.productId);
       if (!p) return res.status(400).json({ error: "Invalid loan product selected" });
 
@@ -169,17 +174,15 @@ const createLoan = async (req, res) => {
 =========================== */
 const getAllLoans = async (req, res) => {
   try {
-    if (!Loan) return res.json([]);
-
     const where = {};
     if (req.query.status && req.query.status !== "all") where.status = req.query.status;
-    if (req.query.branchId) where.branchId = req.query.branchId;
-    if (req.query.borrowerId) where.borrowerId = req.query.borrowerId;
+
+    const includes = await buildIncludesForList();
 
     const loans = await Loan.findAll({
       where,
-      include: buildLoanIncludes(),
-      order: buildCreatedOrder(Loan, "DESC"),
+      include: includes,
+      order: [["createdAt", "DESC"]],
       limit: 500,
     });
 
@@ -195,59 +198,49 @@ const getAllLoans = async (req, res) => {
 =========================== */
 const getLoanById = async (req, res) => {
   try {
-    if (!Loan) return res.status(404).json({ error: "Loan not found" });
-
     const { id } = req.params;
     const { includeRepayments = "true", includeSchedule = "true" } = req.query;
 
-    const loan = await Loan.findByPk(id, {
-      include: buildLoanIncludes(),
-    });
+    const includes = await buildIncludesForDetail();
 
+    const loan = await Loan.findByPk(id, { include: includes });
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
-    // ---- repayments (tolerant of differing schemas) ----
     let repayments = [];
-    const totals = {
+    let totals = {
       principal: 0,
       interest: 0,
       fees: 0,
       penalties: 0,
       totalPaid: 0,
-      outstanding: safeNum(loan.amount),
+      outstanding: Number(loan.amount || 0),
     };
 
-    if (includeRepayments === "true" && LoanRepayment) {
+    if (includeRepayments === "true") {
       repayments = await LoanRepayment.findAll({
         where: { loanId: loan.id },
-        order: [["dueDate", "DESC"], ["createdAt", "DESC"]], // ✅ dueDate (not 'date')
+        order: [["date", "DESC"]],
       });
 
       for (const r of repayments) {
-        // Some schemas store breakdown in r.allocation array; if absent, skip safely
-        const alloc = Array.isArray(r.allocation) ? r.allocation : [];
+        const alloc = r.allocation || [];
         for (const a of alloc) {
-          totals.principal += safeNum(a.principal);
-          totals.interest  += safeNum(a.interest);
-          totals.fees      += safeNum(a.fees);
-          totals.penalties += safeNum(a.penalties);
+          totals.principal += Number(a.principal || 0);
+          totals.interest += Number(a.interest || 0);
+          totals.fees += Number(a.fees || 0);
+          totals.penalties += Number(a.penalties || 0);
         }
-
-        // Total paid on this repayment row — use the most likely fields
-        const paid = r.amountPaid ?? r.amount ?? r.totalPaid ?? 0;
-        totals.totalPaid += safeNum(paid);
+        totals.totalPaid += Number(r.amount || 0);
       }
 
-      // Basic outstanding calculation (principal + known interest - paid)
       totals.outstanding = Math.max(
         0,
-        safeNum(loan.amount) + safeNum(loan.totalInterest) - totals.totalPaid
+        Number(loan.amount || 0) + Number(loan.totalInterest || 0) - totals.totalPaid
       );
     }
 
-    // ---- schedule (if present) ----
     let schedule = [];
-    if (includeSchedule === "true" && LoanSchedule) {
+    if (includeSchedule === "true") {
       schedule = await LoanSchedule.findAll({
         where: { loanId: loan.id },
         order: [["period", "ASC"]],
@@ -271,8 +264,6 @@ const getLoanById = async (req, res) => {
 =========================== */
 const updateLoan = async (req, res) => {
   try {
-    if (!Loan) return res.status(501).json({ error: "Loan model not available" });
-
     const loan = await Loan.findByPk(req.params.id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
@@ -280,7 +271,7 @@ const updateLoan = async (req, res) => {
     const body = { ...req.body };
     const productId = body.productId ?? loan.productId;
 
-    if (productId && LoanProduct) {
+    if (productId) {
       const p = await LoanProduct.findByPk(productId);
       if (!p) return res.status(400).json({ error: "Invalid loan product selected" });
 
@@ -314,7 +305,7 @@ const updateLoan = async (req, res) => {
 
     res.json(loan);
   } catch (err) {
-    console.error("Update loan error:", err);
+    console.error("Error updating loan:", err);
     res.status(500).json({ error: "Error updating loan" });
   }
 };
@@ -324,8 +315,6 @@ const updateLoan = async (req, res) => {
 =========================== */
 const deleteLoan = async (req, res) => {
   try {
-    if (!Loan) return res.status(501).json({ error: "Loan model not available" });
-
     const loan = await Loan.findByPk(req.params.id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
@@ -352,16 +341,14 @@ const deleteLoan = async (req, res) => {
 =========================== */
 const getLoanSchedule = async (req, res) => {
   try {
-    if (!Loan) return res.status(404).json({ error: "Loan not found" });
-
     const loan = await Loan.findByPk(req.params.loanId || req.params.id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     const input = {
-      amount:       safeNum(loan.amount),
-      interestRate: safeNum(loan.interestRate),
-      term:         loan.termMonths,
-      issueDate:    loan.startDate,
+      amount: Number(loan.amount || 0),
+      interestRate: Number(loan.interestRate || 0),
+      term: loan.termMonths,
+      issueDate: loan.startDate,
     };
 
     const schedule =
@@ -385,11 +372,6 @@ const getLoanSchedule = async (req, res) => {
 const updateLoanStatus = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    if (!Loan) {
-      await t.rollback();
-      return res.status(501).json({ error: "Loan model not available" });
-    }
-
     const { status, override } = req.body;
     const loan = await Loan.findByPk(req.params.id, { transaction: t });
     if (!loan) {
@@ -406,44 +388,45 @@ const updateLoanStatus = async (req, res) => {
     const fields = { status };
 
     if (status === "approved") {
-      fields.approvedBy   = req.user?.id || null;
+      fields.approvedBy = req.user?.id || null;
       fields.approvalDate = new Date();
     }
 
     if (status === "disbursed") {
-      fields.disbursedBy     = req.user?.id || null;
+      fields.disbursedBy = req.user?.id || null;
       fields.disbursementDate = new Date();
 
-      if (LoanSchedule) {
-        const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
-        if (count === 0) {
-          const input = {
-            amount:       safeNum(loan.amount),
-            interestRate: safeNum(loan.interestRate),
-            term:         loan.termMonths,
-            issueDate:    loan.startDate,
-          };
-          const gen =
-            loan.interestMethod === "flat"
-              ? generateFlatRateSchedule(input)
-              : loan.interestMethod === "reducing"
-              ? generateReducingBalanceSchedule(input)
-              : [];
+      const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
+      if (count === 0) {
+        const input = {
+          amount: Number(loan.amount || 0),
+          interestRate: Number(loan.interestRate || 0),
+          term: loan.termMonths,
+          issueDate: loan.startDate,
+        };
+        const gen =
+          loan.interestMethod === "flat"
+            ? generateFlatRateSchedule(input)
+            : loan.interestMethod === "reducing"
+            ? generateReducingBalanceSchedule(input)
+            : [];
 
-          const rows = gen.map((s, i) => ({
-            loanId:    loan.id,
-            period:    i + 1,
-            dueDate:   s.dueDate,
-            principal: safeNum(s.principal),
-            interest:  safeNum(s.interest),
-            fees:      safeNum(s.fees),
-            penalties: 0,
-            total:     safeNum(s.total ?? (safeNum(s.principal) + safeNum(s.interest) + safeNum(s.fees))),
-          }));
+        const rows = gen.map((s, i) => ({
+          loanId: loan.id,
+          period: i + 1,
+          dueDate: s.dueDate,
+          principal: Number(s.principal || 0),
+          interest: Number(s.interest || 0),
+          fees: Number(s.fees || 0),
+          penalties: 0,
+          total: Number(
+            s.total ??
+              (Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0))
+          ),
+        }));
 
-          if (rows.length) {
-            await LoanSchedule.bulkCreate(rows, { transaction: t });
-          }
+        if (rows.length) {
+          await LoanSchedule.bulkCreate(rows, { transaction: t });
         }
       }
     }
@@ -454,7 +437,7 @@ const updateLoanStatus = async (req, res) => {
         await t.rollback();
         return res.status(400).json({ error: "Outstanding > 0, override required" });
       }
-      fields.closedBy   = req.user?.id || null;
+      fields.closedBy = req.user?.id || null;
       fields.closedDate = new Date();
       if (override) fields.closeReason = "override";
     }
@@ -471,9 +454,8 @@ const updateLoanStatus = async (req, res) => {
 
     await t.commit();
 
-    // Reload with safe includes
     const updatedLoan = await Loan.findByPk(req.params.id, {
-      include: buildLoanIncludes(),
+      include: await buildIncludesForDetail(),
     });
 
     res.json({
