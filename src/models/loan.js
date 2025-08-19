@@ -1,4 +1,3 @@
-// backend/src/models/loan.js
 "use strict";
 
 module.exports = (sequelize, DataTypes) => {
@@ -11,23 +10,25 @@ module.exports = (sequelize, DataTypes) => {
         primaryKey: true,
       },
 
-      // ⚠️ IMPORTANT: DB column is camelCase `borrowerId` (not borrower_id)
+      // DB column is camelCase borrowerId
       borrowerId: {
         type: DataTypes.UUID,
         allowNull: false,
         field: "borrowerId",
       },
 
-      // These two appear to exist as snake_case in your DB (per logs).
+      // productId remains snake_case in DB according to your logs
       productId: {
         type: DataTypes.UUID,
         allowNull: true,
         field: "product_id",
       },
+
+      // ✅ FIX: DB column is camelCase branchId (not branch_id)
       branchId: {
         type: DataTypes.UUID,
         allowNull: true,
-        field: "branch_id",
+        field: "branchId",
       },
 
       amount: { type: DataTypes.DECIMAL(18, 2), allowNull: false },
@@ -55,13 +56,12 @@ module.exports = (sequelize, DataTypes) => {
       disbursementDate: { type: DataTypes.DATE, allowNull: true, field: "disbursement_date" },
       disbursementMethod: { type: DataTypes.STRING(50), allowNull: true, field: "disbursement_method" },
 
-      // Optional totals if you have them; harmless if columns are absent (we don’t read/write directly).
       totalInterest: { type: DataTypes.DECIMAL(18, 2), allowNull: true, field: "total_interest" },
       outstanding: { type: DataTypes.DECIMAL(18, 2), allowNull: true, field: "outstanding" },
     },
     {
       tableName: "loans",
-      underscored: true, // keeps created_at/updated_at matching your DB
+      underscored: true,   // keeps created_at / updated_at
       timestamps: true,
     }
   );
