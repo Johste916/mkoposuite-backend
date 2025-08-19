@@ -3,17 +3,16 @@ module.exports = (sequelize, DataTypes) => {
   const Loan = sequelize.define(
     'Loan',
     {
-      // FKs
-      borrowerId: { type: DataTypes.INTEGER, allowNull: false },
-      branchId:   { type: DataTypes.INTEGER, allowNull: true },
-      // map to loans.product_id in DB
-      productId:  { type: DataTypes.INTEGER, allowNull: true, field: 'product_id' },
+      // Foreign keys
+      borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' }, // camel in DB
+      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId'   }, // camel in DB
+      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: 'product_id' }, // snake in DB
 
       // Amounts / currency
       amount:   { type: DataTypes.DECIMAL(14,2), allowNull: false, defaultValue: 0 },
-      currency: { type: DataTypes.STRING(8), allowNull: true, defaultValue: 'KES' },
+      currency: { type: DataTypes.STRING(8), defaultValue: 'KES' },
 
-      // Terms (snake_case columns in DB)
+      // Terms (snake_case in DB)
       interestRate:       { type: DataTypes.DECIMAL(10,4), field: 'interest_rate' },
       termMonths:         { type: DataTypes.INTEGER,       field: 'term_months' },
       startDate:          { type: DataTypes.DATEONLY,      field: 'start_date' },
@@ -26,7 +25,7 @@ module.exports = (sequelize, DataTypes) => {
       totalInterest: { type: DataTypes.DECIMAL(14,2), field: 'total_interest' },
       outstanding:   { type: DataTypes.DECIMAL(14,2) },
 
-      // User traceability (UUIDs on loans table)
+      // User traceability (UUIDs; already added in DB)
       initiatedBy: { type: DataTypes.UUID, field: 'initiated_by' },
       approvedBy:  { type: DataTypes.UUID, field: 'approved_by'  },
       rejectedBy:  { type: DataTypes.UUID, field: 'rejected_by'  },
@@ -45,7 +44,7 @@ module.exports = (sequelize, DataTypes) => {
     },
     {
       tableName: 'loans',
-      underscored: true, // created_at / updated_at
+      underscored: true, // uses created_at / updated_at
     }
   );
 
