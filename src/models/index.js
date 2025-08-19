@@ -229,6 +229,44 @@ if (db.Account) {
 }
 
 /* ----------------------------------------------------------------
+ * Loan ↔ User associations (initiator/approver/rejector/disburser)
+ * Guarded to only register if the FK attribute exists on Loan.
+ * Works with camelCase attributes that map to snake_case DB fields.
+ * ---------------------------------------------------------------- */
+const hasAttr = (model, attr) =>
+  !!(model && model.rawAttributes && model.rawAttributes[attr]);
+
+const pickFk = (model, camel, snake) => {
+  if (hasAttr(model, camel)) return camel;
+  if (hasAttr(model, snake)) return snake; // fallback if model defined attribute as snake_case
+  return null;
+};
+
+if (db.Loan && db.User) {
+  const fkInitiated  = pickFk(db.Loan, 'initiatedBy',  'initiated_by');
+  const fkApproved   = pickFk(db.Loan, 'approvedBy',   'approved_by');
+  const fkRejected   = pickFk(db.Loan, 'rejectedBy',   'rejected_by');
+  const fkDisbursed  = pickFk(db.Loan, 'disbursedBy',  'disbursed_by');
+
+  if (fkInitiated) {
+    db.Loan.belongsTo(db.User, { as: 'initiator', foreignKey: fkInitiated });
+    db.User.hasMany(db.Loan,   { as: 'initiatedLoans', foreignKey: fkInitiated });
+  }
+  if (fkApproved) {
+    db.Loan.belongsTo(db.User, { as: 'approver', foreignKey: fkApproved });
+    db.User.hasMany(db.Loan,   { as: 'approvedLoans', foreignKey: fkApproved });
+  }
+  if (fkRejected) {
+    db.Loan.belongsTo(db.User, { as: 'rejector', foreignKey: fkRejected });
+    db.User.hasMany(db.Loan,   { as: 'rejectedLoans', foreignKey: fkRejected });
+  }
+  if (fkDisbursed) {
+    db.Loan.belongsTo(db.User, { as: 'disburser', foreignKey: fkDisbursed });
+    db.User.hasMany(db.Loan,   { as: 'disbursedLoans', foreignKey: fkDisbursed });
+  }
+}
+
+/* ----------------------------------------------------------------
  * Exports
  * ---------------------------------------------------------------- */
 db.sequelize = sequelize;

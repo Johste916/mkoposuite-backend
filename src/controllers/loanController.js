@@ -52,31 +52,30 @@ async function getLoanColumns() {
   if (cachedLoanColumns) return cachedLoanColumns;
   try {
     const qi = sequelize.getQueryInterface();
-    cachedLoanColumns = await qi.describeTable("loans"); // { columnName: { ...def } }
+    cachedLoanColumns = await qi.describeTable("loans"); // { columnName: def }
   } catch {
     cachedLoanColumns = {};
   }
   return cachedLoanColumns;
 }
 
-/** Build a safe include list for list/detail endpoints.
- *  - Branch/Borrower use standard associations.
- *  - LoanProduct is attached using a manual ON clause if (and only if)
- *    we detect a matching FK column on the loans table.
- */
-async function buildIncludesForList() {
+/** Build a safe include list for list/detail endpoints. */
+async function buildIncludesBase() {
   const cols = await getLoanColumns();
+
   const includes = [
     { model: Borrower, attributes: BORROWER_ATTRS },
     { model: Branch }, // association in models/index.js has no alias
-    // Users with role-like relations
-    { model: User, as: "initiator", attributes: ["id", "name"] },
-    { model: User, as: "approver", attributes: ["id", "name"] },
-    { model: User, as: "rejector", attributes: ["id", "name"] },
-    { model: User, as: "disburser", attributes: ["id", "name"] },
   ];
 
-  // Try to discover the product FK actually present in DB
+  // ---- Conditionally include User associations (only if defined) ----
+  const a = Loan.associations || {};
+  if (a.initiator) includes.push({ association: a.initiator, attributes: ["id", "name"] });
+  if (a.approver)  includes.push({ association: a.approver,  attributes: ["id", "name"] });
+  if (a.rejector)  includes.push({ association: a.rejector,  attributes: ["id", "name"] });
+  if (a.disburser) includes.push({ association: a.disburser, attributes: ["id", "name"] });
+
+  // ---- Product join: detect the actual FK column present on loans ----
   let productJoin = null;
   if (cols.productId) {
     productJoin = `"Loan"."productId" = "LoanProduct"."id"`;
@@ -107,18 +106,11 @@ async function buildIncludesForList() {
         "createdAt",
         "updatedAt",
       ],
-      // Use a manual join so we don't depend on the association FK name
-      on: sequelize.literal(productJoin),
+      on: sequelize.literal(productJoin), // manual ON avoids wrong FK guesses
     });
   }
-  return includes;
-}
 
-async function buildIncludesForDetail() {
-  const base = await buildIncludesForList();
-  // For detail view we don't need the 4 user relations unless you want them;
-  // but keeping them is harmless and consistent.
-  return base;
+  return includes;
 }
 
 /* ===========================
@@ -177,7 +169,7 @@ const getAllLoans = async (req, res) => {
     const where = {};
     if (req.query.status && req.query.status !== "all") where.status = req.query.status;
 
-    const includes = await buildIncludesForList();
+    const includes = await buildIncludesBase();
 
     const loans = await Loan.findAll({
       where,
@@ -201,7 +193,7 @@ const getLoanById = async (req, res) => {
     const { id } = req.params;
     const { includeRepayments = "true", includeSchedule = "true" } = req.query;
 
-    const includes = await buildIncludesForDetail();
+    const includes = await buildIncludesBase();
 
     const loan = await Loan.findByPk(id, { include: includes });
     if (!loan) return res.status(404).json({ error: "Loan not found" });
@@ -455,7 +447,7 @@ const updateLoanStatus = async (req, res) => {
     await t.commit();
 
     const updatedLoan = await Loan.findByPk(req.params.id, {
-      include: await buildIncludesForDetail(),
+      include: await buildIncludesBase(),
     });
 
     res.json({
@@ -464,7 +456,7 @@ const updateLoanStatus = async (req, res) => {
     });
   } catch (err) {
     await t.rollback();
-    console.error("Update loan status error:", err);
+    console.error("Failed to update loan status:", err);
     res.status(500).json({ error: "Failed to update loan status" });
   }
 };
