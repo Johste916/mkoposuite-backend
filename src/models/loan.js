@@ -10,21 +10,21 @@ module.exports = (sequelize, DataTypes) => {
         primaryKey: true,
       },
 
-      // DB column is camelCase borrowerId
+      // Actual DB column is camelCase borrowerId
       borrowerId: {
         type: DataTypes.UUID,
         allowNull: false,
         field: "borrowerId",
       },
 
-      // productId remains snake_case in DB according to your logs
+      // ✅ FIX: actual DB column is camelCase productId (not product_id)
       productId: {
         type: DataTypes.UUID,
         allowNull: true,
-        field: "product_id",
+        field: "productId",
       },
 
-      // ✅ FIX: DB column is camelCase branchId (not branch_id)
+      // We already fixed branch to camelCase earlier
       branchId: {
         type: DataTypes.UUID,
         allowNull: true,
@@ -61,7 +61,7 @@ module.exports = (sequelize, DataTypes) => {
     },
     {
       tableName: "loans",
-      underscored: true,   // keeps created_at / updated_at
+      underscored: true, // keeps created_at/updated_at
       timestamps: true,
     }
   );
