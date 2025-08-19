@@ -1,4 +1,3 @@
-// backend/src/index.js
 const app = require('./app');
 const db = require('./models');
 const { sequelize } = db;
@@ -58,6 +57,16 @@ async function ensureAuditTables() {
   console.log('✅ AuditLog ready');
 }
 
+async function ensureSavingsTables() {
+  if (!db.SavingsTransaction) {
+    console.log('ℹ️ SavingsTransaction model not loaded; skipping savings sync.');
+    return;
+  }
+  console.log('🔧 Syncing SavingsTransaction table…');
+  await db.SavingsTransaction.sync({ alter: true });
+  console.log('✅ SavingsTransaction ready');
+}
+
 /* --------------------------------- Startup --------------------------------- */
 (async () => {
   try {
@@ -67,6 +76,7 @@ async function ensureAuditTables() {
     const syncSettingsOnly = process.env.SYNC_SETTINGS_ONLY === 'true';
     const syncACL          = process.env.SYNC_ACL === 'true';
     const syncAudit        = process.env.SYNC_AUDIT === 'true';
+    const syncSavings      = process.env.SYNC_SAVINGS === 'true';
 
     if (syncSettingsOnly) await ensureSettingsOnly();
     else console.log('⏭  Skipping settings sync (set SYNC_SETTINGS_ONLY=true for one-off)');
@@ -76,6 +86,9 @@ async function ensureAuditTables() {
 
     if (syncAudit) await ensureAuditTables();
     else console.log('⏭  Skipping Audit sync (set SYNC_AUDIT=true to create/alter audit_logs)');
+
+    if (syncSavings) await ensureSavingsTables();
+    else console.log('⏭  Skipping Savings sync (set SYNC_SAVINGS=true for one-off)');
 
     server = app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);

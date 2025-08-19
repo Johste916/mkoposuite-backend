@@ -1,38 +1,45 @@
-// models/savingstransaction.js
+// Minimal SavingsTransaction model used by savings-transactions endpoints & reports
 module.exports = (sequelize, DataTypes) => {
-  const SavingsTransaction = sequelize.define('SavingsTransaction', {
-    borrowerId: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
+  const SavingsTransaction = sequelize.define(
+    'SavingsTransaction',
+    {
+      id: {
+        type: DataTypes.INTEGER,
+        primaryKey: true,
+        autoIncrement: true,
+      },
+      borrowerId: {
+        type: DataTypes.INTEGER, // matches typical Borrower PK (integer)
+        allowNull: false,
+      },
+      type: {
+        type: DataTypes.ENUM('deposit', 'withdrawal', 'interest', 'charge'),
+        allowNull: false,
+      },
+      amount: {
+        type: DataTypes.DECIMAL(18, 2),
+        allowNull: false,
+        defaultValue: 0,
+      },
+      date: {
+        type: DataTypes.DATEONLY,
+        allowNull: false,
+      },
+      notes: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
     },
-    type: {
-      type: DataTypes.ENUM('deposit', 'withdrawal', 'charge', 'interest'),
-      allowNull: false,
-    },
-    amount: {
-      type: DataTypes.FLOAT,
-      allowNull: false,
-    },
-    date: {
-      type: DataTypes.DATEONLY,
-      allowNull: false,
-    },
-    notes: {
-      type: DataTypes.STRING,
-      allowNull: true,
-    },
-    reversed: {
-      type: DataTypes.BOOLEAN,
-      defaultValue: false,
-    },
-  });
-
-  SavingsTransaction.associate = (models) => {
-    SavingsTransaction.belongsTo(models.Borrower, {
-      foreignKey: 'borrowerId',
-      as: 'borrower',
-    });
-  };
+    {
+      tableName: 'SavingsTransactions',
+      timestamps: true,
+      indexes: [
+        { fields: ['borrowerId'] },
+        { fields: ['type'] },
+        { fields: ['date'] },
+      ],
+    }
+  );
 
   return SavingsTransaction;
 };

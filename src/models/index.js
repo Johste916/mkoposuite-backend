@@ -1,4 +1,3 @@
-// backend/src/models/index.js
 const { Sequelize, DataTypes } = require('sequelize');
 require('dotenv').config();
 
@@ -61,11 +60,11 @@ db.Permission = require('./Permission')(sequelize, DataTypes);
 /* ----------------------------------------------------------------
  * Optional modules (loaded only if files exist)
  * ---------------------------------------------------------------- */
-db.SavingsTransaction = tryLoad(() => require('./SavingsTransaction')(sequelize, DataTypes), 'SavingsTransaction');
-db.ReportSubscription = tryLoad(() => require('./ReportSubscription')(sequelize, DataTypes), 'ReportSubscription');
-db.Communication      = tryLoad(() => require('./Communication')(sequelize, DataTypes), 'Communication');
+db.SavingsTransaction      = tryLoad(() => require('./SavingsTransaction')(sequelize, DataTypes), 'SavingsTransaction');
+db.ReportSubscription      = tryLoad(() => require('./ReportSubscription')(sequelize, DataTypes), 'ReportSubscription');
+db.Communication           = tryLoad(() => require('./Communication')(sequelize, DataTypes), 'Communication');
 db.CommunicationAttachment = tryLoad(() => require('./CommunicationAttachment')(sequelize, DataTypes), 'CommunicationAttachment');
-db.AuditLog           = tryLoad(() => require('./AuditLog')(sequelize, DataTypes), 'AuditLog');
+db.AuditLog                = tryLoad(() => require('./AuditLog')(sequelize, DataTypes), 'AuditLog');
 
 /* Activity logs (optional) */
 db.ActivityLog        = tryLoad(() => require('./ActivityLog')(sequelize, DataTypes), 'ActivityLog');
@@ -73,7 +72,7 @@ db.ActivityComment    = tryLoad(() => require('./ActivityComment')(sequelize, Da
 db.ActivityAssignment = tryLoad(() => require('./ActivityAssignment')(sequelize, DataTypes), 'ActivityAssignment');
 
 /* ----------------------------------------------------------------
- * Optional accounting (try/catch so missing files don’t crash boot)
+ * Optional accounting
  * Files: account.js, journalEntry.js, ledgerEntry.js
  * ---------------------------------------------------------------- */
 db.Account      = tryLoad(() => require('./account')(sequelize, DataTypes), 'Account');
