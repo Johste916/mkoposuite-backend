@@ -9,7 +9,7 @@ const {
   sequelize,
 } = require("../models");
 
-/* Pick the repayment model that exists */
+/* Use whichever repayment model exists */
 const Repayment = LoanRepayment || LoanPayment;
 
 /* ============================================================
@@ -22,6 +22,7 @@ function repaymentDateAttr() {
   if ("paidAt" in attrs) return "paidAt";
   return "createdAt";
 }
+
 function getRepaymentDateValue(r) {
   return (
     r.date ||
@@ -123,9 +124,14 @@ async function computeAllocations({
   if (strategy === "principal_first") order = ["principal", "interest", "fees", "penalties"];
   else if (strategy === "interest_first") order = ["interest", "fees", "penalties", "principal"];
   else if (strategy === "fees_first") order = ["fees", "interest", "penalties", "principal"];
-  else if (strategy === "custom")
-    order = String(customOrder || "").split(",").map((x) => x.trim()).filter(Boolean);
-  else order = ["penalties", "interest", "fees", "principal"];
+  else if (strategy === "custom") {
+    order = String(customOrder || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+  } else {
+    order = ["penalties", "interest", "fees", "principal"];
+  }
 
   if (waivePenalties) order = order.filter((x) => x !== "penalties");
 
@@ -173,7 +179,7 @@ const getAllRepayments = async (req, res) => {
       const and = {};
       if (dateFrom) and[Op.gte] = new Date(dateFrom);
       if (dateTo) and[Op.lte] = new Date(dateTo);
-      where[dateAttr] = and; // use model attribute name
+      where[dateAttr] = and;
     }
 
     const include = [
@@ -270,6 +276,24 @@ const getRepaymentsByLoan = async (req, res) => {
 };
 
 /* ==========================
+   📜 RECEIPT VIEW (single)
+========================== */
+const getRepaymentById = async (req, res) => {
+  try {
+    const repayment = await Repayment.findByPk(req.params.id, {
+      include: [{ model: Loan, include: [Borrower] }],
+    });
+    if (!repayment) return res.status(404).json({ error: "Repayment not found" });
+
+    const allocation = repayment.allocation || [];
+    res.json(shapeReceipt(repayment, allocation));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error fetching repayment" });
+  }
+};
+
+/* ==========================
    🧮 PREVIEW ALLOCATION
 ========================== */
 const previewAllocation = async (req, res) => {
@@ -344,7 +368,6 @@ const createRepayment = async (req, res) => {
       waivePenalties,
     });
 
-    // Flexible payload for either model
     const payload = {
       loanId,
       amount: Number(amount),
@@ -362,7 +385,6 @@ const createRepayment = async (req, res) => {
       postedByEmail: req.user?.email,
     };
 
-    // Keep only keys that exist on the chosen model
     const attrs = (Repayment && Repayment.rawAttributes) || {};
     for (const k of Object.keys(payload)) {
       if (!(k in attrs)) {
@@ -374,7 +396,6 @@ const createRepayment = async (req, res) => {
 
     const repayment = await Repayment.create(payload, { transaction: t });
 
-    // Apply allocations to schedule
     if (LoanSchedule && allocations.length) {
       for (const line of allocations) {
         const row = await LoanSchedule.findOne({ where: { loanId, period: line.period }, transaction: t });
@@ -405,7 +426,7 @@ const createRepayment = async (req, res) => {
       }
     }
 
-    // Update loan aggregates/status safely (your current enum lacks "closed")
+    // Update loan aggregates/status carefully (in case your enum lacks "closed")
     const loanTotalPaid = Number(loan.totalPaid || 0) + Number(amount);
     const loanTotalInterest = Number(loan.totalInterest || 0);
     const principal = Number(loan.amount || loan.principal || 0);
@@ -416,7 +437,7 @@ const createRepayment = async (req, res) => {
       ? statusAttr.values.includes("closed")
       : true;
 
-    const updates = { status: loan.status }; // only update fields that exist
+    const updates = { status: loan.status };
     if ("outstanding" in Loan.rawAttributes) updates.outstanding = outstanding;
     if ("totalPaid"   in Loan.rawAttributes) updates.totalPaid   = loanTotalPaid;
     if (outstanding <= 0 && canClosed) updates.status = "closed";
@@ -479,6 +500,9 @@ const deleteRepayment = async (req, res) => {
   }
 };
 
+/* ==========================
+   EXPORTS
+========================== */
 module.exports = {
   getAllRepayments,
   getRepaymentsByBorrower,
