@@ -40,7 +40,9 @@ async function repaymentDateField() {
   const cols = await getRepaymentColumns();
   if (cols.has("date")) return "date";
   if (cols.has("payment_date")) return "payment_date";
+  if (cols.has("paymentDate")) return "paymentDate";
   if (cols.has("paid_at")) return "paid_at";
+  if (cols.has("paidAt")) return "paidAt";
   return "createdAt"; // final fallback
 }
 
@@ -78,7 +80,7 @@ const shapeReceipt = (repayment, allocation = []) => {
     id: repayment.id,
     receiptNo: repayment.receiptNo || `RCPT-${repayment.id}`,
     date: getRepaymentDateValue(repayment),
-    amount: Number(repayment.amount || 0),
+    amount: Number(repayment.amount || repayment.amountPaid || 0),
     currency: repayment.currency || loan.currency || "TZS",
     method: repayment.method || "cash",
     reference: repayment.reference || repayment.ref || null,
@@ -440,8 +442,7 @@ const createRepayment = async (req, res) => {
       postedByEmail: req.user?.email,
     };
 
-    // strip keys that aren't model attributes (Sequelize ignores unknown keys usually,
-    // but this keeps payload tidy if strict mode is enabled)
+    // strip keys that aren't model attributes
     const attrs = LoanRepayment.rawAttributes || {};
     for (const k of ["date", "paymentDate", "paidAt"]) {
       if (!(k in attrs)) delete payload[k];
@@ -483,7 +484,7 @@ const createRepayment = async (req, res) => {
       }
     }
 
-    // Update loan aggregates (best-effort; adjust if your schema differs)
+    // Update loan aggregates
     const loanTotalPaid = Number(loan.totalPaid || 0) + Number(amount);
     const loanTotalInterest = Number(loan.totalInterest || 0);
     const principal = Number(loan.amount || loan.principal || 0);
