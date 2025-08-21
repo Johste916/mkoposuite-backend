@@ -8,7 +8,7 @@ require('dotenv').config();
 const common = {
   dialect: 'postgres',
   logging: false,
-  // ✅ Always use the public schema so `loan_payments` is visible in prod
+  // ✅ Ensure we always use the public schema
   searchPath: 'public',
   define: { schema: 'public' },
 };
@@ -31,7 +31,7 @@ const sequelize = process.env.DATABASE_URL
 
 const db = {};
 
-/* Helper to avoid boot failure if some optional models are missing */
+/* Helpers */
 const tryLoad = (loader, nameForLog) => {
   try {
     return loader();
@@ -40,23 +40,30 @@ const tryLoad = (loader, nameForLog) => {
     return null;
   }
 };
+const hasAttr = (model, attr) =>
+  !!(model && model.rawAttributes && model.rawAttributes[attr]);
+const pickFk = (model, camel, snake) => {
+  if (hasAttr(model, camel)) return camel;
+  if (hasAttr(model, snake)) return snake;
+  return null;
+};
 
 /* ----------------------------------------------------------------
  * Core models
  * ---------------------------------------------------------------- */
 db.User          = require('./user')(sequelize, DataTypes);
-db.Branch        = require('./branch')(sequelize, DataTypes);
+db.Branch        = tryLoad(() => require('./branch')(sequelize, DataTypes), 'Branch');
 db.Borrower      = require('./borrower')(sequelize, DataTypes);
 db.Loan          = require('./loan')(sequelize, DataTypes);
 db.LoanRepayment = tryLoad(() => require('./loanrepayment')(sequelize, DataTypes), 'LoanRepayment');
 db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),   'LoanPayment');
 db.Setting       = require('./setting')(sequelize, DataTypes);
-db.LoanProduct   = require('./LoanProduct')(sequelize, DataTypes);
+db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes),   'LoanProduct');
 
 /* Access control */
-db.Role       = require('./Role')(sequelize, DataTypes);
-db.UserRole   = require('./UserRole')(sequelize, DataTypes);
-db.Permission = require('./Permission')(sequelize, DataTypes);
+db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes), 'Role');
+db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes), 'UserRole');
+db.Permission = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
 
 /* Optional modules */
 db.SavingsTransaction      = tryLoad(() => require('./SavingsTransaction')(sequelize, DataTypes), 'SavingsTransaction');
@@ -93,29 +100,27 @@ if (db.Loan && db.Borrower) {
   db.Borrower.hasMany(db.Loan,   { foreignKey: 'borrowerId' });
 }
 
-if (db.Loan && db.Branch) {
+/* Only register if the FK column actually exists on loans */
+if (db.Loan && db.Branch && hasAttr(db.Loan, 'branchId')) {
   db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId' });
   db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId' });
+}
+if (db.Loan && db.LoanProduct && hasAttr(db.Loan, 'productId')) {
+  db.Loan.belongsTo(db.LoanProduct, { foreignKey: 'productId' });
+  db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId' });
 }
 
 if (db.LoanRepayment && db.Loan) {
   db.LoanRepayment.belongsTo(db.Loan, { foreignKey: 'loanId' });
   db.Loan.hasMany(db.LoanRepayment,   { foreignKey: 'loanId' });
 }
-
 if (db.LoanPayment && db.Loan) {
   db.LoanPayment.belongsTo(db.Loan, { foreignKey: 'loanId' });
   db.Loan.hasMany(db.LoanPayment,   { foreignKey: 'loanId' });
 }
-
 if (db.LoanPayment && db.User) {
   db.LoanPayment.belongsTo(db.User, { foreignKey: 'userId' });
   db.User.hasMany(db.LoanPayment,   { foreignKey: 'userId' });
-}
-
-if (db.Loan && db.LoanProduct) {
-  db.Loan.belongsTo(db.LoanProduct, { foreignKey: 'productId' });
-  db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId' });
 }
 
 /* Users ↔ Roles many-to-many */
@@ -188,61 +193,6 @@ if (db.ActivityAssignment && db.ActivityLog) {
 if (db.ActivityAssignment && db.User) {
   db.ActivityAssignment.belongsTo(db.User, { foreignKey: 'assigneeId', as: 'assignee' });
   db.ActivityAssignment.belongsTo(db.User, { foreignKey: 'assignerId', as: 'assigner' });
-}
-
-/* Optional: Accounting */
-if (db.Account && db.LedgerEntry) {
-  db.Account.hasMany(db.LedgerEntry, { foreignKey: 'accountId', as: 'entries' });
-  db.LedgerEntry.belongsTo(db.Account, { foreignKey: 'accountId', as: 'account' });
-}
-if (db.JournalEntry && db.LedgerEntry) {
-  db.JournalEntry.hasMany(db.LedgerEntry, {
-    foreignKey: 'journalEntryId',
-    as: 'lines',
-    onDelete: 'CASCADE',
-  });
-  db.LedgerEntry.belongsTo(db.JournalEntry, {
-    foreignKey: 'journalEntryId',
-    as: 'journal',
-  });
-}
-if (db.Account) {
-  db.Account.hasMany(db.Account, { as: 'children', foreignKey: 'parentId' });
-  db.Account.belongsTo(db.Account, { as: 'parent',   foreignKey: 'parentId' });
-}
-
-/* Loan ↔ User (initiator/approver/rejector/disburser) */
-const hasAttr = (model, attr) =>
-  !!(model && model.rawAttributes && model.rawAttributes[attr]);
-
-const pickFk = (model, camel, snake) => {
-  if (hasAttr(model, camel)) return camel;
-  if (hasAttr(model, snake)) return snake;
-  return null;
-};
-
-if (db.Loan && db.User) {
-  const fkInitiated  = pickFk(db.Loan, 'initiatedBy',  'initiated_by');
-  const fkApproved   = pickFk(db.Loan, 'approvedBy',   'approved_by');
-  const fkRejected   = pickFk(db.Loan, 'rejectedBy',   'rejected_by');
-  const fkDisbursed  = pickFk(db.Loan, 'disbursedBy',  'disbursed_by');
-
-  if (fkInitiated) {
-    db.Loan.belongsTo(db.User, { as: 'initiator', foreignKey: fkInitiated });
-    db.User.hasMany(db.Loan,   { as: 'initiatedLoans', foreignKey: fkInitiated });
-  }
-  if (fkApproved) {
-    db.Loan.belongsTo(db.User, { as: 'approver', foreignKey: fkApproved });
-    db.User.hasMany(db.Loan,   { as: 'approvedLoans', foreignKey: fkApproved });
-  }
-  if (fkRejected) {
-    db.Loan.belongsTo(db.User, { as: 'rejector', foreignKey: fkRejected });
-    db.User.hasMany(db.Loan,   { as: 'rejectedLoans', foreignKey: fkRejected });
-  }
-  if (fkDisbursed) {
-    db.Loan.belongsTo(db.User, { as: 'disburser', foreignKey: fkDisbursed });
-    db.User.hasMany(db.Loan,   { as: 'disbursedLoans', foreignKey: fkDisbursed });
-  }
 }
 
 /* ----------------------------------------------------------------

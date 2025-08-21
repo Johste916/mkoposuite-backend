@@ -3,50 +3,34 @@ module.exports = (sequelize, DataTypes) => {
   const Loan = sequelize.define(
     'Loan',
     {
-      // FKs
-      borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' },
-      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId'   }, // present if you have a migration
-      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: 'product_id' }, // many DBs use product_id
+      // Columns exactly as created in your migration (camelCase)
+      borrowerId:         { type: DataTypes.INTEGER,  allowNull: false },
+      amount:             { type: DataTypes.FLOAT,    allowNull: false },
+      interestRate:       { type: DataTypes.FLOAT,    allowNull: false },
+      startDate:          { type: DataTypes.DATEONLY, allowNull: false },
+      endDate:            { type: DataTypes.DATEONLY, allowNull: false },
+      repaymentFrequency: { type: DataTypes.ENUM('weekly', 'monthly'), allowNull: false },
+      interestMethod:     { type: DataTypes.ENUM('flat', 'reducing'),  allowNull: false },
 
-      // money / terms
-      amount:   { type: DataTypes.DECIMAL(14,2), allowNull: false, defaultValue: 0 },
-      currency: { type: DataTypes.STRING(8), defaultValue: 'TZS' },
+      // Keep status aligned to your current enum (no "closed" yet)
+      status:             { type: DataTypes.ENUM('pending', 'approved', 'rejected', 'disbursed'), defaultValue: 'pending' },
 
-      interestRate:       { type: DataTypes.DECIMAL(10,4), field: 'interest_rate' },
-      termMonths:         { type: DataTypes.INTEGER,       field: 'term_months' },
-      startDate:          { type: DataTypes.DATEONLY,      field: 'start_date' },
-      endDate:            { type: DataTypes.DATEONLY,      field: 'end_date' },
-      repaymentFrequency: { type: DataTypes.STRING,        field: 'repayment_frequency' },
-      interestMethod:     { type: DataTypes.STRING,        field: 'interest_method' },
+      approvedBy:         { type: DataTypes.INTEGER },
+      approvalDate:       { type: DataTypes.DATE },
+      disbursedBy:        { type: DataTypes.INTEGER },
+      disbursementDate:   { type: DataTypes.DATE },
+      disbursementMethod: { type: DataTypes.STRING },
 
-      // keep as string; DB has ENUM, we alter it with a migration
-      status: { type: DataTypes.STRING },
-
-      totalInterest: { type: DataTypes.DECIMAL(14,2), field: 'total_interest' },
-      outstanding:   { type: DataTypes.DECIMAL(14,2) },
-
-      // user traceability (UUIDs)
-      initiatedBy: { type: DataTypes.UUID, field: 'initiated_by' },
-      approvedBy:  { type: DataTypes.UUID, field: 'approved_by'  },
-      rejectedBy:  { type: DataTypes.UUID, field: 'rejected_by'  },
-      disbursedBy: { type: DataTypes.UUID, field: 'disbursed_by' },
-      closedBy:    { type: DataTypes.UUID, field: 'closed_by'    },
-
-      approvalDate:       { type: DataTypes.DATE, field: 'approval_date' },
-      rejectionDate:      { type: DataTypes.DATE, field: 'rejection_date' },
-      disbursementDate:   { type: DataTypes.DATE, field: 'disbursement_date' },
-      closedDate:         { type: DataTypes.DATE, field: 'closed_date' },
-
-      approvalComments:   { type: DataTypes.TEXT,   field: 'approval_comments' },
-      rejectionComments:  { type: DataTypes.TEXT,   field: 'rejection_comments' },
-      disbursementMethod: { type: DataTypes.STRING, field: 'disbursement_method' },
-      closeReason:        { type: DataTypes.STRING, field: 'close_reason' },
+      // timestamps exist in the table
+      createdAt:          { type: DataTypes.DATE },
+      updatedAt:          { type: DataTypes.DATE },
     },
     {
       tableName: 'loans',
       timestamps: true,
-      underscored: false, // table has createdAt/updatedAt
+      underscored: false, // table uses createdAt/updatedAt, not created_at/updated_at
     }
   );
+
   return Loan;
 };

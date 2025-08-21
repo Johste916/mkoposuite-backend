@@ -2,28 +2,26 @@
 const { Op } = require("sequelize");
 const {
   LoanRepayment,
-  LoanPayment,          // ✅ also import LoanPayment
+  LoanPayment,
   Loan,
   Borrower,
   LoanSchedule,
   sequelize,
 } = require("../models");
 
-/* Pick the repayment model that exists in your app */
+/* Pick the repayment model that exists */
 const Repayment = LoanRepayment || LoanPayment;
 
 /* ============================================================
-   Helpers: detect repayment date attribute + safe value accessor
+   Helpers: detect repayment date attribute + safe accessor
 ============================================================ */
 function repaymentDateAttr() {
   const attrs = (Repayment && Repayment.rawAttributes) || {};
   if ("date" in attrs) return "date";
   if ("paymentDate" in attrs) return "paymentDate";
   if ("paidAt" in attrs) return "paidAt";
-  return "createdAt"; // final fallback (always exists)
+  return "createdAt";
 }
-
-/** Get a JS date-ish value from an instance for display */
 function getRepaymentDateValue(r) {
   return (
     r.date ||
@@ -90,10 +88,7 @@ async function computeAllocations({
   waivePenalties = false,
 }) {
   if (!loanId || !Number(amount) || !LoanSchedule) {
-    return {
-      allocations: [],
-      totals: { principal: 0, interest: 0, fees: 0, penalties: 0 },
-    };
+    return { allocations: [], totals: { principal: 0, interest: 0, fees: 0, penalties: 0 } };
   }
 
   const schedule = await LoanSchedule.findAll({
@@ -103,10 +98,7 @@ async function computeAllocations({
   });
 
   if (!schedule.length) {
-    return {
-      allocations: [],
-      totals: { principal: 0, interest: 0, fees: 0, penalties: 0 },
-    };
+    return { allocations: [], totals: { principal: 0, interest: 0, fees: 0, penalties: 0 } };
   }
 
   const items = schedule.map((s, idx) => {
@@ -127,16 +119,12 @@ async function computeAllocations({
     };
   });
 
-  // category order
   let order;
   if (strategy === "principal_first") order = ["principal", "interest", "fees", "penalties"];
   else if (strategy === "interest_first") order = ["interest", "fees", "penalties", "principal"];
   else if (strategy === "fees_first") order = ["fees", "interest", "penalties", "principal"];
   else if (strategy === "custom")
-    order = String(customOrder || "")
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
+    order = String(customOrder || "").split(",").map((x) => x.trim()).filter(Boolean);
   else order = ["penalties", "interest", "fees", "principal"];
 
   if (waivePenalties) order = order.filter((x) => x !== "penalties");
@@ -173,15 +161,7 @@ async function computeAllocations({
 ========================== */
 const getAllRepayments = async (req, res) => {
   try {
-    const {
-      q = "",
-      loanId,
-      borrowerId,
-      dateFrom,
-      dateTo,
-      page = 1,
-      pageSize = 20,
-    } = req.query;
+    const { q = "", loanId, borrowerId, dateFrom, dateTo, page = 1, pageSize = 20 } = req.query;
 
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
@@ -193,7 +173,7 @@ const getAllRepayments = async (req, res) => {
       const and = {};
       if (dateFrom) and[Op.gte] = new Date(dateFrom);
       if (dateTo) and[Op.lte] = new Date(dateTo);
-      where[dateAttr] = and;           // ✅ uses model attribute name, not column name
+      where[dateAttr] = and; // use model attribute name
     }
 
     const include = [
@@ -206,7 +186,6 @@ const getAllRepayments = async (req, res) => {
     if (loanId) include[0].where.id = loanId;
     if (borrowerId) include[0].where.borrowerId = borrowerId;
 
-    // basic borrower/phone search (server side)
     if (q && q.trim()) {
       include[0].required = true;
       const needle = `%${q.trim()}%`;
@@ -223,7 +202,6 @@ const getAllRepayments = async (req, res) => {
       offset,
     });
 
-    // extra client filter against repayment reference/method etc.
     const filtered =
       q && q.trim()
         ? rows.filter((r) => {
@@ -288,24 +266,6 @@ const getRepaymentsByLoan = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Error fetching loan repayments" });
-  }
-};
-
-/* ==========================
-   📜 RECEIPT VIEW
-========================== */
-const getRepaymentById = async (req, res) => {
-  try {
-    const repayment = await Repayment.findByPk(req.params.id, {
-      include: [{ model: Loan, include: [Borrower] }],
-    });
-    if (!repayment) return res.status(404).json({ error: "Repayment not found" });
-
-    const allocation = repayment.allocation || [];
-    res.json(shapeReceipt(repayment, allocation));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Error fetching repayment" });
   }
 };
 
@@ -384,14 +344,14 @@ const createRepayment = async (req, res) => {
       waivePenalties,
     });
 
-    // Flexible payload (covers both LoanRepayment and LoanPayment models)
+    // Flexible payload for either model
     const payload = {
       loanId,
       amount: Number(amount),
-      amountPaid: Number(amount), // for LoanPayment model
-      date,                       // if model has 'date'
-      paymentDate: date,          // if model has 'paymentDate'
-      paidAt: date,               // if model has 'paidAt'
+      amountPaid: Number(amount), // for LoanPayment
+      date,
+      paymentDate: date,
+      paidAt: date,
       method,
       reference: reference || null,
       notes: notes || null,
@@ -402,11 +362,10 @@ const createRepayment = async (req, res) => {
       postedByEmail: req.user?.email,
     };
 
-    // Keep only keys that truly exist on the model
+    // Keep only keys that exist on the chosen model
     const attrs = (Repayment && Repayment.rawAttributes) || {};
     for (const k of Object.keys(payload)) {
       if (!(k in attrs)) {
-        // allow amount/amountPaid duality: keep at least one
         if (k === "amount" && "amountPaid" in attrs) continue;
         if (k === "amountPaid" && "amount" in attrs) continue;
         delete payload[k];
@@ -415,7 +374,7 @@ const createRepayment = async (req, res) => {
 
     const repayment = await Repayment.create(payload, { transaction: t });
 
-    // Apply allocations to schedule (if present)
+    // Apply allocations to schedule
     if (LoanSchedule && allocations.length) {
       for (const line of allocations) {
         const row = await LoanSchedule.findOne({ where: { loanId, period: line.period }, transaction: t });
@@ -446,15 +405,23 @@ const createRepayment = async (req, res) => {
       }
     }
 
-    // Update loan aggregates
+    // Update loan aggregates/status safely (your current enum lacks "closed")
     const loanTotalPaid = Number(loan.totalPaid || 0) + Number(amount);
     const loanTotalInterest = Number(loan.totalInterest || 0);
     const principal = Number(loan.amount || loan.principal || 0);
-
     const outstanding = Math.max(0, principal + loanTotalInterest - loanTotalPaid);
-    const newStatus = outstanding <= 0 ? "closed" : loan.status;
 
-    await loan.update({ totalPaid: loanTotalPaid, outstanding, status: newStatus }, { transaction: t });
+    const statusAttr = Loan.rawAttributes?.status;
+    const canClosed = Array.isArray(statusAttr?.values)
+      ? statusAttr.values.includes("closed")
+      : true;
+
+    const updates = { status: loan.status }; // only update fields that exist
+    if ("outstanding" in Loan.rawAttributes) updates.outstanding = outstanding;
+    if ("totalPaid"   in Loan.rawAttributes) updates.totalPaid   = loanTotalPaid;
+    if (outstanding <= 0 && canClosed) updates.status = "closed";
+
+    await loan.update(updates, { transaction: t });
 
     await t.commit();
 
@@ -483,7 +450,6 @@ const updateRepayment = async (req, res) => {
     if (!repayment) return res.status(404).json({ error: "Repayment not found" });
 
     const body = { ...req.body };
-    // keep date flexibility on update too
     const attrs = (Repayment && Repayment.rawAttributes) || {};
     if (body.date && !("date" in attrs)) delete body.date;
     if (body.paymentDate && !("paymentDate" in attrs)) delete body.paymentDate;
@@ -513,9 +479,6 @@ const deleteRepayment = async (req, res) => {
   }
 };
 
-/* ==========================
-   EXPORTS
-========================== */
 module.exports = {
   getAllRepayments,
   getRepaymentsByBorrower,
