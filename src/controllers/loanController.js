@@ -17,11 +17,14 @@ const {
 
 const BORROWER_ATTRS = ["id", "name", "nationalId", "phone"];
 
+// NOTE: DB enum usually does NOT contain "active". We treat "active" as *derived* (disbursed & not closed).
+const DB_ENUM_STATUSES = new Set(["pending", "approved", "rejected", "disbursed", "closed"]);
+
+// Allowed transitions for the *persisted* enum only
 const ALLOWED = {
   pending: ["approved", "rejected"],
   approved: ["disbursed"],
-  disbursed: ["active", "closed"],
-  active: ["closed"],
+  disbursed: ["closed"], // "active" is derived; do not persist it
 };
 
 const writeAudit = async ({ entityId, action, before, after, req }) => {
@@ -60,7 +63,7 @@ async function getLoanColumns() {
   } catch (e) {
     // Fallback: infer from model (may still include non-existent columns)
     LOAN_COLUMNS_CACHE = new Set(
-      Object.values(Loan.rawAttributes || {}).map(a => a.field || a.fieldName || a)
+      Object.values(Loan.rawAttributes || {}).map((a) => a.field || a.fieldName || a)
     );
   }
   return LOAN_COLUMNS_CACHE;
@@ -87,8 +90,8 @@ async function buildUserIncludesIfPossible() {
   const includes = [];
   const mapping = [
     { as: "initiator", attr: "initiatedBy" },
-    { as: "approver",  attr: "approvedBy" },
-    { as: "rejector",  attr: "rejectedBy" },
+    { as: "approver", attr: "approvedBy" },
+    { as: "rejector", attr: "rejectedBy" },
     { as: "disburser", attr: "disbursedBy" },
   ];
 
@@ -155,34 +158,63 @@ const createLoan = async (req, res) => {
 const getAllLoans = async (req, res) => {
   try {
     const where = {};
-    if (req.query.status && req.query.status !== "all") where.status = req.query.status;
+
+    // Never pass unknown statuses into an enum column
+    const rawStatus = String(req.query.status || "").toLowerCase();
+    const scope = String(req.query.scope || "").toLowerCase();
+
+    if (rawStatus && rawStatus !== "all" && DB_ENUM_STATUSES.has(rawStatus)) {
+      // safe to pass to DB
+      where.status = rawStatus;
+    }
+    // If rawStatus === "active" or any other derived, we DO NOT add to where;
+    // we'll filter in-memory below.
 
     const attributes = await getSafeLoanAttributeNames();
     const userIncludes = await buildUserIncludesIfPossible();
 
     const loans = await Loan.findAll({
       where,
-      attributes, // avoid selecting non-existent columns like initiated_by if DB lacks them
+      attributes, // avoid selecting non-existent columns
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch },            // no custom alias; matches association
-        { model: LoanProduct },       // no custom alias; matches association
-        ...userIncludes,              // only if the FK column exists in DB
+        { model: Branch }, // default association
+        { model: LoanProduct },
+        ...userIncludes,
       ],
       order: [["createdAt", "DESC"]],
       limit: 500,
     });
 
-    res.json(loans || []);
+    // Derived lists (client or "scope" based)
+    let result = loans;
+
+    // Treat "active" as disbursed & not closed (best-effort; usually just "disbursed")
+    if (rawStatus === "active" || scope === "active") {
+      result = result.filter(
+        (l) => String(l.status || "").toLowerCase() === "disbursed"
+      );
+    }
+
+    // Other scopes could be implemented here (e.g., delinquent) if needed.
+    // Example (best-effort): delinquent → has overdue next due or arrears flag (if present on model)
+    if (scope === "delinquent") {
+      result = result.filter((l) => {
+        const nd = String(l.nextDueStatus || "").toLowerCase();
+        return nd === "overdue" || Number(l.dpd || 0) > 0 || Number(l.arrears || 0) > 0;
+      });
+    }
+
+    res.json(result || []);
   } catch (err) {
     console.error("Fetch loans error:", err);
     res.status(500).json({ error: "Failed to fetch loans" });
   }
 };
 
-/* ===========================
+/* ============================================
    GET LOAN BY ID (+repayments & schedule)
-=========================== */
+============================================ */
 const getLoanById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -216,15 +248,16 @@ const getLoanById = async (req, res) => {
     if (includeRepayments === "true") {
       repayments = await LoanRepayment.findAll({
         where: { loanId: loan.id },
-        order: [["dueDate", "DESC"], ["createdAt", "DESC"]], // use dueDate, not 'date'
+        // Prefer 'date'; if your model stores 'dueDate' for repayments, keep it.
+        order: [["date", "DESC"], ["createdAt", "DESC"]],
       });
 
       for (const r of repayments) {
         const alloc = r.allocation || [];
         for (const a of alloc) {
           totals.principal += Number(a.principal || 0);
-          totals.interest  += Number(a.interest  || 0);
-          totals.fees      += Number(a.fees      || 0);
+          totals.interest += Number(a.interest || 0);
+          totals.fees += Number(a.fees || 0);
           totals.penalties += Number(a.penalties || 0);
         }
         totals.totalPaid += Number(r.amount || r.total || 0);
@@ -370,26 +403,28 @@ const updateLoanStatus = async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const { status, override } = req.body;
+    const next = String(status || "").toLowerCase();
+
     const loan = await Loan.findByPk(req.params.id, { transaction: t });
     if (!loan) {
       await t.rollback();
       return res.status(404).json({ error: "Loan not found" });
     }
 
-    if (!ALLOWED[loan.status]?.includes(status)) {
+    if (!ALLOWED[loan.status]?.includes(next)) {
       await t.rollback();
-      return res.status(400).json({ error: `Cannot change ${loan.status} → ${status}` });
+      return res.status(400).json({ error: `Cannot change ${loan.status} → ${next}` });
     }
 
     const before = loan.toJSON();
-    const fields = { status };
+    const fields = { status: next };
 
-    if (status === "approved") {
+    if (next === "approved") {
       if ("approvedBy" in Loan.rawAttributes) fields.approvedBy = req.user?.id || null;
       fields.approvalDate = new Date();
     }
 
-    if (status === "disbursed") {
+    if (next === "disbursed") {
       if ("disbursedBy" in Loan.rawAttributes) fields.disbursedBy = req.user?.id || null;
       fields.disbursementDate = new Date();
 
@@ -417,7 +452,8 @@ const updateLoanStatus = async (req, res) => {
           fees: Number(s.fees || 0),
           penalties: 0,
           total: Number(
-            s.total ?? (Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0))
+            s.total ??
+              Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)
           ),
         }));
 
@@ -427,7 +463,7 @@ const updateLoanStatus = async (req, res) => {
       }
     }
 
-    if (status === "closed") {
+    if (next === "closed") {
       const outstanding = Number(loan.outstanding ?? 0);
       if (!override && outstanding > 0) {
         await t.rollback();
@@ -442,7 +478,7 @@ const updateLoanStatus = async (req, res) => {
 
     await writeAudit({
       entityId: loan.id,
-      action: `status:${status}`,
+      action: `status:${next}`,
       before,
       after: loan.toJSON(),
       req,
@@ -460,12 +496,12 @@ const updateLoanStatus = async (req, res) => {
         { model: Branch },
         { model: LoanProduct },
         ...userIncludes,
-      ]
+      ],
     });
 
     res.json({
-      message: `Loan ${status} successfully`,
-      loan: updatedLoan
+      message: `Loan ${next} successfully`,
+      loan: updatedLoan,
     });
   } catch (err) {
     await t.rollback();
