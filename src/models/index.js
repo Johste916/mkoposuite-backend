@@ -5,21 +5,27 @@ require('dotenv').config();
 /* ----------------------------------------------------------------
  * Sequelize instance
  * ---------------------------------------------------------------- */
+const common = {
+  dialect: 'postgres',
+  logging: false,
+  // ✅ Always use the public schema so `loan_payments` is visible in prod
+  searchPath: 'public',
+  define: { schema: 'public' },
+};
+
 const sequelize = process.env.DATABASE_URL
   ? new Sequelize(process.env.DATABASE_URL, {
-      dialect: 'postgres',
+      ...common,
       dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
-      logging: false,
     })
   : new Sequelize(
       process.env.DB_NAME || 'mkoposuite_dev',
       process.env.DB_USER || 'postgres',
       process.env.DB_PASS || null,
       {
+        ...common,
         host: process.env.DB_HOST || '127.0.0.1',
         port: Number(process.env.DB_PORT) || 5432,
-        dialect: 'postgres',
-        logging: false,
       }
     );
 
@@ -42,8 +48,8 @@ db.User          = require('./user')(sequelize, DataTypes);
 db.Branch        = require('./branch')(sequelize, DataTypes);
 db.Borrower      = require('./borrower')(sequelize, DataTypes);
 db.Loan          = require('./loan')(sequelize, DataTypes);
-db.LoanRepayment = require('./loanrepayment')(sequelize, DataTypes);
-db.LoanPayment   = require('./loanpayment')(sequelize, DataTypes);
+db.LoanRepayment = tryLoad(() => require('./loanrepayment')(sequelize, DataTypes), 'LoanRepayment');
+db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),   'LoanPayment');
 db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = require('./LoanProduct')(sequelize, DataTypes);
 

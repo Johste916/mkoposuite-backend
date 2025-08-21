@@ -2,48 +2,25 @@
 const { Op } = require("sequelize");
 const {
   LoanRepayment,
+  LoanPayment,          // ✅ also import LoanPayment
   Loan,
   Borrower,
   LoanSchedule,
   sequelize,
 } = require("../models");
 
+/* Pick the repayment model that exists in your app */
+const Repayment = LoanRepayment || LoanPayment;
+
 /* ============================================================
-   Helpers: detect repayment date field + safe value accessor
+   Helpers: detect repayment date attribute + safe value accessor
 ============================================================ */
-let REPAYMENT_COL_CACHE = null;
-
-function getRepaymentsTableName() {
-  const t = LoanRepayment.getTableName ? LoanRepayment.getTableName() : "loan_repayments";
-  return typeof t === "string" ? t : t.tableName || "loan_repayments";
-}
-
-async function getRepaymentColumns() {
-  if (REPAYMENT_COL_CACHE) return REPAYMENT_COL_CACHE;
-  try {
-    const qi = sequelize.getQueryInterface();
-    const desc = await qi.describeTable(getRepaymentsTableName());
-    REPAYMENT_COL_CACHE = new Set(Object.keys(desc));
-  } catch {
-    // fallback: infer from model attributes (may be less accurate)
-    REPAYMENT_COL_CACHE = new Set(
-      Object.values(LoanRepayment.rawAttributes || {}).map(
-        (a) => a.field || a.fieldName || a
-      )
-    );
-  }
-  return REPAYMENT_COL_CACHE;
-}
-
-/** Choose the column to use in WHERE/ORDER for dates. */
-async function repaymentDateField() {
-  const cols = await getRepaymentColumns();
-  if (cols.has("date")) return "date";
-  if (cols.has("payment_date")) return "payment_date";
-  if (cols.has("paymentDate")) return "paymentDate";
-  if (cols.has("paid_at")) return "paid_at";
-  if (cols.has("paidAt")) return "paidAt";
-  return "createdAt"; // final fallback
+function repaymentDateAttr() {
+  const attrs = (Repayment && Repayment.rawAttributes) || {};
+  if ("date" in attrs) return "date";
+  if ("paymentDate" in attrs) return "paymentDate";
+  if ("paidAt" in attrs) return "paidAt";
+  return "createdAt"; // final fallback (always exists)
 }
 
 /** Get a JS date-ish value from an instance for display */
@@ -66,8 +43,8 @@ const shapeReceipt = (repayment, allocation = []) => {
   const totals = allocation.reduce(
     (acc, a) => ({
       principal: acc.principal + Number(a.principal || 0),
-      interest: acc.interest + Number(a.interest || 0),
-      fees: acc.fees + Number(a.fees || 0),
+      interest:  acc.interest  + Number(a.interest  || 0),
+      fees:      acc.fees      + Number(a.fees      || 0),
       penalties: acc.penalties + Number(a.penalties || 0),
     }),
     { principal: 0, interest: 0, fees: 0, penalties: 0 }
@@ -80,7 +57,7 @@ const shapeReceipt = (repayment, allocation = []) => {
     id: repayment.id,
     receiptNo: repayment.receiptNo || `RCPT-${repayment.id}`,
     date: getRepaymentDateValue(repayment),
-    amount: Number(repayment.amount || repayment.amountPaid || 0),
+    amount: Number(repayment.amount ?? repayment.amountPaid ?? 0),
     currency: repayment.currency || loan.currency || "TZS",
     method: repayment.method || "cash",
     reference: repayment.reference || repayment.ref || null,
@@ -92,7 +69,7 @@ const shapeReceipt = (repayment, allocation = []) => {
     },
     postedBy: repayment.postedBy
       ? {
-          name: repayment.postedByName || "User",
+          name:  repayment.postedByName  || "User",
           email: repayment.postedByEmail || "",
         }
       : null,
@@ -133,40 +110,28 @@ async function computeAllocations({
   }
 
   const items = schedule.map((s, idx) => {
-    const principalDue = Math.max(
-      0,
-      Number(s.principal || 0) - Number(s.principalPaid || 0)
-    );
-    const interestDue = Math.max(
-      0,
-      Number(s.interest || 0) - Number(s.interestPaid || 0)
-    );
-    const feesDue = Math.max(0, Number(s.fees || 0) - Number(s.feesPaid || 0));
-    const penDue = Math.max(
-      0,
-      Number(s.penalties ?? s.penalty ?? 0) - Number(s.penaltiesPaid || 0)
-    );
+    const principalDue = Math.max(0, Number(s.principal || 0) - Number(s.principalPaid || 0));
+    const interestDue  = Math.max(0, Number(s.interest  || 0) - Number(s.interestPaid  || 0));
+    const feesDue      = Math.max(0, Number(s.fees      || 0) - Number(s.feesPaid      || 0));
+    const penDue       = Math.max(0, Number(s.penalties ?? s.penalty ?? 0) - Number(s.penaltiesPaid || 0));
 
     return {
       period: s.period ?? idx + 1,
       dueDate: s.dueDate,
       remaining: {
-        principal: isFinite(principalDue) ? principalDue : 0,
-        interest: isFinite(interestDue) ? interestDue : 0,
-        fees: isFinite(feesDue) ? feesDue : 0,
-        penalties: waivePenalties ? 0 : isFinite(penDue) ? penDue : 0,
+        principal: Number.isFinite(principalDue) ? principalDue : 0,
+        interest:  Number.isFinite(interestDue)  ? interestDue  : 0,
+        fees:      Number.isFinite(feesDue)      ? feesDue      : 0,
+        penalties: waivePenalties ? 0 : (Number.isFinite(penDue) ? penDue : 0),
       },
     };
   });
 
   // category order
   let order;
-  if (strategy === "principal_first")
-    order = ["principal", "interest", "fees", "penalties"];
-  else if (strategy === "interest_first")
-    order = ["interest", "fees", "penalties", "principal"];
-  else if (strategy === "fees_first")
-    order = ["fees", "interest", "penalties", "principal"];
+  if (strategy === "principal_first") order = ["principal", "interest", "fees", "penalties"];
+  else if (strategy === "interest_first") order = ["interest", "fees", "penalties", "principal"];
+  else if (strategy === "fees_first") order = ["fees", "interest", "penalties", "principal"];
   else if (strategy === "custom")
     order = String(customOrder || "")
       .split(",")
@@ -189,7 +154,7 @@ async function computeAllocations({
       const need = Math.max(0, it.remaining[cat] || 0);
       if (!need) continue;
       const take = Math.min(need, left);
-      line[cat] += take;
+      line[cat]   += take;
       totals[cat] += take;
       it.remaining[cat] -= take;
       left -= take;
@@ -221,49 +186,44 @@ const getAllRepayments = async (req, res) => {
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
 
-    const dateField = await repaymentDateField();
+    const dateAttr = repaymentDateAttr();
 
     const where = {};
     if (dateFrom || dateTo) {
       const and = {};
       if (dateFrom) and[Op.gte] = new Date(dateFrom);
       if (dateTo) and[Op.lte] = new Date(dateTo);
-      where[dateField] = and;
+      where[dateAttr] = and;           // ✅ uses model attribute name, not column name
     }
 
     const include = [
       {
         model: Loan,
         where: {},
-        include: [
-          { model: Borrower, attributes: ["id", "name", "phone", "email"] },
-        ],
+        include: [{ model: Borrower, attributes: ["id", "name", "phone", "email"] }],
       },
     ];
     if (loanId) include[0].where.id = loanId;
     if (borrowerId) include[0].where.borrowerId = borrowerId;
 
-    // text search across borrower name/phone, loan reference, repayment reference/method
+    // basic borrower/phone search (server side)
     if (q && q.trim()) {
       include[0].required = true;
       const needle = `%${q.trim()}%`;
       include[0].include[0].where = {
-        [Op.or]: [
-          { name: { [Op.iLike]: needle } },
-          { phone: { [Op.iLike]: needle } },
-        ],
+        [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }],
       };
     }
 
-    const { rows, count } = await LoanRepayment.findAndCountAll({
+    const { rows, count } = await Repayment.findAndCountAll({
       where,
       include,
-      order: [[dateField, "DESC"], ["createdAt", "DESC"]],
+      order: [[dateAttr, "DESC"], ["createdAt", "DESC"]],
       limit,
       offset,
     });
 
-    // If q provided, also match repayment.reference/method on the app side
+    // extra client filter against repayment reference/method etc.
     const filtered =
       q && q.trim()
         ? rows.filter((r) => {
@@ -296,15 +256,15 @@ const getAllRepayments = async (req, res) => {
 const getRepaymentsByBorrower = async (req, res) => {
   try {
     const { borrowerId } = req.params;
-    const dateField = await repaymentDateField();
+    const dateAttr = repaymentDateAttr();
 
-    const repayments = await LoanRepayment.findAll({
+    const repayments = await Repayment.findAll({
       include: {
         model: Loan,
         where: { borrowerId },
         include: [{ model: Borrower, attributes: ["id", "name", "phone", "email"] }],
       },
-      order: [[dateField, "DESC"], ["createdAt", "DESC"]],
+      order: [[dateAttr, "DESC"], ["createdAt", "DESC"]],
     });
     res.json(repayments);
   } catch (err) {
@@ -315,14 +275,14 @@ const getRepaymentsByBorrower = async (req, res) => {
 
 const getRepaymentsByLoan = async (req, res) => {
   try {
-    const loanId = req.params.loanId || req.params.id; // accept either
+    const loanId = req.params.loanId || req.params.id;
     if (!loanId) return res.status(400).json({ error: "loanId required" });
-    const dateField = await repaymentDateField();
+    const dateAttr = repaymentDateAttr();
 
-    const repayments = await LoanRepayment.findAll({
+    const repayments = await Repayment.findAll({
       where: { loanId },
       include: [{ model: Loan, include: [{ model: Borrower, attributes: ["id", "name", "phone", "email"] }] }],
-      order: [[dateField, "DESC"], ["createdAt", "DESC"]],
+      order: [[dateAttr, "DESC"], ["createdAt", "DESC"]],
     });
     res.json(repayments);
   } catch (err) {
@@ -336,7 +296,7 @@ const getRepaymentsByLoan = async (req, res) => {
 ========================== */
 const getRepaymentById = async (req, res) => {
   try {
-    const repayment = await LoanRepayment.findByPk(req.params.id, {
+    const repayment = await Repayment.findByPk(req.params.id, {
       include: [{ model: Loan, include: [Borrower] }],
     });
     if (!repayment) return res.status(404).json({ error: "Repayment not found" });
@@ -384,7 +344,6 @@ const previewAllocation = async (req, res) => {
 const createRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    // robust role check
     const role = String(req.user?.role || "").toLowerCase();
     const allowed = ["admin", "loanofficer", "loan_officer", "loan-officer"];
     if (!allowed.includes(role)) {
@@ -425,13 +384,14 @@ const createRepayment = async (req, res) => {
       waivePenalties,
     });
 
-    // be flexible with repayment attribute names (model might map date->payment_date)
+    // Flexible payload (covers both LoanRepayment and LoanPayment models)
     const payload = {
       loanId,
       amount: Number(amount),
-      date,               // model attr 'date' (maps to 'payment_date' if configured)
-      paymentDate: date,  // in case the model uses 'paymentDate'
-      paidAt: date,       // last-ditch alternative
+      amountPaid: Number(amount), // for LoanPayment model
+      date,                       // if model has 'date'
+      paymentDate: date,          // if model has 'paymentDate'
+      paidAt: date,               // if model has 'paidAt'
       method,
       reference: reference || null,
       notes: notes || null,
@@ -442,26 +402,28 @@ const createRepayment = async (req, res) => {
       postedByEmail: req.user?.email,
     };
 
-    // strip keys that aren't model attributes
-    const attrs = LoanRepayment.rawAttributes || {};
-    for (const k of ["date", "paymentDate", "paidAt"]) {
-      if (!(k in attrs)) delete payload[k];
+    // Keep only keys that truly exist on the model
+    const attrs = (Repayment && Repayment.rawAttributes) || {};
+    for (const k of Object.keys(payload)) {
+      if (!(k in attrs)) {
+        // allow amount/amountPaid duality: keep at least one
+        if (k === "amount" && "amountPaid" in attrs) continue;
+        if (k === "amountPaid" && "amount" in attrs) continue;
+        delete payload[k];
+      }
     }
 
-    const repayment = await LoanRepayment.create(payload, { transaction: t });
+    const repayment = await Repayment.create(payload, { transaction: t });
 
     // Apply allocations to schedule (if present)
     if (LoanSchedule && allocations.length) {
       for (const line of allocations) {
-        const row = await LoanSchedule.findOne({
-          where: { loanId, period: line.period },
-          transaction: t,
-        });
+        const row = await LoanSchedule.findOne({ where: { loanId, period: line.period }, transaction: t });
         if (!row) continue;
 
         const principalPaid = Number(row.principalPaid || 0) + Number(line.principal || 0);
-        const interestPaid = Number(row.interestPaid || 0) + Number(line.interest || 0);
-        const feesPaid = Number(row.feesPaid || 0) + Number(line.fees || 0);
+        const interestPaid  = Number(row.interestPaid  || 0) + Number(line.interest  || 0);
+        const feesPaid      = Number(row.feesPaid      || 0) + Number(line.fees      || 0);
         const penaltiesPaid = Number(row.penaltiesPaid || 0) + Number(line.penalties || 0);
 
         const total =
@@ -492,14 +454,11 @@ const createRepayment = async (req, res) => {
     const outstanding = Math.max(0, principal + loanTotalInterest - loanTotalPaid);
     const newStatus = outstanding <= 0 ? "closed" : loan.status;
 
-    await loan.update(
-      { totalPaid: loanTotalPaid, outstanding, status: newStatus },
-      { transaction: t }
-    );
+    await loan.update({ totalPaid: loanTotalPaid, outstanding, status: newStatus }, { transaction: t });
 
     await t.commit();
 
-    const repFull = await LoanRepayment.findByPk(repayment.id, {
+    const repFull = await Repayment.findByPk(repayment.id, {
       include: [{ model: Loan, include: [Borrower] }],
     });
 
@@ -520,12 +479,12 @@ const createRepayment = async (req, res) => {
 ========================== */
 const updateRepayment = async (req, res) => {
   try {
-    const repayment = await LoanRepayment.findByPk(req.params.id);
+    const repayment = await Repayment.findByPk(req.params.id);
     if (!repayment) return res.status(404).json({ error: "Repayment not found" });
 
     const body = { ...req.body };
     // keep date flexibility on update too
-    const attrs = LoanRepayment.rawAttributes || {};
+    const attrs = (Repayment && Repayment.rawAttributes) || {};
     if (body.date && !("date" in attrs)) delete body.date;
     if (body.paymentDate && !("paymentDate" in attrs)) delete body.paymentDate;
     if (body.paidAt && !("paidAt" in attrs)) delete body.paidAt;
@@ -543,7 +502,7 @@ const updateRepayment = async (req, res) => {
 ========================== */
 const deleteRepayment = async (req, res) => {
   try {
-    const repayment = await LoanRepayment.findByPk(req.params.id);
+    const repayment = await Repayment.findByPk(req.params.id);
     if (!repayment) return res.status(404).json({ error: "Repayment not found" });
 
     await repayment.destroy();
