@@ -9,7 +9,7 @@ const {
   sequelize,
 } = require("../models");
 
-/* Use whichever repayment model exists */
+/* Pick the repayment model that exists in your app */
 const Repayment = LoanRepayment || LoanPayment;
 
 /* ============================================================
@@ -125,10 +125,7 @@ async function computeAllocations({
   else if (strategy === "interest_first") order = ["interest", "fees", "penalties", "principal"];
   else if (strategy === "fees_first") order = ["fees", "interest", "penalties", "principal"];
   else if (strategy === "custom") {
-    order = String(customOrder || "")
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
+    order = String(customOrder || "").split(",").map(s => s.trim()).filter(Boolean);
   } else {
     order = ["penalties", "interest", "fees", "principal"];
   }
@@ -154,9 +151,7 @@ async function computeAllocations({
       left -= take;
     }
 
-    if (line.principal || line.interest || line.fees || line.penalties) {
-      allocations.push(line);
-    }
+    if (line.principal || line.interest || line.fees || line.penalties) allocations.push(line);
   }
 
   return { allocations, totals };
@@ -182,22 +177,18 @@ const getAllRepayments = async (req, res) => {
       where[dateAttr] = and;
     }
 
-    const include = [
-      {
-        model: Loan,
-        where: {},
-        include: [{ model: Borrower, attributes: ["id", "name", "phone", "email"] }],
-      },
-    ];
+    const include = [{
+      model: Loan,
+      where: {},
+      include: [{ model: Borrower, attributes: ["id", "name", "phone", "email"] }],
+    }];
     if (loanId) include[0].where.id = loanId;
     if (borrowerId) include[0].where.borrowerId = borrowerId;
 
     if (q && q.trim()) {
       include[0].required = true;
       const needle = `%${q.trim()}%`;
-      include[0].include[0].where = {
-        [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }],
-      };
+      include[0].include[0].where = { [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }] };
     }
 
     const { rows, count } = await Repayment.findAndCountAll({
@@ -208,24 +199,14 @@ const getAllRepayments = async (req, res) => {
       offset,
     });
 
-    const filtered =
-      q && q.trim()
-        ? rows.filter((r) => {
-            const borrower = r.Loan?.Borrower || {};
-            const hay = [
-              borrower.name,
-              borrower.phone,
-              r.Loan?.reference,
-              r.reference,
-              r.method,
-              r.receiptNo,
-            ]
-              .filter(Boolean)
-              .join(" ")
-              .toLowerCase();
-            return hay.includes(q.trim().toLowerCase());
-          })
-        : rows;
+    const filtered = q && q.trim()
+      ? rows.filter((r) => {
+          const b = r.Loan?.Borrower || {};
+          const hay = [b.name, b.phone, r.Loan?.reference, r.reference, r.method, r.receiptNo]
+            .filter(Boolean).join(" ").toLowerCase();
+          return hay.includes(q.trim().toLowerCase());
+        })
+      : rows;
 
     res.json({ items: filtered, total: q ? filtered.length : count });
   } catch (err) {
@@ -276,7 +257,7 @@ const getRepaymentsByLoan = async (req, res) => {
 };
 
 /* ==========================
-   📜 RECEIPT VIEW (single)
+   📜 RECEIPT VIEW
 ========================== */
 const getRepaymentById = async (req, res) => {
   try {
@@ -302,20 +283,9 @@ const previewAllocation = async (req, res) => {
     const loan = await Loan.findByPk(loanId, { include: [Borrower] });
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
-    const result = await computeAllocations({
-      loanId,
-      amount,
-      date,
-      strategy,
-      customOrder,
-      waivePenalties,
-    });
+    const result = await computeAllocations({ loanId, amount, date, strategy, customOrder, waivePenalties });
 
-    res.json({
-      ...result,
-      loanCurrency: loan.currency || "TZS",
-      borrowerName: loan.Borrower?.name || "",
-    });
+    res.json({ ...result, loanCurrency: loan.currency || "TZS", borrowerName: loan.Borrower?.name || "" });
   } catch (err) {
     console.error("previewAllocation error:", err);
     res.status(500).json({ error: "Preview allocation failed" });
@@ -336,15 +306,9 @@ const createRepayment = async (req, res) => {
     }
 
     const {
-      loanId,
-      amount,
-      date,
-      method = "cash",
-      reference,
-      notes,
-      strategy,
-      customOrder,
-      waivePenalties = false,
+      loanId, amount, date,
+      method = "cash", reference, notes,
+      strategy, customOrder, waivePenalties = false,
       issueReceipt = true,
     } = req.body;
 
@@ -360,12 +324,7 @@ const createRepayment = async (req, res) => {
     }
 
     const { allocations, totals } = await computeAllocations({
-      loanId,
-      amount,
-      date,
-      strategy,
-      customOrder,
-      waivePenalties,
+      loanId, amount, date, strategy, customOrder, waivePenalties,
     });
 
     const payload = {
@@ -413,36 +372,30 @@ const createRepayment = async (req, res) => {
         const paid = principalPaid + interestPaid + feesPaid + penaltiesPaid;
 
         const status =
-          paid >= total - 0.01
-            ? "paid"
-            : new Date(row.dueDate) < new Date(date)
-            ? "overdue"
-            : "upcoming";
+          paid >= total - 0.01 ? "paid"
+          : new Date(row.dueDate) < new Date(date) ? "overdue"
+          : "upcoming";
 
-        await row.update(
-          { principalPaid, interestPaid, feesPaid, penaltiesPaid, paid, status },
-          { transaction: t }
-        );
+        await row.update({ principalPaid, interestPaid, feesPaid, penaltiesPaid, paid, status }, { transaction: t });
       }
     }
 
-    // Update loan aggregates/status carefully (in case your enum lacks "closed")
-    const loanTotalPaid = Number(loan.totalPaid || 0) + Number(amount);
-    const loanTotalInterest = Number(loan.totalInterest || 0);
-    const principal = Number(loan.amount || loan.principal || 0);
-    const outstanding = Math.max(0, principal + loanTotalInterest - loanTotalPaid);
-
-    const statusAttr = Loan.rawAttributes?.status;
-    const canClosed = Array.isArray(statusAttr?.values)
-      ? statusAttr.values.includes("closed")
-      : true;
-
-    const updates = { status: loan.status };
-    if ("outstanding" in Loan.rawAttributes) updates.outstanding = outstanding;
-    if ("totalPaid"   in Loan.rawAttributes) updates.totalPaid   = loanTotalPaid;
-    if (outstanding <= 0 && canClosed) updates.status = "closed";
-
-    await loan.update(updates, { transaction: t });
+    // Update only fields that surely exist on Loan model (avoid enum mismatch)
+    const updates = {};
+    // If you add these columns via migration later, this will start updating them automatically
+    if ("totalPaid" in Loan.rawAttributes) {
+      updates.totalPaid = Number(loan.totalPaid || 0) + Number(amount);
+    }
+    if ("outstanding" in Loan.rawAttributes) {
+      const loanTotalInterest = Number(loan.totalInterest || 0);
+      const principal = Number(loan.amount || 0);
+      const loanTotalPaid = updates.totalPaid ?? Number(loan.totalPaid || 0) + Number(amount);
+      updates.outstanding = Math.max(0, principal + loanTotalInterest - loanTotalPaid);
+    }
+    // Do NOT force status to 'closed' unless your DB enum has that value
+    if (Object.keys(updates).length) {
+      await loan.update(updates, { transaction: t });
+    }
 
     await t.commit();
 
