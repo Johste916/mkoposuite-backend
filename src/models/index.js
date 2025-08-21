@@ -2,9 +2,7 @@
 const { Sequelize, DataTypes } = require('sequelize');
 require('dotenv').config();
 
-/* ----------------------------------------------------------------
- * Sequelize instance (force public schema so prod sees public.loan_payments)
- * ---------------------------------------------------------------- */
+/* Force `public` schema so prod finds public.loan_payments */
 const common = {
   dialect: 'postgres',
   logging: false,
@@ -21,24 +19,18 @@ const sequelize = process.env.DATABASE_URL
       process.env.DB_NAME || 'mkoposuite_dev',
       process.env.DB_USER || 'postgres',
       process.env.DB_PASS || null,
-      {
-        ...common,
-        host: process.env.DB_HOST || '127.0.0.1',
-        port: Number(process.env.DB_PORT) || 5432,
-      }
+      { ...common, host: process.env.DB_HOST || '127.0.0.1', port: Number(process.env.DB_PORT) || 5432 }
     );
 
 const db = {};
 
-/* Helper: load optional models without crashing */
+/* Load optional models safely */
 const tryLoad = (loader, nameForLog) => {
   try { return loader(); }
   catch (e) { console.warn(`⚠️  Model not loaded: ${nameForLog} (${e.message})`); return null; }
 };
 
-/* ----------------------------------------------------------------
- * Core models
- * ---------------------------------------------------------------- */
+/* Core models */
 db.User          = require('./user')(sequelize, DataTypes);
 db.Branch        = require('./branch')(sequelize, DataTypes);
 db.Borrower      = require('./borrower')(sequelize, DataTypes);
@@ -48,7 +40,7 @@ db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),
 db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes),   'LoanProduct');
 
-/* Access control */
+/* Access control (optional) */
 db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes),       'Role');
 db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes),   'UserRole');
 db.Permission = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
@@ -70,9 +62,7 @@ db.Account      = tryLoad(() => require('./account')(sequelize, DataTypes),     
 db.JournalEntry = tryLoad(() => require('./journalEntry')(sequelize, DataTypes), 'JournalEntry');
 db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes),  'LedgerEntry');
 
-/* ----------------------------------------------------------------
- * Associations (core)
- * ---------------------------------------------------------------- */
+/* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
   db.User.belongsTo(db.Branch,   { foreignKey: 'branchId' });
   db.Branch.hasMany(db.User,     { foreignKey: 'branchId' });
@@ -89,12 +79,11 @@ if (db.Loan && db.Borrower) {
 }
 
 if (db.Loan && db.Branch) {
-  // Register both the default association and a "branch" alias,
-  // so includes with or without `as: 'branch'` both work.
-  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId' });               // default alias -> 'Branch'
-  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' }); // extra alias
-  db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId' });               // default alias -> 'Loans'
-  db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId', as: 'loans' });  // extra alias
+  // default + friendly alias
+  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId' });               // alias: 'Branch'
+  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' }); // alias: 'branch'
+  db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId' });
+  db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId', as: 'loans' });
 }
 
 if (db.LoanRepayment && db.Loan) {
@@ -113,46 +102,52 @@ if (db.LoanPayment && db.User) {
 }
 
 if (db.Loan && db.LoanProduct) {
+  // `Loan.productId` maps to DB column product_id (set in Loan model)
   db.Loan.belongsTo(db.LoanProduct, { foreignKey: 'productId' });
   db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId' });
 }
 
-/* Users ↔ Roles many-to-many */
-if (db.User && db.Role && db.UserRole) {
-  db.User.belongsToMany(db.Role, {
-    through: db.UserRole,
-    foreignKey: 'userId',
-    otherKey: 'roleId',
-    as: 'Roles',
-  });
-  db.Role.belongsToMany(db.User, {
-    through: db.UserRole,
-    foreignKey: 'roleId',
-    otherKey: 'userId',
-    as: 'Users',
-  });
+/* ----- Loan ↔ User workflow associations ----- */
+const hasAttr = (model, attr) => !!(model && model.rawAttributes && model.rawAttributes[attr]);
+
+if (db.Loan && db.User) {
+  const hasApproved   = hasAttr(db.Loan, 'approvedBy');
+  const hasDisbursed  = hasAttr(db.Loan, 'disbursedBy');
+  const hasInitiated  = hasAttr(db.Loan, 'initiatedBy'); // only if you add it later
+  const hasRejected   = hasAttr(db.Loan, 'rejectedBy');  // only if you add it later
+
+  // ONE alias-less association so `include: [{ model: User }]` does not throw.
+  if (hasApproved) {
+    db.Loan.belongsTo(db.User, { foreignKey: 'approvedBy' });                    // alias: 'User' (implicit)
+    db.Loan.belongsTo(db.User, { foreignKey: 'approvedBy', as: 'approver' });    // explicit alias
+    db.User.hasMany(db.Loan,   { foreignKey: 'approvedBy', as: 'approvedLoans' });
+  }
+
+  if (hasDisbursed) {
+    db.Loan.belongsTo(db.User, { foreignKey: 'disbursedBy', as: 'disburser' });
+    db.User.hasMany(db.Loan,   { foreignKey: 'disbursedBy', as: 'disbursedLoans' });
+  }
+
+  if (hasInitiated) {
+    db.Loan.belongsTo(db.User, { foreignKey: 'initiatedBy', as: 'initiator' });
+    db.User.hasMany(db.Loan,   { foreignKey: 'initiatedBy', as: 'initiatedLoans' });
+  }
+
+  if (hasRejected) {
+    db.Loan.belongsTo(db.User, { foreignKey: 'rejectedBy',  as: 'rejector' });
+    db.User.hasMany(db.Loan,   { foreignKey: 'rejectedBy',  as: 'rejectedLoans' });
+  }
 }
 
-/* Optional: SavingsTransaction ↔ Borrower */
+/* Optional: Savings/Comms/Audit/Activity/Accounting associations (unchanged) */
 if (db.SavingsTransaction && db.Borrower) {
   db.SavingsTransaction.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
   db.Borrower.hasMany(db.SavingsTransaction,   { foreignKey: 'borrowerId', as: 'savingsTransactions' });
 }
-
-/* Optional: Communication ↔ Attachments */
 if (db.Communication && db.CommunicationAttachment) {
-  db.Communication.hasMany(db.CommunicationAttachment, {
-    foreignKey: 'communicationId',
-    as: 'attachments',
-    onDelete: 'CASCADE',
-  });
-  db.CommunicationAttachment.belongsTo(db.Communication, {
-    foreignKey: 'communicationId',
-    as: 'communication',
-  });
+  db.Communication.hasMany(db.CommunicationAttachment, { foreignKey: 'communicationId', as: 'attachments', onDelete: 'CASCADE' });
+  db.CommunicationAttachment.belongsTo(db.Communication, { foreignKey: 'communicationId', as: 'communication' });
 }
-
-/* Optional: Audit ↔ User/Branch */
 if (db.AuditLog && db.User) {
   db.AuditLog.belongsTo(db.User,   { foreignKey: 'userId',  as: 'user' });
   db.User.hasMany(db.AuditLog,     { foreignKey: 'userId',  as: 'auditLogs' });
@@ -161,8 +156,6 @@ if (db.AuditLog && db.Branch) {
   db.AuditLog.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
   db.Branch.hasMany(db.AuditLog,   { foreignKey: 'branchId', as: 'auditLogs' });
 }
-
-/* Optional: Activity */
 if (db.ActivityLog && db.User) {
   db.ActivityLog.belongsTo(db.User, { foreignKey: 'userId', as: 'User' });
   db.User.hasMany(db.ActivityLog,   { foreignKey: 'userId' });
@@ -183,9 +176,7 @@ if (db.ActivityAssignment && db.User) {
   db.ActivityAssignment.belongsTo(db.User, { foreignKey: 'assignerId', as: 'assigner' });
 }
 
-/* ----------------------------------------------------------------
- * Exports
- * ---------------------------------------------------------------- */
+/* Exports */
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;
 
