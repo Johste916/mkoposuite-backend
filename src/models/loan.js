@@ -1,39 +1,64 @@
-// models/loan.js
+// src/models/loan.js
 module.exports = (sequelize, DataTypes) => {
-  // Keep this aligned with your migration which created camelCase columns
   const Loan = sequelize.define(
     'Loan',
     {
-      // FKs (add only those that truly exist in DB)
-      borrowerId: { type: DataTypes.INTEGER, allowNull: false },
-      branchId:   { type: DataTypes.INTEGER, allowNull: true },   // optional (exists only if you migrated it)
-      // Map to snake_case DB column:
-      productId:  { type: DataTypes.INTEGER, allowNull: true, field: 'product_id' }, // ✅ fixes productId error
+      // FKs
+      borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' },
+      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId'   },
+      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: 'product_id' },
+
+      // unique loan reference used for repayments until loan is closed
+      reference:  { type: DataTypes.STRING, unique: true },
 
       // money / terms
-      amount:             { type: DataTypes.FLOAT,    allowNull: false },
-      interestRate:       { type: DataTypes.FLOAT,    allowNull: false },
-      startDate:          { type: DataTypes.DATEONLY, allowNull: false },
-      endDate:            { type: DataTypes.DATEONLY, allowNull: false },
-      repaymentFrequency: { type: DataTypes.ENUM('weekly', 'monthly'), allowNull: false },
-      interestMethod:     { type: DataTypes.ENUM('flat', 'reducing'),  allowNull: false },
+      amount:   { type: DataTypes.DECIMAL(14,2), allowNull: false, defaultValue: 0 },
+      currency: { type: DataTypes.STRING(8), defaultValue: 'TZS' },
 
-      // status enum as per your migration (no "closed" unless you extend enum)
-      status:             { type: DataTypes.ENUM('pending', 'approved', 'rejected', 'disbursed'), defaultValue: 'pending' },
+      interestRate:       { type: DataTypes.DECIMAL(10,4), field: 'interest_rate' },
+      termMonths:         { type: DataTypes.INTEGER,       field: 'term_months' },
+      startDate:          { type: DataTypes.DATEONLY,      field: 'start_date' },
+      endDate:            { type: DataTypes.DATEONLY,      field: 'end_date' },
+      repaymentFrequency: { type: DataTypes.STRING,        field: 'repayment_frequency' },
+      interestMethod:     { type: DataTypes.STRING,        field: 'interest_method' },
 
-      // workflow/user links (match migration)
-      approvedBy:         { type: DataTypes.INTEGER },
-      approvalDate:       { type: DataTypes.DATE },
-      disbursedBy:        { type: DataTypes.INTEGER },
-      disbursementDate:   { type: DataTypes.DATE },
-      disbursementMethod: { type: DataTypes.STRING },
+      // keep as string; DB has ENUM, updated via migrations elsewhere
+      status: { type: DataTypes.STRING },
 
-      // createdAt / updatedAt come from timestamps
+      totalInterest: { type: DataTypes.DECIMAL(14,2), field: 'total_interest' },
+      outstanding:   { type: DataTypes.DECIMAL(14,2) },
+
+      // user traceability (UUIDs)
+      initiatedBy: { type: DataTypes.UUID, field: 'initiated_by' },
+      approvedBy:  { type: DataTypes.UUID, field: 'approved_by'  },
+      rejectedBy:  { type: DataTypes.UUID, field: 'rejected_by'  },
+      disbursedBy: { type: DataTypes.UUID, field: 'disbursed_by' },
+      closedBy:    { type: DataTypes.UUID, field: 'closed_by'    },
+
+      approvalDate:       { type: DataTypes.DATE, field: 'approval_date' },
+      rejectionDate:      { type: DataTypes.DATE, field: 'rejection_date' },
+      disbursementDate:   { type: DataTypes.DATE, field: 'disbursement_date' },
+      closedDate:         { type: DataTypes.DATE, field: 'closed_date' },
+
+      approvalComments:   { type: DataTypes.TEXT,   field: 'approval_comments' },
+      rejectionComments:  { type: DataTypes.TEXT,   field: 'rejection_comments' },
+      disbursementMethod: { type: DataTypes.STRING, field: 'disbursement_method' },
+      closeReason:        { type: DataTypes.STRING, field: 'close_reason' },
     },
     {
       tableName: 'loans',
       timestamps: true,
-      underscored: false, // your migration used createdAt/updatedAt (camelCase)
+      underscored: false, // createdAt/updatedAt
+      hooks: {
+        // auto-generate a loan reference if missing
+        beforeValidate: async (loan) => {
+          if (!loan.reference) {
+            // short, human-friendly unique ref
+            const rnd = Math.random().toString(36).slice(2, 8).toUpperCase();
+            loan.reference = `LN-${(loan.borrowerId || 'X')}-${rnd}`;
+          }
+        },
+      },
     }
   );
   return Loan;
