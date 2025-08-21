@@ -1,16 +1,16 @@
-// src/models/loan.js
+// models/loan.js
 module.exports = (sequelize, DataTypes) => {
   const Loan = sequelize.define(
     'Loan',
     {
       // FKs
-      borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' }, // camel in DB
-      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId'   }, // camel in DB
-      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: 'product_id' }, // snake in DB
+      borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' },
+      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId'   }, // present if you have a migration
+      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: 'product_id' }, // many DBs use product_id
 
-      // Money / terms
+      // money / terms
       amount:   { type: DataTypes.DECIMAL(14,2), allowNull: false, defaultValue: 0 },
-      currency: { type: DataTypes.STRING(8), defaultValue: 'KES' },
+      currency: { type: DataTypes.STRING(8), defaultValue: 'TZS' },
 
       interestRate:       { type: DataTypes.DECIMAL(10,4), field: 'interest_rate' },
       termMonths:         { type: DataTypes.INTEGER,       field: 'term_months' },
@@ -19,6 +19,7 @@ module.exports = (sequelize, DataTypes) => {
       repaymentFrequency: { type: DataTypes.STRING,        field: 'repayment_frequency' },
       interestMethod:     { type: DataTypes.STRING,        field: 'interest_method' },
 
+      // keep as string; DB has ENUM, we alter it with a migration
       status: { type: DataTypes.STRING },
 
       totalInterest: { type: DataTypes.DECIMAL(14,2), field: 'total_interest' },
@@ -43,8 +44,8 @@ module.exports = (sequelize, DataTypes) => {
     },
     {
       tableName: 'loans',
-      timestamps: true,     // keep timestamps
-      underscored: false,   // IMPORTANT: loans table uses createdAt/updatedAt (camelCase)
+      timestamps: true,
+      underscored: false, // table has createdAt/updatedAt
     }
   );
   return Loan;

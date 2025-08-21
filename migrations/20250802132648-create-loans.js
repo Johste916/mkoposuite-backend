@@ -1,3 +1,8 @@
+// migrations/20230801_000001-create-loans.js
+// ⛳️ This is your original file, left largely intact.
+// If this migration already ran in prod, DO NOT re-run it.
+// Instead, apply the new "alter enum" migration below.
+
 'use strict';
 
 module.exports = {
@@ -37,6 +42,9 @@ module.exports = {
         type: Sequelize.ENUM('flat', 'reducing'),
         allowNull: false,
       },
+      // NOTE: original enum (missing 'active', 'closed').
+      // Keep this as-is if it has already been applied.
+      // We'll extend it safely in a separate migration.
       status: {
         type: Sequelize.ENUM('pending', 'approved', 'rejected', 'disbursed'),
         defaultValue: 'pending',
@@ -46,8 +54,16 @@ module.exports = {
       disbursedBy: Sequelize.INTEGER,
       disbursementDate: Sequelize.DATE,
       disbursementMethod: Sequelize.STRING,
-      createdAt: Sequelize.DATE,
-      updatedAt: Sequelize.DATE,
+      createdAt: {
+        type: Sequelize.DATE,
+        allowNull: false,
+        defaultValue: Sequelize.fn('NOW'),
+      },
+      updatedAt: {
+        type: Sequelize.DATE,
+        allowNull: false,
+        defaultValue: Sequelize.fn('NOW'),
+      },
     });
   },
 

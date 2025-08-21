@@ -1,40 +1,76 @@
-// migrations/20240820-create-loan-payments.js
-"use strict";
+// NEW migration: migrations/20230801_000200-create-loan-payments.js
+// ✅ Creates the "loan_payments" table to match models/loanpayment.js
+//    and fix "relation loan_payments does not exist" errors.
+
+'use strict';
 
 module.exports = {
   async up(queryInterface, Sequelize) {
-    await queryInterface.createTable("loan_payments", {
-      id: { type: Sequelize.BIGINT, primaryKey: true, autoIncrement: true },
-      loanId: {
-        type: Sequelize.BIGINT,
-        allowNull: false,
-        references: { model: "loans", key: "id" },
-        onUpdate: "CASCADE",
-        onDelete: "CASCADE",
-      },
-      date: { type: Sequelize.DATEONLY, allowNull: false },
-      amount: { type: Sequelize.DECIMAL(18,2), allowNull: false },
-      currency: { type: Sequelize.STRING(8), defaultValue: "TZS" },
-      method: { type: Sequelize.STRING(32), defaultValue: "cash" },
-      reference: { type: Sequelize.STRING(128) },
-      notes: { type: Sequelize.TEXT },
-      allocation: { type: Sequelize.JSONB },  // [{period, principal, interest, fees, penalties}]
-      createdAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.fn("NOW") },
-      updatedAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.fn("NOW") },
-      postedBy: {
-        type: Sequelize.BIGINT,
-        references: { model: "Users", key: "id" },
-        onUpdate: "SET NULL",
-        onDelete: "SET NULL",
-      },
-    });
+    const table = 'loan_payments';
 
-    await queryInterface.addIndex("loan_payments", ["loanId"]);
-    await queryInterface.addIndex("loan_payments", ["date"]);
-    await queryInterface.addIndex("loan_payments", ["method"]);
+    const tables = await queryInterface.showAllTables();
+    // Handle case-sensitive / schema-qualified names
+    const exists = tables.map(t => (typeof t === 'object' ? t.tableName : t))
+                         .some(t => String(t).toLowerCase() === table);
+
+    if (!exists) {
+      await queryInterface.createTable(table, {
+        id: {
+          type: Sequelize.INTEGER,
+          autoIncrement: true,
+          primaryKey: true,
+          allowNull: false,
+        },
+        loanId: {
+          type: Sequelize.INTEGER,
+          allowNull: false,
+          references: { model: 'loans', key: 'id' },
+          onUpdate: 'CASCADE',
+          onDelete: 'CASCADE',
+        },
+        userId: {
+          type: Sequelize.UUID, // matches model + Users.id (UUID)
+          allowNull: true,
+          references: { model: 'Users', key: 'id' }, // Sequelize default table name for User
+          onUpdate: 'SET NULL',
+          onDelete: 'SET NULL',
+        },
+        amountPaid: {
+          type: Sequelize.DECIMAL(14, 2),
+          allowNull: false,
+          defaultValue: 0,
+        },
+        paymentDate: {
+          type: Sequelize.DATEONLY,
+          allowNull: false,
+        },
+        method: {
+          type: Sequelize.STRING,
+          allowNull: true,
+        },
+        notes: {
+          type: Sequelize.TEXT,
+          allowNull: true,
+        },
+        createdAt: {
+          type: Sequelize.DATE,
+          allowNull: false,
+          defaultValue: Sequelize.fn('NOW'),
+        },
+        updatedAt: {
+          type: Sequelize.DATE,
+          allowNull: false,
+          defaultValue: Sequelize.fn('NOW'),
+        },
+      });
+
+      await queryInterface.addIndex(table, ['loanId']);
+      await queryInterface.addIndex(table, ['userId']);
+      await queryInterface.addIndex(table, ['paymentDate']);
+    }
   },
 
-  async down(queryInterface) {
-    await queryInterface.dropTable("loan_payments");
+  async down(queryInterface, Sequelize) {
+    await queryInterface.dropTable('loan_payments');
   },
 };

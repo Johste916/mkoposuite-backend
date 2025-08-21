@@ -1,3 +1,4 @@
+// models/index.js
 const { Sequelize, DataTypes } = require('sequelize');
 require('dotenv').config();
 
@@ -24,7 +25,7 @@ const sequelize = process.env.DATABASE_URL
 
 const db = {};
 
-/* Small helper for optional models without crashing boot */
+/* Helper to avoid boot failure if some optional models are missing */
 const tryLoad = (loader, nameForLog) => {
   try {
     return loader();
@@ -35,10 +36,7 @@ const tryLoad = (loader, nameForLog) => {
 };
 
 /* ----------------------------------------------------------------
- * Core models (existing)
- * Filenames are case-sensitive on Linux:
- *   user.js, branch.js, borrower.js, loan.js, loanrepayment.js,
- *   loanpayment.js, setting.js, LoanProduct.js
+ * Core models
  * ---------------------------------------------------------------- */
 db.User          = require('./user')(sequelize, DataTypes);
 db.Branch        = require('./branch')(sequelize, DataTypes);
@@ -49,17 +47,12 @@ db.LoanPayment   = require('./loanpayment')(sequelize, DataTypes);
 db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = require('./LoanProduct')(sequelize, DataTypes);
 
-/* ----------------------------------------------------------------
- * Access control
- * Filenames must be exactly: Role.js, UserRole.js, Permission.js
- * ---------------------------------------------------------------- */
+/* Access control */
 db.Role       = require('./Role')(sequelize, DataTypes);
 db.UserRole   = require('./UserRole')(sequelize, DataTypes);
 db.Permission = require('./Permission')(sequelize, DataTypes);
 
-/* ----------------------------------------------------------------
- * Optional modules (loaded only if files exist)
- * ---------------------------------------------------------------- */
+/* Optional modules */
 db.SavingsTransaction      = tryLoad(() => require('./SavingsTransaction')(sequelize, DataTypes), 'SavingsTransaction');
 db.ReportSubscription      = tryLoad(() => require('./ReportSubscription')(sequelize, DataTypes), 'ReportSubscription');
 db.Communication           = tryLoad(() => require('./Communication')(sequelize, DataTypes), 'Communication');
@@ -71,10 +64,7 @@ db.ActivityLog        = tryLoad(() => require('./ActivityLog')(sequelize, DataTy
 db.ActivityComment    = tryLoad(() => require('./ActivityComment')(sequelize, DataTypes), 'ActivityComment');
 db.ActivityAssignment = tryLoad(() => require('./ActivityAssignment')(sequelize, DataTypes), 'ActivityAssignment');
 
-/* ----------------------------------------------------------------
- * Optional accounting
- * Files: account.js, journalEntry.js, ledgerEntry.js
- * ---------------------------------------------------------------- */
+/* Accounting (optional) */
 db.Account      = tryLoad(() => require('./account')(sequelize, DataTypes), 'Account');
 db.JournalEntry = tryLoad(() => require('./journalEntry')(sequelize, DataTypes), 'JournalEntry');
 db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes), 'LedgerEntry');
@@ -122,10 +112,7 @@ if (db.Loan && db.LoanProduct) {
   db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId' });
 }
 
-/* ----------------------------------------------------------------
- * Associations (Users ↔ Roles many-to-many)
- * Through: UserRoles (model file: UserRole.js)
- * ---------------------------------------------------------------- */
+/* Users ↔ Roles many-to-many */
 if (db.User && db.Role && db.UserRole) {
   db.User.belongsToMany(db.Role, {
     through: db.UserRole,
@@ -141,9 +128,7 @@ if (db.User && db.Role && db.UserRole) {
   });
 }
 
-/* ----------------------------------------------------------------
- * SavingsTransaction ↔ Borrower (optional)
- * ---------------------------------------------------------------- */
+/* Optional: SavingsTransaction ↔ Borrower */
 if (db.SavingsTransaction && db.Borrower) {
   db.SavingsTransaction.belongsTo(db.Borrower, {
     foreignKey: 'borrowerId',
@@ -155,9 +140,7 @@ if (db.SavingsTransaction && db.Borrower) {
   });
 }
 
-/* ----------------------------------------------------------------
- * Communications (optional)
- * ---------------------------------------------------------------- */
+/* Optional: Communication ↔ Attachments */
 if (db.Communication && db.CommunicationAttachment) {
   db.Communication.hasMany(db.CommunicationAttachment, {
     foreignKey: 'communicationId',
@@ -170,9 +153,7 @@ if (db.Communication && db.CommunicationAttachment) {
   });
 }
 
-/* ----------------------------------------------------------------
- * Audit ↔ User/Branch (optional)
- * ---------------------------------------------------------------- */
+/* Optional: Audit ↔ User/Branch */
 if (db.AuditLog && db.User) {
   db.AuditLog.belongsTo(db.User,   { foreignKey: 'userId',  as: 'user' });
   db.User.hasMany(db.AuditLog,     { foreignKey: 'userId',  as: 'auditLogs' });
@@ -182,9 +163,7 @@ if (db.AuditLog && db.Branch) {
   db.Branch.hasMany(db.AuditLog,   { foreignKey: 'branchId', as: 'auditLogs' });
 }
 
-/* ----------------------------------------------------------------
- * Activity (optional)
- * ---------------------------------------------------------------- */
+/* Optional: Activity */
 if (db.ActivityLog && db.User) {
   db.ActivityLog.belongsTo(db.User, { foreignKey: 'userId', as: 'User' });
   db.User.hasMany(db.ActivityLog,   { foreignKey: 'userId' });
@@ -205,9 +184,7 @@ if (db.ActivityAssignment && db.User) {
   db.ActivityAssignment.belongsTo(db.User, { foreignKey: 'assignerId', as: 'assigner' });
 }
 
-/* ----------------------------------------------------------------
- * Accounting associations (optional)
- * ---------------------------------------------------------------- */
+/* Optional: Accounting */
 if (db.Account && db.LedgerEntry) {
   db.Account.hasMany(db.LedgerEntry, { foreignKey: 'accountId', as: 'entries' });
   db.LedgerEntry.belongsTo(db.Account, { foreignKey: 'accountId', as: 'account' });
@@ -228,17 +205,13 @@ if (db.Account) {
   db.Account.belongsTo(db.Account, { as: 'parent',   foreignKey: 'parentId' });
 }
 
-/* ----------------------------------------------------------------
- * Loan ↔ User associations (initiator/approver/rejector/disburser)
- * Guarded to only register if the FK attribute exists on Loan.
- * Works with camelCase attributes that map to snake_case DB fields.
- * ---------------------------------------------------------------- */
+/* Loan ↔ User (initiator/approver/rejector/disburser) */
 const hasAttr = (model, attr) =>
   !!(model && model.rawAttributes && model.rawAttributes[attr]);
 
 const pickFk = (model, camel, snake) => {
   if (hasAttr(model, camel)) return camel;
-  if (hasAttr(model, snake)) return snake; // fallback if model defined attribute as snake_case
+  if (hasAttr(model, snake)) return snake;
   return null;
 };
 

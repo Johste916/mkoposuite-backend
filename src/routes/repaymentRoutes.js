@@ -1,3 +1,4 @@
+// routes/repayments.js
 const express = require('express');
 const router = express.Router();
 const repaymentController = require('../controllers/repaymentController');
