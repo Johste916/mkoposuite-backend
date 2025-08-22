@@ -5,55 +5,59 @@ module.exports = (sequelize, DataTypes) => {
     {
       // FKs
       borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: "borrowerId" },
-      branchId: { type: DataTypes.INTEGER, allowNull: true, field: "branchId" },
-      productId: { type: DataTypes.INTEGER, allowNull: true, field: "product_id" },
+      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: "branchId"   },
+      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: "product_id" },
 
       // unique loan reference used for repayments until loan is closed
-      reference: { type: DataTypes.STRING, unique: true },
+      reference:  { type: DataTypes.STRING, unique: true },
 
       // money / terms
-      amount: { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
+      amount:   { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
       currency: { type: DataTypes.STRING(8), defaultValue: "TZS" },
 
-      interestRate: { type: DataTypes.DECIMAL(10, 4), field: "interest_rate" },
-      termMonths: { type: DataTypes.INTEGER, field: "term_months" },
-      startDate: { type: DataTypes.DATEONLY, field: "start_date" },
-      endDate: { type: DataTypes.DATEONLY, field: "end_date" },
-      repaymentFrequency: { type: DataTypes.STRING, field: "repayment_frequency" },
-      interestMethod: { type: DataTypes.STRING, field: "interest_method" },
+      /**
+       * IMPORTANT: Your DB uses camelCase "interestRate" (per Postgres error hint),
+       * so DO NOT map it to "interest_rate". Either omit "field" or set it to "interestRate".
+       */
+      interestRate:       { type: DataTypes.DECIMAL(10, 4), field: "interestRate" },
+
+      termMonths:         { type: DataTypes.INTEGER,  field: "term_months" },
+      startDate:          { type: DataTypes.DATEONLY, field: "start_date" },
+      endDate:            { type: DataTypes.DATEONLY, field: "end_date" },
+      repaymentFrequency: { type: DataTypes.STRING,   field: "repayment_frequency" },
+      interestMethod:     { type: DataTypes.STRING,   field: "interest_method" },
 
       // keep as string; DB has ENUM, updated via migrations elsewhere
       status: { type: DataTypes.STRING },
 
       totalInterest: { type: DataTypes.DECIMAL(14, 2), field: "total_interest" },
-      outstanding: { type: DataTypes.DECIMAL(14, 2) },
+      outstanding:   { type: DataTypes.DECIMAL(14, 2) },
 
       // user traceability (UUIDs)
       initiatedBy: { type: DataTypes.UUID, field: "initiated_by" },
-      approvedBy: { type: DataTypes.UUID, field: "approved_by" },
-      rejectedBy: { type: DataTypes.UUID, field: "rejected_by" },
+      approvedBy:  { type: DataTypes.UUID, field: "approved_by"  },
+      rejectedBy:  { type: DataTypes.UUID, field: "rejected_by"  },
       disbursedBy: { type: DataTypes.UUID, field: "disbursed_by" },
-      closedBy: { type: DataTypes.UUID, field: "closed_by" },
+      closedBy:    { type: DataTypes.UUID, field: "closed_by"    },
 
-      approvalDate: { type: DataTypes.DATE, field: "approval_date" },
-      rejectionDate: { type: DataTypes.DATE, field: "rejection_date" },
+      approvalDate:     { type: DataTypes.DATE, field: "approval_date"     },
+      rejectionDate:    { type: DataTypes.DATE, field: "rejection_date"    },
       disbursementDate: { type: DataTypes.DATE, field: "disbursement_date" },
-      closedDate: { type: DataTypes.DATE, field: "closed_date" },
+      closedDate:       { type: DataTypes.DATE, field: "closed_date"       },
 
-      approvalComments: { type: DataTypes.TEXT, field: "approval_comments" },
-      rejectionComments: { type: DataTypes.TEXT, field: "rejection_comments" },
+      approvalComments:   { type: DataTypes.TEXT,   field: "approval_comments"   },
+      rejectionComments:  { type: DataTypes.TEXT,   field: "rejection_comments"  },
       disbursementMethod: { type: DataTypes.STRING, field: "disbursement_method" },
-      closeReason: { type: DataTypes.STRING, field: "close_reason" },
+      closeReason:        { type: DataTypes.STRING, field: "close_reason"        },
     },
     {
       tableName: "loans",
-      timestamps: true,
-      underscored: false, // createdAt/updatedAt
+      timestamps: true,      // createdAt / updatedAt (camel in the model, default columns in DB)
+      underscored: false,    // keep camelCase model attrs; fields above map to DB columns as needed
       hooks: {
         // auto-generate a loan reference if missing
         beforeValidate: async (loan) => {
           if (!loan.reference) {
-            // short, human-friendly unique ref
             const rnd = Math.random().toString(36).slice(2, 8).toUpperCase();
             loan.reference = `LN-${(loan.borrowerId || "X")}-${rnd}`;
           }
@@ -61,5 +65,6 @@ module.exports = (sequelize, DataTypes) => {
       },
     }
   );
+
   return Loan;
 };

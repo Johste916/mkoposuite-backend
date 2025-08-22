@@ -18,36 +18,72 @@ const Notifier = require("../services/notifier")({ Communication, Borrower });
 const Gateway = require("../services/paymentGateway")();
 
 /* ============================================================
-   SCHEMA PROBE (avoid selecting Loan.reference if DB lacks it)
+   SCHEMA PROBE + SAFE ATTRIBUTE PICKER
+   - We describeTable('loans') once and cache the result
+   - loanInclude() selects ONLY attributes whose underlying DB
+     columns actually exist, avoiding 42703 errors.
    ============================================================ */
-let _loanRefSupported = null;
-async function loanRefSupported() {
-  if (_loanRefSupported !== null) return _loanRefSupported;
+let _loanTableColumns = null; // { [colName]: true }
+async function getLoanTableColumns() {
+  if (_loanTableColumns) return _loanTableColumns;
   try {
     const qi = sequelize.getQueryInterface();
-    const desc = await qi.describeTable("loans");
-    _loanRefSupported = !!desc.reference;
+    const desc = await qi.describeTable("loans"); // { colName: {...}, ... }
+    _loanTableColumns = Object.fromEntries(Object.keys(desc).map(k => [k, true]));
   } catch {
-    _loanRefSupported = false;
+    _loanTableColumns = {};
   }
-  return _loanRefSupported;
+  return _loanTableColumns;
 }
 
-const borrowerAttrs = ["id", "name", "phone", "email"];
-async function loanInclude(where = {}, borrowerWhere) {
-  const hasRef = await loanRefSupported();
+function mapAttrToField(attrName) {
+  const ra = Loan.rawAttributes || {};
+  const def = ra[attrName];
+  if (!def) return null;                    // unknown attribute on model
+  return def.field || attrName;             // DB column name as defined by model
+}
+
+async function pickExistingLoanAttributes(attrNames = []) {
+  const cols = await getLoanTableColumns();
+  const selected = [];
+  for (const name of attrNames) {
+    const field = mapAttrToField(name);
+    if (!field) continue;                   // not on model
+    if (cols[field]) selected.push(name);   // include only if the DB column exists
+  }
+  // Always include "id" for joins if it exists
+  if (!selected.includes("id") && cols["id"]) selected.push("id");
+  return selected.length ? selected : undefined; // undefined => let Sequelize decide (rare)
+}
+
+const BORROWER_ATTRS = ["id", "name", "phone", "email"];
+
+// Default minimal attributes safe across schema variations
+const LOAN_BASE_ATTRS = ["id", "borrowerId", "currency", "reference"];
+// When we need to compute balances
+const LOAN_AMOUNT_ATTRS = [...LOAN_BASE_ATTRS, "amount", "totalInterest", "outstanding"];
+
+async function loanInclude({ where = {}, borrowerWhere, needAmounts = false } = {}) {
+  const attrsWanted = needAmounts ? LOAN_AMOUNT_ATTRS : LOAN_BASE_ATTRS;
+  const safeAttrs = await pickExistingLoanAttributes(attrsWanted);
+
+  const borrowerInclude = {
+    model: Borrower,
+    attributes: BORROWER_ATTRS,
+    ...(borrowerWhere ? { where: borrowerWhere } : {}),
+  };
+
   return {
     model: Loan,
-    ...(hasRef ? {} : { attributes: { exclude: ["reference"] } }),
+    ...(safeAttrs ? { attributes: safeAttrs } : {}), // if undefined, fallback (rare)
     where,
-    include: [
-      {
-        model: Borrower,
-        attributes: borrowerAttrs,
-        ...(borrowerWhere ? { where: borrowerWhere } : {}),
-      },
-    ],
+    include: [borrowerInclude],
   };
+}
+
+async function loanRefSupported() {
+  const cols = await getLoanTableColumns();
+  return !!cols["reference"];
 }
 
 /* =============== util helpers (attr pickers) =============== */
@@ -327,7 +363,11 @@ const getAllRepayments = async (req, res) => {
       };
     }
 
-    const inc = await loanInclude(loanWhere, borrowerWhere);
+    const inc = await loanInclude({
+      where: loanWhere,
+      borrowerWhere,
+      needAmounts: false,
+    });
     if (q && q.trim()) inc.required = true;
 
     const { rows, count } = await Repayment.findAndCountAll({
@@ -376,7 +416,7 @@ const getRepaymentsByBorrower = async (req, res) => {
     const dateAttr = repaymentDateAttr();
 
     const repayments = await Repayment.findAll({
-      include: [await loanInclude({ borrowerId })],
+      include: [await loanInclude({ where: { borrowerId } })],
       order: [
         [dateAttr, "DESC"],
         ["createdAt", "DESC"],
@@ -432,10 +472,11 @@ const previewAllocation = async (req, res) => {
   try {
     const { loanId, amount, date, strategy, customOrder, waivePenalties } = req.body;
 
-    const hasRef = await loanRefSupported();
+    const inc = await loanInclude({ needAmounts: false });
+    // Fetch the loan with safe attributes
     const loan = await Loan.findByPk(loanId, {
-      ...(hasRef ? {} : { attributes: { exclude: ["reference"] } }),
-      include: [{ model: Borrower, attributes: borrowerAttrs }],
+      attributes: await pickExistingLoanAttributes(LOAN_BASE_ATTRS),
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
     });
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
@@ -489,10 +530,10 @@ const createRepayment = async (req, res) => {
       return res.status(400).json({ error: "loanId, amount and date are required" });
     }
 
-    const hasRef = await loanRefSupported();
+    // Fetch loan with only columns we actually need to compute balances
     const loan = await Loan.findByPk(loanId, {
-      ...(hasRef ? {} : { attributes: { exclude: ["reference"] } }),
-      include: [{ model: Borrower, attributes: borrowerAttrs }],
+      attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
       transaction: t,
     });
     if (!loan) {
@@ -771,7 +812,7 @@ const approveRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const repayment = await Repayment.findByPk(req.params.id, {
-      include: [await loanInclude()],
+      include: [await loanInclude({ needAmounts: true })],
       transaction: t,
     });
     if (!repayment) {
@@ -869,7 +910,7 @@ const voidRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const repayment = await Repayment.findByPk(req.params.id, {
-      include: [await loanInclude()],
+      include: [await loanInclude({ needAmounts: true })],
       transaction: t,
     });
     if (!repayment) {
@@ -942,7 +983,7 @@ const getRepaymentsSummary = async (req, res) => {
     if (loanId) loanWhere.id = loanId;
     if (borrowerId) loanWhere.borrowerId = borrowerId;
 
-    const include = [await loanInclude(loanWhere)];
+    const include = [await loanInclude({ where: loanWhere })];
 
     const totalAmount = await Repayment.sum(col(amtAttr), { where, include });
     const totalCount = await Repayment.count({ where, include });
@@ -1038,7 +1079,7 @@ const exportRepaymentsCsv = async (req, res) => {
       };
     }
 
-    const inc = await loanInclude(loanWhere, borrowerWhere);
+    const inc = await loanInclude({ where: loanWhere, borrowerWhere });
     if (q && q.trim()) inc.required = true;
 
     const rows = await Repayment.findAll({
@@ -1115,7 +1156,8 @@ const webhookMobileMoney = async (req, res) => {
 
     const loan = await Loan.findOne({
       where: { reference: n.loanReference },
-      include: [{ model: Borrower, attributes: borrowerAttrs }],
+      attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
       transaction: t,
     });
     if (!loan) {
@@ -1215,7 +1257,8 @@ const webhookBank = async (req, res) => {
 
     const loan = await Loan.findOne({
       where: { reference: n.loanReference },
-      include: [{ model: Borrower, attributes: borrowerAttrs }],
+      attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
       transaction: t,
     });
     if (!loan) {
