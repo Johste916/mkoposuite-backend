@@ -62,6 +62,9 @@ db.Account      = tryLoad(() => require('./account')(sequelize, DataTypes),     
 db.JournalEntry = tryLoad(() => require('./journalEntry')(sequelize, DataTypes), 'JournalEntry');
 db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes),  'LedgerEntry');
 
+/* 🚀 NEW: Collection Sheets module */
+db.CollectionSheet = tryLoad(() => require('./collectionSheet')(sequelize, DataTypes), 'CollectionSheet');
+
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
   db.User.belongsTo(db.Branch,   { foreignKey: 'branchId' });
