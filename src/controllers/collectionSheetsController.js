@@ -5,7 +5,8 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../models');
 const { Parser: CsvParser } = require('json2csv');
 
-/* -------- helpers -------- */
+/* ---------------- helpers ---------------- */
+
 const getModel = (name) => {
   const m = sequelize?.models?.[name];
   if (!m) {
@@ -23,45 +24,42 @@ const pick = (Model, body = {}) =>
 
 const hasAttr = (Model, attr) => Boolean(Model?.rawAttributes?.[attr]);
 
-/** Map a user-supplied enum-ish value to the actual DB enum value (case-insensitive).
- *  Returns the canonical value from the model, or null if not found. */
+/** Normalize a user value to the model’s ENUM value (case-insensitive) */
 const normalizeEnum = (Model, field, value) => {
   if (!value) return null;
   const attr = Model?.rawAttributes?.[field];
   const vals = Array.isArray(attr?.values) ? attr.values : null;
   if (!vals) return null;
   const lc = String(value).toLowerCase();
-  const match = vals.find((v) => String(v).toLowerCase() === lc);
-  return match || null;
+  return vals.find((v) => String(v).toLowerCase() === lc) || null;
 };
 
+/** WHERE builder (no ILIKE on ENUMs; keep DATEONLY as strings) */
 const buildWhere = (Model, { q, status, type, dateFrom, dateTo, collector, loanOfficer }) => {
   const where = {};
 
-  // Exact match for enum/string fields, with normalization
   const normStatus = normalizeEnum(Model, 'status', status);
   if (normStatus) where.status = normStatus;
 
+  // If type is ENUM on your model, normalize; else allow exact string
   const normType = normalizeEnum(Model, 'type', type) || (type && hasAttr(Model, 'type') ? type : null);
   if (normType) where.type = normType;
 
-  // Fuzzy searches on string fields
   if (collector && hasAttr(Model, 'collector')) where.collector = { [Op.iLike]: `%${collector}%` };
   if (loanOfficer && hasAttr(Model, 'loanOfficer')) where.loanOfficer = { [Op.iLike]: `%${loanOfficer}%` };
 
-  // Dateonly range (keep as strings to avoid TZ surprises)
   if ((dateFrom || dateTo) && hasAttr(Model, 'date')) {
     where.date = {};
-    if (dateFrom) where.date[Op.gte] = dateFrom;
-    if (dateTo)   where.date[Op.lte] = dateTo;
+    if (dateFrom) where.date[Op.gte] = dateFrom; // keep as YYYY-MM-DD
+    if (dateTo)   where.date[Op.lte] = dateTo;   // keep as YYYY-MM-DD
   }
 
-  // Global q across safe string columns (exclude enum 'status')
   if (q) {
     const or = [];
     if (hasAttr(Model, 'type'))        or.push({ type:        { [Op.iLike]: `%${q}%` } });
     if (hasAttr(Model, 'collector'))   or.push({ collector:   { [Op.iLike]: `%${q}%` } });
     if (hasAttr(Model, 'loanOfficer')) or.push({ loanOfficer: { [Op.iLike]: `%${q}%` } });
+    // do NOT include status here (ENUM)
     if (or.length) where[Op.or] = or;
   }
 
@@ -91,7 +89,17 @@ const sendCsv = (res, rows) => {
 
 const getActorId = (req) => req.user?.id || req.headers['x-user-id'] || null;
 
-/* -------- controllers -------- */
+/** Friendly error text for common Postgres errors (shown even in prod) */
+const friendlyDbError = (err) => {
+  const code = err?.original?.code;
+  if (code === '42P01') return 'Database table "collection_sheets" is missing. Run migrations on this environment.';
+  if (code === '42704') return 'A required enum/type is missing. Ensure the migration that creates the enum ran.';
+  if (code === '23503') return 'Foreign key constraint failed (check branchId/collectorId/loanOfficerId).';
+  if (code === '22P02') return 'Invalid input syntax (check query parameter types).';
+  return null;
+};
+
+/* ---------------- controllers ---------------- */
 
 exports.list = async (req, res) => {
   try {
@@ -112,6 +120,8 @@ exports.list = async (req, res) => {
     });
 
     const order = parseSort(Model, req.query.sort);
+
+    // Soft-deletes: use Sequelize paranoid instead of manually touching deletedAt
     const paranoid = String(req.query.includeDeleted).toLowerCase() === 'true' ? false : true;
 
     // CSV export (no pagination; capped)
@@ -123,11 +133,13 @@ exports.list = async (req, res) => {
     const { rows, count } = await Model.findAndCountAll({ where, limit, offset, order, paranoid });
     return res.json({ data: rows, pagination: { page, limit, total: count } });
   } catch (err) {
+    const friendly = friendlyDbError(err);
     if (process.env.NODE_ENV !== 'production') {
       console.error('CollectionSheets.list error:', err);
-      return res.status(err.status || 500).json({ error: err.message || 'Failed to fetch collection sheets' });
     }
-    return res.status(500).json({ error: 'Failed to fetch collection sheets' });
+    return res.status(err.status || 500).json({
+      error: friendly || (err.expose ? err.message : 'Failed to fetch collection sheets'),
+    });
   }
 };
 
@@ -148,7 +160,7 @@ exports.create = async (req, res) => {
     const Model = getModel('CollectionSheet');
     const payload = pick(Model, req.body);
 
-    // Validate enum via model values
+    // Normalize/validate enum
     if (hasAttr(Model, 'status') && payload.status) {
       const normalized = normalizeEnum(Model, 'status', payload.status);
       if (!normalized) return res.status(400).json({ error: 'Invalid status' });
@@ -197,7 +209,7 @@ exports.remove = async (req, res) => {
     const Model = getModel('CollectionSheet');
     const row = await Model.findByPk(req.params.id);
     if (!row) return res.status(404).json({ error: 'Not found' });
-    await row.destroy(); // soft or hard depending on model.paranoid
+    await row.destroy(); // soft or hard depending on Model.options.paranoid
     res.json({ ok: true, softDeleted: Boolean(Model.options?.paranoid) });
   } catch (err) {
     if (process.env.NODE_ENV !== 'production') console.error('CollectionSheets.remove error:', err);
