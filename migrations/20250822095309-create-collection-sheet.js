@@ -1,67 +1,52 @@
 'use strict';
 
+/** @type {import('sequelize-cli').Migration} */
 module.exports = {
   async up(queryInterface, Sequelize) {
     await queryInterface.createTable('collection_sheets', {
       id: {
         type: Sequelize.UUID,
+        allowNull: false,
         primaryKey: true,
-        defaultValue: Sequelize.literal('gen_random_uuid()'), // requires pgcrypto or uuid-ossp
+        // No DB default to avoid requiring uuid extensions.
+        // Model-level default (UUIDV4) will handle app inserts.
       },
-      date: {
-        type: Sequelize.DATEONLY,
-        allowNull: false,
-      },
-      type: {
-        type: Sequelize.STRING,
-        allowNull: false,
-      },
-      collector: {
-        type: Sequelize.STRING,
-        allowNull: true,
-      },
-      loanOfficer: {
-        type: Sequelize.STRING,
-        allowNull: true,
-      },
+
+      date: { type: Sequelize.DATEONLY, allowNull: false },
+
+      type: { type: Sequelize.STRING(32), allowNull: false }, // FIELD | OFFICE | AGENCY
+
+      collector: { type: Sequelize.STRING(128), allowNull: true },
+      loanOfficer: { type: Sequelize.STRING(128), allowNull: true },
+
       status: {
-        type: Sequelize.ENUM('pending', 'completed', 'cancelled'),
+        type: Sequelize.ENUM('PENDING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'),
         allowNull: false,
-        defaultValue: 'pending',
+        defaultValue: 'PENDING',
       },
-      branchId: {
-        type: Sequelize.UUID,
-        references: { model: 'branches', key: 'id' },
-        onUpdate: 'CASCADE',
-        onDelete: 'SET NULL',
-      },
-      collectorId: {
-        type: Sequelize.UUID,
-        references: { model: 'users', key: 'id' },
-        onUpdate: 'CASCADE',
-        onDelete: 'SET NULL',
-      },
-      loanOfficerId: {
-        type: Sequelize.UUID,
-        references: { model: 'users', key: 'id' },
-        onUpdate: 'CASCADE',
-        onDelete: 'SET NULL',
-      },
-      createdAt: {
-        type: Sequelize.DATE,
-        allowNull: false,
-        defaultValue: Sequelize.fn('NOW'),
-      },
-      updatedAt: {
-        type: Sequelize.DATE,
-        allowNull: false,
-        defaultValue: Sequelize.fn('NOW'),
-      },
+
+      branchId: { type: Sequelize.UUID, allowNull: true },
+      collectorId: { type: Sequelize.UUID, allowNull: true },
+      loanOfficerId: { type: Sequelize.UUID, allowNull: true },
+
+      createdBy: { type: Sequelize.STRING(64), allowNull: true },
+      updatedBy: { type: Sequelize.STRING(64), allowNull: true },
+
+      createdAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.fn('NOW') },
+      updatedAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.fn('NOW') },
+      deletedAt: { type: Sequelize.DATE, allowNull: true },
     });
+
+    // Helpful indexes
+    await queryInterface.addIndex('collection_sheets', ['date']);
+    await queryInterface.addIndex('collection_sheets', ['status']);
+    await queryInterface.addIndex('collection_sheets', ['type']);
+    await queryInterface.addIndex('collection_sheets', ['collector']);
+    await queryInterface.addIndex('collection_sheets', ['loanOfficer']);
   },
 
-  async down(queryInterface, Sequelize) {
+  async down(queryInterface) {
     await queryInterface.dropTable('collection_sheets');
-    await queryInterface.sequelize.query('DROP TYPE IF EXISTS enum_collection_sheets_status;');
+    await queryInterface.sequelize.query('DROP TYPE IF EXISTS "enum_collection_sheets_status";');
   },
 };
