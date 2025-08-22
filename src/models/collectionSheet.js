@@ -12,9 +12,9 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       defaultValue: 'pending',
     },
-    branchId: { type: DataTypes.INTEGER, allowNull: true },
-    collectorId: { type: DataTypes.INTEGER, allowNull: true },
-    loanOfficerId: { type: DataTypes.INTEGER, allowNull: true },
+    branchId:   { type: DataTypes.INTEGER, allowNull: true },
+    collectorId:{ type: DataTypes.INTEGER, allowNull: true },
+    loanOfficerId:{ type: DataTypes.INTEGER, allowNull: true },
   }, {
     tableName: 'collection_sheets',
     schema: 'public',
