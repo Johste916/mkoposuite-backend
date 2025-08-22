@@ -2,35 +2,26 @@
 
 module.exports = (sequelize, DataTypes) => {
   const CollectionSheet = sequelize.define('CollectionSheet', {
-    id: {
-      type: DataTypes.UUID,
-      defaultValue: DataTypes.UUIDV4, // safe model-level default (no DB extension needed)
-      primaryKey: true,
-    },
+    id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
     date: { type: DataTypes.DATEONLY, allowNull: false },
-    type: { type: DataTypes.STRING(32), allowNull: false }, // FIELD | OFFICE | AGENCY
-    collector: { type: DataTypes.STRING(128), allowNull: true },
-    loanOfficer: { type: DataTypes.STRING(128), allowNull: true },
+    type: { type: DataTypes.STRING, allowNull: false },
+    collector: { type: DataTypes.STRING, allowNull: true },
+    loanOfficer: { type: DataTypes.STRING, allowNull: true },
     status: {
-      type: DataTypes.ENUM('PENDING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'),
+      type: DataTypes.ENUM('pending', 'completed', 'cancelled'),
       allowNull: false,
-      defaultValue: 'PENDING',
+      defaultValue: 'pending',
     },
-    branchId: { type: DataTypes.UUID, allowNull: true },
-    collectorId: { type: DataTypes.UUID, allowNull: true },
-    loanOfficerId: { type: DataTypes.UUID, allowNull: true },
-    createdBy: { type: DataTypes.STRING(64), allowNull: true },
-    updatedBy: { type: DataTypes.STRING(64), allowNull: true },
-    // deletedAt is managed automatically by `paranoid: true`
+    branchId: { type: DataTypes.INTEGER, allowNull: true },
+    collectorId: { type: DataTypes.INTEGER, allowNull: true },
+    loanOfficerId: { type: DataTypes.INTEGER, allowNull: true },
   }, {
     tableName: 'collection_sheets',
     schema: 'public',
     timestamps: true,
-    paranoid: true,      // enables deletedAt
-    underscored: true,   // created_at, updated_at, etc.
   });
 
-  CollectionSheet.associate = (models) => {
+  CollectionSheet.associate = function (models) {
     if (models.Branch) {
       CollectionSheet.belongsTo(models.Branch, { foreignKey: 'branchId', as: 'branch' });
     }
