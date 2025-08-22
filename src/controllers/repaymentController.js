@@ -1,5 +1,5 @@
 // controllers/repaymentController.js
-const { Op } = require("sequelize");
+const { Op, fn, col, literal } = require("sequelize");
 const {
   LoanRepayment,
   LoanPayment,
@@ -14,8 +14,8 @@ const {
 const Repayment = LoanRepayment || LoanPayment;
 const hasSavings = !!SavingsTransaction;
 
-const Notifier = require('../services/notifier')({ Communication, Borrower });
-const Gateway  = require('../services/paymentGateway')();
+const Notifier = require("../services/notifier")({ Communication, Borrower });
+const Gateway = require("../services/paymentGateway")();
 
 /* =============== util helpers (attr pickers) =============== */
 function repaymentDateAttr() {
@@ -32,19 +32,41 @@ function repaymentAmountAttr() {
   return null;
 }
 function getRepaymentDateValue(r) {
-  return r.date || r.paymentDate || r.payment_date || r.paidAt || r.paid_at || r.createdAt || null;
+  return (
+    r.date ||
+    r.paymentDate ||
+    r.payment_date ||
+    r.paidAt ||
+    r.paid_at ||
+    r.createdAt ||
+    null
+  );
 }
 function getRepaymentAmountValue(r) {
-  return Number(r.amount != null ? r.amount : (r.amountPaid != null ? r.amountPaid : 0));
+  return Number(
+    r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0
+  );
 }
+
+/* ===== dynamic Loan include: be safe if DB lacks `reference` column ===== */
+const loanHasReference =
+  !!Loan?.rawAttributes && Object.prototype.hasOwnProperty.call(Loan.rawAttributes, "reference");
+const borrowerAttrs = ["id", "name", "phone", "email"];
+const loanAttrsConfig = loanHasReference ? undefined : { exclude: ["reference"] };
+const loanIncludeBase = (where = {}) => ({
+  model: Loan,
+  ...(loanAttrsConfig ? { attributes: loanAttrsConfig } : {}),
+  where,
+  include: [{ model: Borrower, attributes: borrowerAttrs }],
+});
 
 /* ========================= receipt shape ========================= */
 const shapeReceipt = (repayment, allocation = []) => {
   const totals = allocation.reduce(
     (acc, a) => ({
       principal: acc.principal + Number(a.principal || 0),
-      interest:  acc.interest  + Number(a.interest  || 0),
-      fees:      acc.fees      + Number(a.fees      || 0),
+      interest: acc.interest + Number(a.interest || 0),
+      fees: acc.fees + Number(a.fees || 0),
       penalties: acc.penalties + Number(a.penalties || 0),
     }),
     { principal: 0, interest: 0, fees: 0, penalties: 0 }
@@ -69,7 +91,7 @@ const shapeReceipt = (repayment, allocation = []) => {
     },
     postedBy: repayment.postedBy
       ? {
-          name:  repayment.postedByName  || "User",
+          name: repayment.postedByName || "User",
           email: repayment.postedByEmail || "",
         }
       : null,
@@ -96,7 +118,10 @@ async function computeAllocations({
 
   const schedule = await LoanSchedule.findAll({
     where: { loanId },
-    order: [["dueDate", "ASC"], ["period", "ASC"]],
+    order: [
+      ["dueDate", "ASC"],
+      ["period", "ASC"],
+    ],
     raw: true,
   });
 
@@ -108,28 +133,46 @@ async function computeAllocations({
   }
 
   const items = schedule.map((s, idx) => {
-    const principalDue = Math.max(0, Number(s.principal || 0) - Number(s.principalPaid || 0));
-    const interestDue  = Math.max(0, Number(s.interest  || 0) - Number(s.interestPaid  || 0));
-    const feesDue      = Math.max(0, Number(s.fees      || 0) - Number(s.feesPaid      || 0));
-    const penDue       = Math.max(0, Number(s.penalties ?? s.penalty ?? 0) - Number(s.penaltiesPaid || 0));
+    const principalDue = Math.max(
+      0,
+      Number(s.principal || 0) - Number(s.principalPaid || 0)
+    );
+    const interestDue = Math.max(
+      0,
+      Number(s.interest || 0) - Number(s.interestPaid || 0)
+    );
+    const feesDue = Math.max(
+      0,
+      Number(s.fees || 0) - Number(s.feesPaid || 0)
+    );
+    const penDue = Math.max(
+      0,
+      Number(s.penalties ?? s.penalty ?? 0) - Number(s.penaltiesPaid || 0)
+    );
     return {
       period: s.period ?? idx + 1,
       dueDate: s.dueDate,
       remaining: {
         principal: Number.isFinite(principalDue) ? principalDue : 0,
-        interest:  Number.isFinite(interestDue)  ? interestDue  : 0,
-        fees:      Number.isFinite(feesDue)      ? feesDue      : 0,
-        penalties: waivePenalties ? 0 : (Number.isFinite(penDue) ? penDue : 0),
+        interest: Number.isFinite(interestDue) ? interestDue : 0,
+        fees: Number.isFinite(feesDue) ? feesDue : 0,
+        penalties: waivePenalties ? 0 : Number.isFinite(penDue) ? penDue : 0,
       },
     };
   });
 
   let order;
-  if (strategy === "principal_first") order = ["principal", "interest", "fees", "penalties"];
-  else if (strategy === "interest_first") order = ["interest", "fees", "penalties", "principal"];
-  else if (strategy === "fees_first") order = ["fees", "interest", "penalties", "principal"];
+  if (strategy === "principal_first")
+    order = ["principal", "interest", "fees", "penalties"];
+  else if (strategy === "interest_first")
+    order = ["interest", "fees", "penalties", "principal"];
+  else if (strategy === "fees_first")
+    order = ["fees", "interest", "penalties", "principal"];
   else if (strategy === "custom")
-    order = String(customOrder || "").split(",").map(x => x.trim()).filter(Boolean);
+    order = String(customOrder || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
   else order = ["penalties", "interest", "fees", "principal"];
 
   if (waivePenalties) order = order.filter((x) => x !== "penalties");
@@ -140,14 +183,20 @@ async function computeAllocations({
 
   for (const it of items) {
     if (left <= 0) break;
-    const line = { period: it.period, principal: 0, interest: 0, fees: 0, penalties: 0 };
+    const line = {
+      period: it.period,
+      principal: 0,
+      interest: 0,
+      fees: 0,
+      penalties: 0,
+    };
 
     for (const cat of order) {
       if (left <= 0) break;
       const need = Math.max(0, it.remaining[cat] || 0);
       if (!need) continue;
       const take = Math.min(need, left);
-      line[cat]   += take;
+      line[cat] += take;
       totals[cat] += take;
       it.remaining[cat] -= take;
       left -= take;
@@ -160,24 +209,42 @@ async function computeAllocations({
   return { allocations, totals };
 }
 
-async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sign = +1 }) {
+async function applyAllocationToSchedule({
+  loanId,
+  allocations,
+  asOfDate,
+  t,
+  sign = +1,
+}) {
   if (!LoanSchedule || !allocations?.length) return;
 
   for (const line of allocations) {
-    const row = await LoanSchedule.findOne({ where: { loanId, period: line.period }, transaction: t });
+    const row = await LoanSchedule.findOne({
+      where: { loanId, period: line.period },
+      transaction: t,
+    });
     if (!row) continue;
 
-    const principalPaid = Number(row.principalPaid || 0) + sign * Number(line.principal || 0);
-    const interestPaid  = Number(row.interestPaid  || 0) + sign * Number(line.interest  || 0);
-    const feesPaid      = Number(row.feesPaid      || 0) + sign * Number(line.fees      || 0);
-    const penaltiesPaid = Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0);
+    const principalPaid =
+      Number(row.principalPaid || 0) + sign * Number(line.principal || 0);
+    const interestPaid =
+      Number(row.interestPaid || 0) + sign * Number(line.interest || 0);
+    const feesPaid = Number(row.feesPaid || 0) + sign * Number(line.fees || 0);
+    const penaltiesPaid =
+      Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0);
 
     const total = Number(
       row.total != null
         ? row.total
-        : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || 0)
+        : (row.principal || 0) +
+            (row.interest || 0) +
+            (row.fees || 0) +
+            (row.penalties || 0)
     );
-    const paid = Math.max(0, principalPaid + interestPaid + feesPaid + penaltiesPaid);
+    const paid = Math.max(
+      0,
+      principalPaid + interestPaid + feesPaid + penaltiesPaid
+    );
 
     const status =
       paid >= total - 0.01
@@ -189,8 +256,8 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     await row.update(
       {
         principalPaid: Math.max(0, principalPaid),
-        interestPaid:  Math.max(0, interestPaid),
-        feesPaid:      Math.max(0, feesPaid),
+        interestPaid: Math.max(0, interestPaid),
+        feesPaid: Math.max(0, feesPaid),
         penaltiesPaid: Math.max(0, penaltiesPaid),
         paid,
         status,
@@ -205,7 +272,15 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
 ========================== */
 const getAllRepayments = async (req, res) => {
   try {
-    const { q = "", loanId, borrowerId, dateFrom, dateTo, page = 1, pageSize = 20 } = req.query;
+    const {
+      q = "",
+      loanId,
+      borrowerId,
+      dateFrom,
+      dateTo,
+      page = 1,
+      pageSize = 20,
+    } = req.query;
 
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
@@ -219,42 +294,49 @@ const getAllRepayments = async (req, res) => {
       where[dateAttr] = and;
     }
 
-    const include = [{
-      model: Loan,
-      where: {},
-      include: [{ model: Borrower, attributes: ["id", "name", "phone", "email"] }],
-    }];
-    if (loanId) include[0].where.id = loanId;
-    if (borrowerId) include[0].where.borrowerId = borrowerId;
+    const loanWhere = {};
+    if (loanId) loanWhere.id = loanId;
+    if (borrowerId) loanWhere.borrowerId = borrowerId;
+
+    const include = [loanIncludeBase(loanWhere)];
 
     if (q && q.trim()) {
       include[0].required = true;
       const needle = `%${q.trim()}%`;
-      include[0].include[0].where = { [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }] };
+      include[0].include[0].where = {
+        [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }],
+      };
     }
 
     const { rows, count } = await Repayment.findAndCountAll({
       where,
       include,
-      order: [[dateAttr, "DESC"], ["createdAt", "DESC"]],
+      order: [
+        [dateAttr, "DESC"],
+        ["createdAt", "DESC"],
+      ],
       limit,
       offset,
     });
 
-    const filtered = q && q.trim()
-      ? rows.filter((r) => {
-          const borrower = r.Loan?.Borrower || {};
-          const hay = [
-            borrower.name,
-            borrower.phone,
-            r.Loan?.reference,
-            r.reference,
-            r.method,
-            r.receiptNo,
-          ].filter(Boolean).join(" ").toLowerCase();
-          return hay.includes(q.trim().toLowerCase());
-        })
-      : rows;
+    const filtered =
+      q && q.trim()
+        ? rows.filter((r) => {
+            const borrower = r.Loan?.Borrower || {};
+            const hay = [
+              borrower.name,
+              borrower.phone,
+              r.Loan?.reference,
+              r.reference,
+              r.method,
+              r.receiptNo,
+            ]
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+            return hay.includes(q.trim().toLowerCase());
+          })
+        : rows;
 
     res.json({ items: filtered, total: q ? filtered.length : count });
   } catch (err) {
@@ -272,12 +354,11 @@ const getRepaymentsByBorrower = async (req, res) => {
     const dateAttr = repaymentDateAttr();
 
     const repayments = await Repayment.findAll({
-      include: {
-        model: Loan,
-        where: { borrowerId },
-        include: [{ model: Borrower, attributes: ["id", "name", "phone", "email"] }],
-      },
-      order: [[dateAttr, "DESC"], ["createdAt", "DESC"]],
+      include: loanIncludeBase({ borrowerId }),
+      order: [
+        [dateAttr, "DESC"],
+        ["createdAt", "DESC"],
+      ],
     });
     res.json(repayments);
   } catch (err) {
@@ -294,8 +375,11 @@ const getRepaymentsByLoan = async (req, res) => {
 
     const repayments = await Repayment.findAll({
       where: { loanId },
-      include: [{ model: Loan, include: [{ model: Borrower, attributes: ["id", "name", "phone", "email"] }] }],
-      order: [[dateAttr, "DESC"], ["createdAt", "DESC"]],
+      include: [loanIncludeBase()],
+      order: [
+        [dateAttr, "DESC"],
+        ["createdAt", "DESC"],
+      ],
     });
     res.json(repayments);
   } catch (err) {
@@ -307,7 +391,7 @@ const getRepaymentsByLoan = async (req, res) => {
 const getRepaymentById = async (req, res) => {
   try {
     const repayment = await Repayment.findByPk(req.params.id, {
-      include: [{ model: Loan, include: [Borrower] }],
+      include: [loanIncludeBase()],
     });
     if (!repayment) return res.status(404).json({ error: "Repayment not found" });
 
@@ -325,11 +409,25 @@ const getRepaymentById = async (req, res) => {
 const previewAllocation = async (req, res) => {
   try {
     const { loanId, amount, date, strategy, customOrder, waivePenalties } = req.body;
-    const loan = await Loan.findByPk(loanId, { include: [Borrower] });
+    const loan = await Loan.findByPk(loanId, {
+      ...(loanAttrsConfig ? { attributes: loanAttrsConfig } : {}),
+      include: [{ model: Borrower, attributes: borrowerAttrs }],
+    });
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
-    const result = await computeAllocations({ loanId, amount, date, strategy, customOrder, waivePenalties });
-    res.json({ ...result, loanCurrency: loan.currency || "TZS", borrowerName: loan.Borrower?.name || "" });
+    const result = await computeAllocations({
+      loanId,
+      amount,
+      date,
+      strategy,
+      customOrder,
+      waivePenalties,
+    });
+    res.json({
+      ...result,
+      loanCurrency: loan.currency || "TZS",
+      borrowerName: loan.Borrower?.name || "",
+    });
   } catch (err) {
     console.error("previewAllocation error:", err);
     res.status(500).json({ error: "Preview allocation failed" });
@@ -349,22 +447,44 @@ const createRepayment = async (req, res) => {
       return res.status(403).json({ error: "Not permitted to create repayments" });
     }
 
-    const { loanId, amount, date, method = "cash", reference, notes, strategy, customOrder, waivePenalties = false, issueReceipt = true } = req.body;
+    const {
+      loanId,
+      amount,
+      date,
+      method = "cash",
+      reference,
+      notes,
+      strategy,
+      customOrder,
+      waivePenalties = false,
+      issueReceipt = true,
+    } = req.body;
 
     if (!loanId || !Number(amount) || !date) {
       await t.rollback();
       return res.status(400).json({ error: "loanId, amount and date are required" });
     }
 
-    const loan = await Loan.findByPk(loanId, { include: [Borrower], transaction: t });
+    const loan = await Loan.findByPk(loanId, {
+      ...(loanAttrsConfig ? { attributes: loanAttrsConfig } : {}),
+      include: [{ model: Borrower, attributes: borrowerAttrs }],
+      transaction: t,
+    });
     if (!loan) {
       await t.rollback();
       return res.status(404).json({ error: "Loan not found" });
     }
 
-    const { allocations, totals } = await computeAllocations({ loanId, amount, date, strategy, customOrder, waivePenalties });
+    const { allocations, totals } = await computeAllocations({
+      loanId,
+      amount,
+      date,
+      strategy,
+      customOrder,
+      waivePenalties,
+    });
 
-    // Build payload flexibly (LoanPayment is default)
+    // Build payload flexibly (LoanPayment is common)
     const payload = {
       loanId,
       amountPaid: Number(amount),
@@ -374,7 +494,7 @@ const createRepayment = async (req, res) => {
       notes: notes || null,
       allocation: allocations,
       currency: loan.currency || "TZS",
-      status: 'approved',
+      status: "approved",
       applied: true,
       postedBy: req.user?.id,
       postedByName: req.user?.name,
@@ -388,7 +508,13 @@ const createRepayment = async (req, res) => {
     const repayment = await Repayment.create(payload, { transaction: t });
 
     // Apply allocations + aggregates
-    await applyAllocationToSchedule({ loanId, allocations, asOfDate: date, t, sign: +1 });
+    await applyAllocationToSchedule({
+      loanId,
+      allocations,
+      asOfDate: date,
+      t,
+      sign: +1,
+    });
 
     const paidThis = getRepaymentAmountValue(payload);
     const loanTotalPaid = Number(loan.totalPaid || 0) + Number(paidThis || 0);
@@ -400,14 +526,17 @@ const createRepayment = async (req, res) => {
 
     // Optional: credit borrower savings (auto-deposit)
     if (hasSavings) {
-      await SavingsTransaction.create({
-        borrowerId: loan.borrowerId,
-        amount: Number(amount),
-        type: 'deposit',
-        narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
-        reference: payload.reference || `RCPT-${repayment.id}`,
-        date: date,
-      }, { transaction: t });
+      await SavingsTransaction.create(
+        {
+          borrowerId: loan.borrowerId,
+          amount: Number(amount),
+          type: "deposit",
+          narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
+          reference: payload.reference || `RCPT-${repayment.id}`,
+          date: date,
+        },
+        { transaction: t }
+      );
     }
 
     await t.commit();
@@ -420,7 +549,9 @@ const createRepayment = async (req, res) => {
       method,
     });
 
-    const repFull = await Repayment.findByPk(repayment.id, { include: [{ model: Loan, include: [Borrower] }] });
+    const repFull = await Repayment.findByPk(repayment.id, {
+      include: [loanIncludeBase()],
+    });
 
     res.status(201).json({
       repaymentId: repayment.id,
@@ -436,7 +567,7 @@ const createRepayment = async (req, res) => {
 
 /* ==========================
    ✨ BULK JSON [{loanReference|loanId, amount, date, method, reference}]
-   - creates PENDING not-applied rows (to be approved)
+   - creates PENDING rows for approval
 ========================== */
 const createBulkRepayments = async (req, res) => {
   const t = await sequelize.transaction();
@@ -457,12 +588,29 @@ const createBulkRepayments = async (req, res) => {
     const created = [];
 
     for (const it of items) {
-      const { loanId: inLoanId, loanReference, amount, date, method = 'cash', reference, notes } = it;
+      const {
+        loanId: inLoanId,
+        loanReference,
+        amount,
+        date,
+        method = "cash",
+        reference,
+        notes,
+      } = it;
       let loan = null;
 
       if (inLoanId) loan = await Loan.findByPk(inLoanId, { transaction: t });
-      if (!loan && loanReference) loan = await Loan.findOne({ where: { reference: loanReference }, transaction: t });
-      if (!loan) throw new Error(`Loan not found for item with loanId=${inLoanId || 'N/A'} loanReference=${loanReference || 'N/A'}`);
+      if (!loan && loanReference)
+        loan = await Loan.findOne({
+          where: { reference: loanReference },
+          transaction: t,
+        });
+      if (!loan)
+        throw new Error(
+          `Loan not found for item (loanId=${inLoanId || "N/A"} loanReference=${
+            loanReference || "N/A"
+          })`
+        );
 
       const payload = {
         loanId: loan.id,
@@ -471,9 +619,9 @@ const createBulkRepayments = async (req, res) => {
         method,
         reference: reference || null,
         notes: notes || null,
-        status: 'pending',
+        status: "pending",
         applied: false,
-        currency: loan.currency || 'TZS',
+        currency: loan.currency || "TZS",
       };
       const attrs = Repayment.rawAttributes || {};
       for (const k of Object.keys(payload)) if (!(k in attrs)) delete payload[k];
@@ -483,11 +631,13 @@ const createBulkRepayments = async (req, res) => {
     }
 
     await t.commit();
-    res.status(201).json({ message: 'Bulk repayments queued for approval', ids: created });
+    res
+      .status(201)
+      .json({ message: "Bulk repayments queued for approval", ids: created });
   } catch (err) {
     await t.rollback();
-    console.error('Bulk create error:', err);
-    res.status(500).json({ error: err.message || 'Bulk creation failed' });
+    console.error("Bulk create error:", err);
+    res.status(500).json({ error: err.message || "Bulk creation failed" });
   }
 };
 
@@ -497,13 +647,13 @@ const createBulkRepayments = async (req, res) => {
    -> creates PENDING rows
 ========================== */
 const parseCsvBuffer = async (buffer) => {
-  const text = buffer.toString('utf8');
+  const text = buffer.toString("utf8");
   const lines = text.split(/\r?\n/).filter(Boolean);
   if (!lines.length) return [];
-  const header = lines[0].split(',').map(h => h.trim());
+  const header = lines[0].split(",").map((h) => h.trim());
   const out = [];
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',').map(c => c.trim());
+    const cols = lines[i].split(",").map((c) => c.trim());
     const row = {};
     header.forEach((h, idx) => (row[h] = cols[idx]));
     out.push(row);
@@ -521,25 +671,28 @@ const uploadRepaymentsCsv = async (req, res) => {
     const rows = await parseCsvBuffer(req.file.buffer);
     if (!rows.length) {
       await t.rollback();
-      return res.status(400).json({ error: 'CSV is empty' });
+      return res.status(400).json({ error: "CSV is empty" });
     }
 
     const created = [];
     for (const r of rows) {
       const loanRef = r.loanReference || r.loan_ref || r.reference;
-      const loan = await Loan.findOne({ where: { reference: loanRef }, transaction: t });
+      const loan = await Loan.findOne({
+        where: { reference: loanRef },
+        transaction: t,
+      });
       if (!loan) throw new Error(`Loan not found for reference ${loanRef}`);
 
       const payload = {
         loanId: loan.id,
         amountPaid: Number(r.amount || 0),
         paymentDate: r.date,
-        method: r.method || 'cash',
+        method: r.method || "cash",
         reference: r.reference || null,
         notes: r.notes || null,
-        status: 'pending',
+        status: "pending",
         applied: false,
-        currency: loan.currency || 'TZS',
+        currency: loan.currency || "TZS",
       };
       const attrs = Repayment.rawAttributes || {};
       for (const k of Object.keys(payload)) if (!(k in attrs)) delete payload[k];
@@ -549,11 +702,13 @@ const uploadRepaymentsCsv = async (req, res) => {
     }
 
     await t.commit();
-    res.status(201).json({ message: 'CSV uploaded, repayments queued for approval', ids: created });
+    res
+      .status(201)
+      .json({ message: "CSV uploaded, repayments queued for approval", ids: created });
   } catch (err) {
     await t.rollback();
-    console.error('CSV upload error:', err);
-    res.status(500).json({ error: err.message || 'CSV upload failed' });
+    console.error("CSV upload error:", err);
+    res.status(500).json({ error: err.message || "CSV upload failed" });
   }
 };
 
@@ -563,29 +718,53 @@ const uploadRepaymentsCsv = async (req, res) => {
 const listPendingApprovals = async (req, res) => {
   try {
     const items = await Repayment.findAll({
-      where: { status: 'pending' },
-      include: [{ model: Loan, include: [Borrower] }],
-      order: [['createdAt','ASC']],
+      where: { status: "pending" },
+      include: [loanIncludeBase()],
+      order: [["createdAt", "ASC"]],
     });
     res.json(items);
   } catch (err) {
-    console.error('listPendingApprovals error:', err);
-    res.status(500).json({ error: 'Failed to fetch pending approvals' });
+    console.error("listPendingApprovals error:", err);
+    res.status(500).json({ error: "Failed to fetch pending approvals" });
   }
 };
 
 const approveRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const repayment = await Repayment.findByPk(req.params.id, { include: [{ model: Loan, include: [Borrower] }], transaction: t });
-    if (!repayment) { await t.rollback(); return res.status(404).json({ error: 'Repayment not found' }); }
-    if (repayment.status !== 'pending') { await t.rollback(); return res.status(400).json({ error: 'Repayment is not pending' }); }
+    const repayment = await Repayment.findByPk(req.params.id, {
+      include: [loanIncludeBase()],
+      transaction: t,
+    });
+    if (!repayment) {
+      await t.rollback();
+      return res.status(404).json({ error: "Repayment not found" });
+    }
+    if (repayment.status !== "pending") {
+      await t.rollback();
+      return res.status(400).json({ error: "Repayment is not pending" });
+    }
 
     const loan = repayment.Loan;
-    const date = getRepaymentDateValue(repayment) || new Date().toISOString().slice(0,10);
-    const allocations = repayment.allocation || (await computeAllocations({ loanId: loan.id, amount: getRepaymentAmountValue(repayment), date })).allocations;
+    const date =
+      getRepaymentDateValue(repayment) || new Date().toISOString().slice(0, 10);
+    const allocations =
+      repayment.allocation ||
+      (
+        await computeAllocations({
+          loanId: loan.id,
+          amount: getRepaymentAmountValue(repayment),
+          date,
+        })
+      ).allocations;
 
-    await applyAllocationToSchedule({ loanId: loan.id, allocations, asOfDate: date, t, sign: +1 });
+    await applyAllocationToSchedule({
+      loanId: loan.id,
+      allocations,
+      asOfDate: date,
+      t,
+      sign: +1,
+    });
     const paidThis = getRepaymentAmountValue(repayment);
     const loanTotalPaid = Number(loan.totalPaid || 0) + Number(paidThis || 0);
     const principal = Number(loan.amount || 0);
@@ -593,18 +772,24 @@ const approveRepayment = async (req, res) => {
     const outstanding = Math.max(0, principal + totalInterest - loanTotalPaid);
 
     await loan.update({ totalPaid: loanTotalPaid, outstanding }, { transaction: t });
-    await repayment.update({ status: 'approved', applied: true, allocation: allocations }, { transaction: t });
+    await repayment.update(
+      { status: "approved", applied: true, allocation: allocations },
+      { transaction: t }
+    );
 
     // Optional savings deposit
     if (hasSavings) {
-      await SavingsTransaction.create({
-        borrowerId: loan.borrowerId,
-        amount: Number(paidThis),
-        type: 'deposit',
-        narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
-        reference: repayment.reference || `RCPT-${repayment.id}`,
-        date: date,
-      }, { transaction: t });
+      await SavingsTransaction.create(
+        {
+          borrowerId: loan.borrowerId,
+          amount: Number(paidThis),
+          type: "deposit",
+          narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
+          reference: repayment.reference || `RCPT-${repayment.id}`,
+          date: date,
+        },
+        { transaction: t }
+      );
     }
 
     await t.commit();
@@ -613,28 +798,29 @@ const approveRepayment = async (req, res) => {
       borrower: loan.Borrower,
       amount: Number(paidThis),
       loanRef: loan.reference || loan.id,
-      method: repayment.method || 'cash',
+      method: repayment.method || "cash",
     });
 
-    res.json({ message: 'Repayment approved' });
+    res.json({ message: "Repayment approved" });
   } catch (err) {
     await t.rollback();
-    console.error('approveRepayment error:', err);
-    res.status(500).json({ error: 'Approve failed' });
+    console.error("approveRepayment error:", err);
+    res.status(500).json({ error: "Approve failed" });
   }
 };
 
 const rejectRepayment = async (req, res) => {
   try {
     const repayment = await Repayment.findByPk(req.params.id);
-    if (!repayment) return res.status(404).json({ error: 'Repayment not found' });
-    if (repayment.status !== 'pending') return res.status(400).json({ error: 'Repayment is not pending' });
+    if (!repayment) return res.status(404).json({ error: "Repayment not found" });
+    if (repayment.status !== "pending")
+      return res.status(400).json({ error: "Repayment is not pending" });
 
-    await repayment.update({ status: 'rejected', applied: false });
-    res.json({ message: 'Repayment rejected' });
+    await repayment.update({ status: "rejected", applied: false });
+    res.json({ message: "Repayment rejected" });
   } catch (err) {
-    console.error('rejectRepayment error:', err);
-    res.status(500).json({ error: 'Reject failed' });
+    console.error("rejectRepayment error:", err);
+    res.status(500).json({ error: "Reject failed" });
   }
 };
 
@@ -644,9 +830,18 @@ const rejectRepayment = async (req, res) => {
 const voidRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const repayment = await Repayment.findByPk(req.params.id, { include: [{ model: Loan, include: [Borrower] }], transaction: t });
-    if (!repayment) { await t.rollback(); return res.status(404).json({ error: "Repayment not found" }); }
-    if (repayment.status === 'voided') { await t.rollback(); return res.status(400).json({ error: 'Already voided' }); }
+    const repayment = await Repayment.findByPk(req.params.id, {
+      include: [loanIncludeBase()],
+      transaction: t,
+    });
+    if (!repayment) {
+      await t.rollback();
+      return res.status(404).json({ error: "Repayment not found" });
+    }
+    if (repayment.status === "voided") {
+      await t.rollback();
+      return res.status(400).json({ error: "Already voided" });
+    }
 
     const loan = repayment.Loan;
     const date = getRepaymentDateValue(repayment) || new Date().toISOString();
@@ -654,17 +849,29 @@ const voidRepayment = async (req, res) => {
     if (repayment.applied) {
       // reverse schedule & totals
       if (repayment.allocation?.length) {
-        await applyAllocationToSchedule({ loanId: loan.id, allocations: repayment.allocation, asOfDate: date, t, sign: -1 });
+        await applyAllocationToSchedule({
+          loanId: loan.id,
+          allocations: repayment.allocation,
+          asOfDate: date,
+          t,
+          sign: -1,
+        });
       }
       const amt = getRepaymentAmountValue(repayment);
-      const newTotalPaid = Math.max(0, Number(loan.totalPaid || 0) - Number(amt || 0));
+      const newTotalPaid = Math.max(
+        0,
+        Number(loan.totalPaid || 0) - Number(amt || 0)
+      );
       const principal = Number(loan.amount || 0);
       const totalInterest = Number(loan.totalInterest || 0);
       const outstanding = Math.max(0, principal + totalInterest - newTotalPaid);
       await loan.update({ totalPaid: newTotalPaid, outstanding }, { transaction: t });
     }
 
-    await repayment.update({ status: 'voided', applied: false, voidReason: req.body?.voidReason || null }, { transaction: t });
+    await repayment.update(
+      { status: "voided", applied: false, voidReason: req.body?.voidReason || null },
+      { transaction: t }
+    );
 
     await t.commit();
     res.json({ message: "Repayment voided" });
@@ -682,40 +889,45 @@ const getRepaymentsSummary = async (req, res) => {
   try {
     const { dateFrom, dateTo, loanId, borrowerId } = req.query;
     const dateAttr = repaymentDateAttr();
-    const amtAttr  = repaymentAmountAttr();
+    const amtAttr = repaymentAmountAttr();
     if (!amtAttr) return res.json({ totalAmount: 0, totalCount: 0, byMethod: [] });
 
-    const where = {};
+    const where = { status: "approved" };
     if (dateFrom || dateTo) {
       const and = {};
       if (dateFrom) and[Op.gte] = new Date(dateFrom);
       if (dateTo) and[Op.lte] = new Date(dateTo);
       where[dateAttr] = and;
     }
-    where.status = 'approved';
 
-    const include = [{
-      model: Loan,
-      where: {},
-      include: borrowerId ? [{ model: Borrower, where: { id: borrowerId } }] : [{ model: Borrower }],
-    }];
-    if (loanId) include[0].where.id = loanId;
+    const loanWhere = {};
+    if (loanId) loanWhere.id = loanId;
 
-    const totalAmount = await Repayment.sum(amtAttr, { where, include });
-    const totalCount  = await Repayment.count({ where, include });
+    const include = [
+      {
+        ...loanIncludeBase(loanWhere),
+        include: borrowerId
+          ? [{ model: Borrower, attributes: borrowerAttrs, where: { id: borrowerId } }]
+          : [{ model: Borrower, attributes: borrowerAttrs }],
+      },
+    ];
+
+    const totalAmount = await Repayment.sum(col(amtAttr), { where, include });
+    const totalCount = await Repayment.count({ where, include });
 
     const byMethodRows = await Repayment.findAll({
-      where, include,
+      where,
+      include,
       attributes: [
         "method",
-        [sequelize.fn("COUNT", sequelize.col("id")), "count"],
-        [sequelize.fn("SUM", sequelize.col(amtAttr)), "amount"]
+        [fn("COUNT", col("id")), "count"],
+        [fn("SUM", col(amtAttr)), "amount"],
       ],
       group: ["method"],
-      order: [[sequelize.literal("amount"), "DESC"]],
+      order: [[literal("amount"), "DESC"]],
     });
 
-    const byMethod = byMethodRows.map(r => ({
+    const byMethod = byMethodRows.map((r) => ({
       method: r.method || "unknown",
       count: Number(r.get("count") || 0),
       amount: Number(r.get("amount") || 0),
@@ -734,12 +946,12 @@ const getRepaymentsSummary = async (req, res) => {
 
 const getRepaymentsTimeSeries = async (req, res) => {
   try {
-    const { dateFrom, dateTo, granularity = 'day' } = req.query;
+    const { dateFrom, dateTo, granularity = "day" } = req.query;
     const dateAttr = repaymentDateAttr();
-    const amtAttr  = repaymentAmountAttr();
+    const amtAttr = repaymentAmountAttr();
     if (!amtAttr) return res.json({ series: [] });
 
-    const where = { status: 'approved' };
+    const where = { status: "approved" };
     if (dateFrom || dateTo) {
       const and = {};
       if (dateFrom) and[Op.gte] = new Date(dateFrom);
@@ -747,23 +959,22 @@ const getRepaymentsTimeSeries = async (req, res) => {
       where[dateAttr] = and;
     }
 
-    // Postgres date_trunc
-    const bucket = sequelize.literal(`date_trunc('${granularity}', "${Repayment.name}"."${dateAttr}")`);
+    const bucketCol = fn("date_trunc", granularity, col(dateAttr));
     const rows = await Repayment.findAll({
       where,
-      attributes: [[bucket, 'bucket'], [sequelize.fn('SUM', sequelize.col(amtAttr)), 'amount']],
-      group: ['bucket'],
-      order: [[sequelize.literal('bucket'), 'ASC']],
+      attributes: [[bucketCol, "bucket"], [fn("SUM", col(amtAttr)), "amount"]],
+      group: ["bucket"],
+      order: [[literal("bucket"), "ASC"]],
     });
 
-    const series = rows.map(r => ({
-      date: r.get('bucket'),
-      amount: Number(r.get('amount') || 0),
+    const series = rows.map((r) => ({
+      date: r.get("bucket"),
+      amount: Number(r.get("amount") || 0),
     }));
     res.json({ series });
   } catch (err) {
-    console.error('TimeSeries error:', err);
-    res.status(500).json({ error: 'Failed to build time series' });
+    console.error("TimeSeries error:", err);
+    res.status(500).json({ error: "Failed to build time series" });
   }
 };
 
@@ -783,23 +994,41 @@ const exportRepaymentsCsv = async (req, res) => {
       where[dateAttr] = and;
     }
 
-    const include = [{
-      model: Loan,
-      where: {},
-      include: [{ model: Borrower, attributes: ["id", "name", "phone", "email"] }],
-    }];
-    if (loanId) include[0].where.id = loanId;
-    if (borrowerId) include[0].where.borrowerId = borrowerId;
+    const loanWhere = {};
+    if (loanId) loanWhere.id = loanId;
+    if (borrowerId) loanWhere.borrowerId = borrowerId;
+
+    const include = [loanIncludeBase(loanWhere)];
 
     if (q && q.trim()) {
       include[0].required = true;
       const needle = `%${q.trim()}%`;
-      include[0].include[0].where = { [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }] };
+      include[0].include[0].where = {
+        [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }],
+      };
     }
 
-    const rows = await Repayment.findAll({ where, include, order: [[dateAttr, "DESC"], ["createdAt", "DESC"]] });
+    const rows = await Repayment.findAll({
+      where,
+      include,
+      order: [
+        [dateAttr, "DESC"],
+        ["createdAt", "DESC"],
+      ],
+    });
 
-    const headers = ["ReceiptNo","Date","Amount","Currency","Method","Reference","Borrower","LoanRef","LoanId","Status"];
+    const headers = [
+      "ReceiptNo",
+      "Date",
+      "Amount",
+      "Currency",
+      "Method",
+      "Reference",
+      "Borrower",
+      "LoanRef",
+      "LoanId",
+      "Status",
+    ];
     const csvLines = [headers.join(",")];
     for (const r of rows) {
       const loan = r.Loan || {};
@@ -814,7 +1043,7 @@ const exportRepaymentsCsv = async (req, res) => {
         `"${(br.name || "").replace(/"/g, '""')}"`,
         `"${(loan.reference || "").replace(/"/g, '""')}"`,
         `${loan.id || ""}`,
-        `"${r.status || ''}"`,
+        `"${r.status || ""}"`,
       ];
       csvLines.push(line.join(","));
     }
@@ -830,59 +1059,82 @@ const exportRepaymentsCsv = async (req, res) => {
 
 /* ==========================
    🔔 WEBHOOKS (mobile & bank)
-   Expect body to include a loanReference in provider-specific fields
 ========================== */
 const webhookMobileMoney = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    if (!Gateway.verifySignature('mobile', req.headers, req.rawBody || req.body)) {
+    if (!Gateway.verifySignature("mobile", req.headers, req.rawBody || req.body)) {
       await t.rollback();
-      return res.status(401).json({ error: 'Invalid signature' });
+      return res.status(401).json({ error: "Invalid signature" });
     }
-    const n = Gateway.normalizeWebhook('mobile', req.body);
+    const n = Gateway.normalizeWebhook("mobile", req.body);
     if (!n?.loanReference || !n.amount) {
       await t.rollback();
-      return res.status(400).json({ error: 'Missing loan reference or amount' });
+      return res.status(400).json({ error: "Missing loan reference or amount" });
     }
 
-    const loan = await Loan.findOne({ where: { reference: n.loanReference }, include: [Borrower], transaction: t });
+    const loan = await Loan.findOne({
+      where: { reference: n.loanReference },
+      ...(loanAttrsConfig ? { attributes: loanAttrsConfig } : {}),
+      include: [{ model: Borrower, attributes: borrowerAttrs }],
+      transaction: t,
+    });
     if (!loan) {
       await t.rollback();
-      return res.status(404).json({ error: 'Loan not found' });
+      return res.status(404).json({ error: "Loan not found" });
     }
 
     // compute allocation and approve immediately
-    const { allocations } = await computeAllocations({ loanId: loan.id, amount: n.amount, date: n.paidAt });
-
-    const repayment = await Repayment.create({
+    const { allocations } = await computeAllocations({
       loanId: loan.id,
-      amountPaid: Number(n.amount),
-      paymentDate: n.paidAt?.slice(0,10),
-      method: 'mobile',
-      status: 'approved',
-      applied: true,
-      currency: n.currency || loan.currency || 'TZS',
-      gateway: n.gateway || 'mobile',
-      gatewayRef: n.gatewayRef || null,
-      reference: `MM-${n.gatewayRef || Date.now()}`,
-      allocation: allocations,
-    }, { transaction: t });
+      amount: n.amount,
+      date: n.paidAt,
+    });
 
-    await applyAllocationToSchedule({ loanId: loan.id, allocations, asOfDate: n.paidAt, t, sign: +1 });
+    const repayment = await Repayment.create(
+      {
+        loanId: loan.id,
+        amountPaid: Number(n.amount),
+        paymentDate: n.paidAt?.slice(0, 10),
+        method: "mobile",
+        status: "approved",
+        applied: true,
+        currency: n.currency || loan.currency || "TZS",
+        gateway: n.gateway || "mobile",
+        gatewayRef: n.gatewayRef || null,
+        reference: `MM-${n.gatewayRef || Date.now()}`,
+        allocation: allocations,
+      },
+      { transaction: t }
+    );
+
+    await applyAllocationToSchedule({
+      loanId: loan.id,
+      allocations,
+      asOfDate: n.paidAt,
+      t,
+      sign: +1,
+    });
 
     const newTotalPaid = Number(loan.totalPaid || 0) + Number(n.amount);
-    const outstanding = Math.max(0, Number(loan.amount || 0) + Number(loan.totalInterest || 0) - newTotalPaid);
+    const outstanding = Math.max(
+      0,
+      Number(loan.amount || 0) + Number(loan.totalInterest || 0) - newTotalPaid
+    );
     await loan.update({ totalPaid: newTotalPaid, outstanding }, { transaction: t });
 
     if (hasSavings) {
-      await SavingsTransaction.create({
-        borrowerId: loan.borrowerId,
-        amount: Number(n.amount),
-        type: 'deposit',
-        narrative: `Loan repayment deposit (mobile) for ${loan.reference}`,
-        reference: repayment.reference,
-        date: n.paidAt?.slice(0,10),
-      }, { transaction: t });
+      await SavingsTransaction.create(
+        {
+          borrowerId: loan.borrowerId,
+          amount: Number(n.amount),
+          type: "deposit",
+          narrative: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`,
+          reference: repayment.reference,
+          date: n.paidAt?.slice(0, 10),
+        },
+        { transaction: t }
+      );
     }
 
     await t.commit();
@@ -891,67 +1143,91 @@ const webhookMobileMoney = async (req, res) => {
       borrower: loan.Borrower,
       amount: Number(n.amount),
       loanRef: loan.reference || loan.id,
-      method: 'mobile',
+      method: "mobile",
     });
 
     res.json({ ok: true });
   } catch (err) {
     await t.rollback();
-    console.error('Mobile webhook error:', err);
-    res.status(500).json({ error: 'Webhook failed' });
+    console.error("Mobile webhook error:", err);
+    res.status(500).json({ error: "Webhook failed" });
   }
 };
 
 const webhookBank = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    if (!Gateway.verifySignature('bank', req.headers, req.rawBody || req.body)) {
+    if (!Gateway.verifySignature("bank", req.headers, req.rawBody || req.body)) {
       await t.rollback();
-      return res.status(401).json({ error: 'Invalid signature' });
+      return res.status(401).json({ error: "Invalid signature" });
     }
-    const n = Gateway.normalizeWebhook('bank', req.body);
+    const n = Gateway.normalizeWebhook("bank", req.body);
     if (!n?.loanReference || !n.amount) {
       await t.rollback();
-      return res.status(400).json({ error: 'Missing loan reference or amount' });
+      return res.status(400).json({ error: "Missing loan reference or amount" });
     }
 
-    const loan = await Loan.findOne({ where: { reference: n.loanReference }, include: [Borrower], transaction: t });
+    const loan = await Loan.findOne({
+      where: { reference: n.loanReference },
+      ...(loanAttrsConfig ? { attributes: loanAttrsConfig } : {}),
+      include: [{ model: Borrower, attributes: borrowerAttrs }],
+      transaction: t,
+    });
     if (!loan) {
       await t.rollback();
-      return res.status(404).json({ error: 'Loan not found' });
+      return res.status(404).json({ error: "Loan not found" });
     }
 
-    const { allocations } = await computeAllocations({ loanId: loan.id, amount: n.amount, date: n.paidAt });
-
-    const repayment = await Repayment.create({
+    const { allocations } = await computeAllocations({
       loanId: loan.id,
-      amountPaid: Number(n.amount),
-      paymentDate: n.paidAt?.slice(0,10),
-      method: 'bank',
-      status: 'approved',
-      applied: true,
-      currency: n.currency || loan.currency || 'TZS',
-      gateway: 'bank',
-      gatewayRef: n.gatewayRef || null,
-      reference: `BK-${n.gatewayRef || Date.now()}`,
-      allocation: allocations,
-    }, { transaction: t });
+      amount: n.amount,
+      date: n.paidAt,
+    });
 
-    await applyAllocationToSchedule({ loanId: loan.id, allocations, asOfDate: n.paidAt, t, sign: +1 });
+    const repayment = await Repayment.create(
+      {
+        loanId: loan.id,
+        amountPaid: Number(n.amount),
+        paymentDate: n.paidAt?.slice(0, 10),
+        method: "bank",
+        status: "approved",
+        applied: true,
+        currency: n.currency || loan.currency || "TZS",
+        gateway: "bank",
+        gatewayRef: n.gatewayRef || null,
+        reference: `BK-${n.gatewayRef || Date.now()}`,
+        allocation: allocations,
+      },
+      { transaction: t }
+    );
+
+    await applyAllocationToSchedule({
+      loanId: loan.id,
+      allocations,
+      asOfDate: n.paidAt,
+      t,
+      sign: +1,
+    });
 
     const newTotalPaid = Number(loan.totalPaid || 0) + Number(n.amount);
-    const outstanding = Math.max(0, Number(loan.amount || 0) + Number(loan.totalInterest || 0) - newTotalPaid);
+    const outstanding = Math.max(
+      0,
+      Number(loan.amount || 0) + Number(loan.totalInterest || 0) - newTotalPaid
+    );
     await loan.update({ totalPaid: newTotalPaid, outstanding }, { transaction: t });
 
     if (hasSavings) {
-      await SavingsTransaction.create({
-        borrowerId: loan.borrowerId,
-        amount: Number(n.amount),
-        type: 'deposit',
-        narrative: `Loan repayment deposit (bank) for ${loan.reference}`,
-        reference: repayment.reference,
-        date: n.paidAt?.slice(0,10),
-      }, { transaction: t });
+      await SavingsTransaction.create(
+        {
+          borrowerId: loan.borrowerId,
+          amount: Number(n.amount),
+          type: "deposit",
+          narrative: `Loan repayment deposit (bank) for ${loan.reference || loan.id}`,
+          reference: repayment.reference,
+          date: n.paidAt?.slice(0, 10),
+        },
+        { transaction: t }
+      );
     }
 
     await t.commit();
@@ -960,14 +1236,14 @@ const webhookBank = async (req, res) => {
       borrower: loan.Borrower,
       amount: Number(n.amount),
       loanRef: loan.reference || loan.id,
-      method: 'bank',
+      method: "bank",
     });
 
     res.json({ ok: true });
   } catch (err) {
     await t.rollback();
-    console.error('Bank webhook error:', err);
-    res.status(500).json({ error: 'Webhook failed' });
+    console.error("Bank webhook error:", err);
+    res.status(500).json({ error: "Webhook failed" });
   }
 };
 
@@ -994,7 +1270,7 @@ const updateRepayment = async (req, res) => {
 };
 
 const deleteRepayment = async (req, res) => {
-  // keep old route working but use the safe void path
+  // route kept but perform safe void
   return voidRepayment(req, res);
 };
 
