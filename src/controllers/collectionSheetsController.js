@@ -5,7 +5,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../models');
 const { Parser: CsvParser } = require('json2csv');
 
-/** Safe model getter */
+/* -------- helpers -------- */
 const getModel = (name) => {
   const m = sequelize?.models?.[name];
   if (!m) {
@@ -16,49 +16,47 @@ const getModel = (name) => {
   return m;
 };
 
-/** Whitelist only attributes that exist on the model */
 const pick = (Model, body = {}) =>
   !Model?.rawAttributes
     ? body
     : Object.fromEntries(Object.entries(body).filter(([k]) => Model.rawAttributes[k]));
 
-/** Helper */
 const hasAttr = (Model, attr) => Boolean(Model?.rawAttributes?.[attr]);
 
-/** Build WHERE safely (no ILIKE on ENUM) */
-const buildWhere = (Model, {
-  q,
-  status,
-  type,
-  dateFrom,
-  dateTo,
-  collector,
-  loanOfficer,
-}) => {
+/** Map a user-supplied enum-ish value to the actual DB enum value (case-insensitive).
+ *  Returns the canonical value from the model, or null if not found. */
+const normalizeEnum = (Model, field, value) => {
+  if (!value) return null;
+  const attr = Model?.rawAttributes?.[field];
+  const vals = Array.isArray(attr?.values) ? attr.values : null;
+  if (!vals) return null;
+  const lc = String(value).toLowerCase();
+  const match = vals.find((v) => String(v).toLowerCase() === lc);
+  return match || null;
+};
+
+const buildWhere = (Model, { q, status, type, dateFrom, dateTo, collector, loanOfficer }) => {
   const where = {};
 
-  // Exact match for ENUM
-  if (status && hasAttr(Model, 'status')) where.status = status;
+  // Exact match for enum/string fields, with normalization
+  const normStatus = normalizeEnum(Model, 'status', status);
+  if (normStatus) where.status = normStatus;
 
-  // Exact match for type (string)
-  if (type && hasAttr(Model, 'type')) where.type = type;
+  const normType = normalizeEnum(Model, 'type', type) || (type && hasAttr(Model, 'type') ? type : null);
+  if (normType) where.type = normType;
 
-  // Fuzzy fields (strings only)
-  if (collector && hasAttr(Model, 'collector')) {
-    where.collector = { [Op.iLike]: `%${collector}%` };
-  }
-  if (loanOfficer && hasAttr(Model, 'loanOfficer')) {
-    where.loanOfficer = { [Op.iLike]: `%${loanOfficer}%` };
-  }
+  // Fuzzy searches on string fields
+  if (collector && hasAttr(Model, 'collector')) where.collector = { [Op.iLike]: `%${collector}%` };
+  if (loanOfficer && hasAttr(Model, 'loanOfficer')) where.loanOfficer = { [Op.iLike]: `%${loanOfficer}%` };
 
-  // Date range (DATEONLY: keep as YYYY-MM-DD strings to avoid TZ surprises)
+  // Dateonly range (keep as strings to avoid TZ surprises)
   if ((dateFrom || dateTo) && hasAttr(Model, 'date')) {
     where.date = {};
     if (dateFrom) where.date[Op.gte] = dateFrom;
     if (dateTo)   where.date[Op.lte] = dateTo;
   }
 
-  // Global q across STRING columns (exclude ENUM 'status')
+  // Global q across safe string columns (exclude enum 'status')
   if (q) {
     const or = [];
     if (hasAttr(Model, 'type'))        or.push({ type:        { [Op.iLike]: `%${q}%` } });
@@ -71,12 +69,10 @@ const buildWhere = (Model, {
 };
 
 const parseSort = (Model, sort) => {
-  // format: field:dir,field2:dir2 (dir = ASC|DESC)
   if (!sort) return [['date', 'DESC'], ['createdAt', 'DESC']];
-  const parts = String(sort).split(',');
   const out = [];
-  for (const p of parts) {
-    const [field, dirRaw] = p.split(':');
+  for (const token of String(sort).split(',')) {
+    const [field, dirRaw] = token.split(':');
     const dir = (dirRaw || 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
     if (hasAttr(Model, field)) out.push([field, dir]);
   }
@@ -85,21 +81,17 @@ const parseSort = (Model, sort) => {
 
 const sendCsv = (res, rows) => {
   const plain = rows.map((r) => (r?.get ? r.get({ plain: true }) : r));
-  const fields = Object.keys(plain[0] || {});
-  const parser = new CsvParser({ fields });
-  const csv = parser.parse(plain);
+  const fields = ['date','type','collector','loanOfficer','status','branchId','id','createdAt','updatedAt']
+    .filter((k) => k in (plain[0] || {}));
+  const csv = new CsvParser({ fields }).parse(plain);
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="collection_sheets.csv"');
   res.status(200).send(csv);
 };
 
-/** Actor (for createdBy/updatedBy) */
 const getActorId = (req) => req.user?.id || req.headers['x-user-id'] || null;
 
-/** Valid ENUM values (keep in sync with model/migration) */
-const VALID_STATUS = new Set(['PENDING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']);
-
-// -------------------------- Controllers --------------------------
+/* -------- controllers -------- */
 
 exports.list = async (req, res) => {
   try {
@@ -120,11 +112,9 @@ exports.list = async (req, res) => {
     });
 
     const order = parseSort(Model, req.query.sort);
-
-    // Include soft-deleted rows?
     const paranoid = String(req.query.includeDeleted).toLowerCase() === 'true' ? false : true;
 
-    // CSV export (no pagination)
+    // CSV export (no pagination; capped)
     if (String(req.query.export).toLowerCase() === 'csv') {
       const rows = await Model.findAll({ where, order, paranoid, limit: 10000 });
       return sendCsv(res, rows);
@@ -133,8 +123,11 @@ exports.list = async (req, res) => {
     const { rows, count } = await Model.findAndCountAll({ where, limit, offset, order, paranoid });
     return res.json({ data: rows, pagination: { page, limit, total: count } });
   } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({ error: err.expose ? err.message : 'Failed to fetch collection sheets' });
+    if (process.env.NODE_ENV !== 'production') {
+      console.error('CollectionSheets.list error:', err);
+      return res.status(err.status || 500).json({ error: err.message || 'Failed to fetch collection sheets' });
+    }
+    return res.status(500).json({ error: 'Failed to fetch collection sheets' });
   }
 };
 
@@ -143,10 +136,10 @@ exports.get = async (req, res) => {
     const Model = getModel('CollectionSheet');
     const row = await Model.findByPk(req.params.id);
     if (!row) return res.status(404).json({ error: 'Not found' });
-    return res.json(row);
+    res.json(row);
   } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    if (process.env.NODE_ENV !== 'production') console.error('CollectionSheets.get error:', err);
+    res.status(err.status || 500).json({ error: err.expose ? err.message : 'Internal Server Error' });
   }
 };
 
@@ -155,9 +148,11 @@ exports.create = async (req, res) => {
     const Model = getModel('CollectionSheet');
     const payload = pick(Model, req.body);
 
-    // Validate ENUM status early (avoid DB error)
-    if (payload.status && !VALID_STATUS.has(payload.status)) {
-      return res.status(400).json({ error: 'Invalid status' });
+    // Validate enum via model values
+    if (hasAttr(Model, 'status') && payload.status) {
+      const normalized = normalizeEnum(Model, 'status', payload.status);
+      if (!normalized) return res.status(400).json({ error: 'Invalid status' });
+      payload.status = normalized;
     }
 
     const actorId = getActorId(req);
@@ -165,10 +160,10 @@ exports.create = async (req, res) => {
     if (actorId && hasAttr(Model, 'updatedBy')) payload.updatedBy = actorId;
 
     const created = await Model.create(payload);
-    return res.status(201).json(created);
+    res.status(201).json(created);
   } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    if (process.env.NODE_ENV !== 'production') console.error('CollectionSheets.create error:', err);
+    res.status(err.status || 500).json({ error: err.expose ? err.message : 'Internal Server Error' });
   }
 };
 
@@ -180,18 +175,20 @@ exports.update = async (req, res) => {
 
     const payload = pick(Model, req.body);
 
-    if (payload.status && !VALID_STATUS.has(payload.status)) {
-      return res.status(400).json({ error: 'Invalid status' });
+    if (hasAttr(Model, 'status') && payload.status) {
+      const normalized = normalizeEnum(Model, 'status', payload.status);
+      if (!normalized) return res.status(400).json({ error: 'Invalid status' });
+      payload.status = normalized;
     }
 
     const actorId = getActorId(req);
     if (actorId && hasAttr(Model, 'updatedBy')) payload.updatedBy = actorId;
 
     await row.update(payload);
-    return res.json(row);
+    res.json(row);
   } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    if (process.env.NODE_ENV !== 'production') console.error('CollectionSheets.update error:', err);
+    res.status(err.status || 500).json({ error: err.expose ? err.message : 'Internal Server Error' });
   }
 };
 
@@ -200,38 +197,30 @@ exports.remove = async (req, res) => {
     const Model = getModel('CollectionSheet');
     const row = await Model.findByPk(req.params.id);
     if (!row) return res.status(404).json({ error: 'Not found' });
-
-    // Use Sequelize behavior: soft-delete if paranoid, hard-delete otherwise
-    await row.destroy();
-    return res.json({ ok: true, softDeleted: Boolean(Model.options?.paranoid) });
+    await row.destroy(); // soft or hard depending on model.paranoid
+    res.json({ ok: true, softDeleted: Boolean(Model.options?.paranoid) });
   } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    if (process.env.NODE_ENV !== 'production') console.error('CollectionSheets.remove error:', err);
+    res.status(err.status || 500).json({ error: err.expose ? err.message : 'Internal Server Error' });
   }
 };
 
 exports.restore = async (req, res) => {
   try {
     const Model = getModel('CollectionSheet');
+    if (!Model.options?.paranoid) return res.status(400).json({ error: 'Restore not supported' });
 
-    if (!Model.options?.paranoid) {
-      return res.status(400).json({ error: 'Restore not supported (model is not paranoid).' });
-    }
-
-    // Must disable paranoid to find soft-deleted rows
     const row = await Model.findByPk(req.params.id, { paranoid: false });
     if (!row) return res.status(404).json({ error: 'Not found' });
 
     await row.restore();
 
     const actorId = getActorId(req);
-    if (actorId && hasAttr(Model, 'updatedBy')) {
-      await row.update({ updatedBy: actorId });
-    }
+    if (actorId && hasAttr(Model, 'updatedBy')) await row.update({ updatedBy: actorId });
 
-    return res.json({ ok: true, restored: true });
+    res.json({ ok: true, restored: true });
   } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    if (process.env.NODE_ENV !== 'production') console.error('CollectionSheets.restore error:', err);
+    res.status(err.status || 500).json({ error: err.expose ? err.message : 'Internal Server Error' });
   }
 };
