@@ -1,39 +1,60 @@
 'use strict';
-const { Model } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
-  class CollectionSheet extends Model {
-    static associate(models) {
-      // Example: if you later relate to LoanOfficer/User etc.
-      // CollectionSheet.belongsTo(models.User, { as: 'officer', foreignKey: 'loanOfficerId' });
-    }
-  }
-
-  CollectionSheet.init(
-    {
-      // Core fields
-      date: { type: DataTypes.DATE, allowNull: false },
-      type: { type: DataTypes.STRING(32), allowNull: false }, // FIELD | OFFICE | AGENCY
-      collector: { type: DataTypes.STRING(128), allowNull: true },
-      loanOfficer: { type: DataTypes.STRING(128), allowNull: true },
-      status: { type: DataTypes.STRING(32), allowNull: false }, // PENDING | IN_PROGRESS | COMPLETED | CANCELLED
-
-      // Audit (optional)
-      createdBy: { type: DataTypes.STRING(64), allowNull: true },
-      updatedBy: { type: DataTypes.STRING(64), allowNull: true },
-
-      // Soft delete
-      deletedAt: { type: DataTypes.DATE, allowNull: true },
+  const CollectionSheet = sequelize.define('CollectionSheet', {
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4, // safer if gen_random_uuid isn't available
+      primaryKey: true,
     },
-    {
-      sequelize,
-      modelName: 'CollectionSheet',     // ⚠️ This is the name the controller expects
-      tableName: 'collection_sheets',   // explicit table name
-      underscored: true,
-      paranoid: true,                   // enables soft delete via deletedAt
-      timestamps: true,                 // createdAt/updatedAt
+    date: {
+      type: DataTypes.DATEONLY,
+      allowNull: false,
+    },
+    type: {
+      type: DataTypes.STRING,
+      allowNull: false,
+    },
+    collector: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    loanOfficer: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    status: {
+      type: DataTypes.ENUM('pending', 'completed', 'cancelled'),
+      allowNull: false,
+      defaultValue: 'pending',
+    },
+    branchId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
+    collectorId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
+    loanOfficerId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
+  }, {
+    tableName: 'collection_sheets',
+    schema: 'public',
+    timestamps: true,
+  });
+
+  CollectionSheet.associate = function (models) {
+    if (models.Branch) {
+      CollectionSheet.belongsTo(models.Branch, { foreignKey: 'branchId', as: 'branch' });
     }
-  );
+    if (models.User) {
+      CollectionSheet.belongsTo(models.User, { foreignKey: 'collectorId', as: 'collectorUser' });
+      CollectionSheet.belongsTo(models.User, { foreignKey: 'loanOfficerId', as: 'loanOfficerUser' });
+    }
+  };
 
   return CollectionSheet;
 };
