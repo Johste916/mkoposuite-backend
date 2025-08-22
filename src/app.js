@@ -1,4 +1,5 @@
 // backend/src/app.js
+'use strict';
 const express = require('express');
 const path = require('path');
 const app = express();
@@ -26,6 +27,9 @@ const defaultOrigins = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://localhost:4173',
+  'http://127.0.0.1:4173',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
   'https://strong-fudge-7fc28d.netlify.app',
   'https://mkoposuite.netlify.app',
 ];
@@ -53,7 +57,11 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // include X-User-Id for audit fields, plus common headers
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, X-Requested-With, X-User-Id'
+  );
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -83,43 +91,54 @@ function makeDummyRouter(sample) {
   });
   return r;
 }
-function safeLoadRoutes(routePath, dummyRouter) {
-  try {
-    // eslint-disable-next-line import/no-dynamic-require, global-require
-    const mod = require(routePath);
-    return mod && mod.default ? mod.default : mod;
-  } catch (e) {
-    const pretty = routePath.replace(__dirname, '…');
-    console.warn(`⚠️  Using dummy routes for ${pretty} — create this file to enable real API.`);
-    return dummyRouter;
+
+/**
+ * Try requiring a module from ./routes/** first, then ../routes/** as fallback.
+ * Works whether your project keeps routes under src/routes or routes/.
+ */
+function safeLoadRoutes(relPathFromSrc, dummyRouter) {
+  const tryPaths = [relPathFromSrc, relPathFromSrc.replace('./', '../')];
+  for (const p of tryPaths) {
+    try {
+      // eslint-disable-next-line import/no-dynamic-require, global-require
+      const mod = require(p);
+      return mod && mod.default ? mod.default : mod;
+    } catch (e) {
+      if (e.code !== 'MODULE_NOT_FOUND') {
+        console.warn(`⚠️  Failed loading ${p}: ${e.message}`);
+      }
+    }
   }
+  const pretty = relPathFromSrc.replace(__dirname, '…');
+  console.warn(`⚠️  Using dummy routes for ${pretty} — create this file to enable real API.`);
+  return dummyRouter;
 }
 
 /* --------------------------------- Routes ---------------------------------- */
 /* Existing, already in your project */
-const authRoutes          = require('./routes/authRoutes');
-const borrowerRoutes      = require('./routes/borrowerRoutes');
-const loanRoutes          = require('./routes/loanRoutes');
-const dashboardRoutes     = require('./routes/dashboardRoutes');
-const savingsRoutes       = require('./routes/savingsRoutes');
-const disbursementRoutes  = require('./routes/loanDisbursementRoutes');
-const repaymentRoutes     = require('./routes/repaymentRoutes');
-const reportRoutes        = require('./routes/reportRoutes');
-const settingRoutes       = require('./routes/settingRoutes');
-const userRoutes          = require('./routes/userRoutes');
-const roleRoutes          = require('./routes/roleRoutes');
-const branchRoutes        = require('./routes/branchRoutes');
-const userRoleRoutes      = require('./routes/userRoleRoutes');
-const userBranchRoutes    = require('./routes/userBranchRoutes');
-const loanProductRoutes   = require('./routes/loanProductRoutes');
+const authRoutes          = safeLoadRoutes('./routes/authRoutes', makeDummyRouter({ ok: true }));
+const borrowerRoutes      = safeLoadRoutes('./routes/borrowerRoutes', makeDummyRouter([]));
+const loanRoutes          = safeLoadRoutes('./routes/loanRoutes', makeDummyRouter([]));
+const dashboardRoutes     = safeLoadRoutes('./routes/dashboardRoutes', makeDummyRouter({}));
+const savingsRoutes       = safeLoadRoutes('./routes/savingsRoutes', makeDummyRouter([]));
+const disbursementRoutes  = safeLoadRoutes('./routes/loanDisbursementRoutes', makeDummyRouter([]));
+const repaymentRoutes     = safeLoadRoutes('./routes/repaymentRoutes', makeDummyRouter([]));
+const reportRoutes        = safeLoadRoutes('./routes/reportRoutes', makeDummyRouter({}));
+const settingRoutes       = safeLoadRoutes('./routes/settingRoutes', makeDummyRouter({}));
+const userRoutes          = safeLoadRoutes('./routes/userRoutes', makeDummyRouter([]));
+const roleRoutes          = safeLoadRoutes('./routes/roleRoutes', makeDummyRouter([]));
+const branchRoutes        = safeLoadRoutes('./routes/branchRoutes', makeDummyRouter([]));
+const userRoleRoutes      = safeLoadRoutes('./routes/userRoleRoutes', makeDummyRouter([]));
+const userBranchRoutes    = safeLoadRoutes('./routes/userBranchRoutes', makeDummyRouter([]));
+const loanProductRoutes   = safeLoadRoutes('./routes/loanProductRoutes', makeDummyRouter([]));
 
 /* Admin modules */
-const adminStaffRoutes        = require('./routes/staffRoutes');
-const permissionRoutes        = require('./routes/permissionRoutes');
-const adminAuditRoutes        = require('./routes/admin/auditRoutes');
-const adminReportSubRoutes    = require('./routes/admin/reportSubscriptionRoutes');
+const adminStaffRoutes     = safeLoadRoutes('./routes/staffRoutes', makeDummyRouter([]));
+const permissionRoutes     = safeLoadRoutes('./routes/permissionRoutes', makeDummyRouter([]));
+const adminAuditRoutes     = safeLoadRoutes('./routes/admin/auditRoutes', makeDummyRouter([]));
+const adminReportSubRoutes = safeLoadRoutes('./routes/admin/reportSubscriptionRoutes', makeDummyRouter([]));
 
-/* New modules (LoanDisk parity) — try to load real files, else mount dummy */
+/* New modules — try to load real files, else mount dummy */
 const collateralRoutes = safeLoadRoutes(
   './routes/collateralRoutes',
   makeDummyRouter([
@@ -130,8 +149,8 @@ const collateralRoutes = safeLoadRoutes(
 const collectionSheetsRoutes = safeLoadRoutes(
   './routes/collectionSheetsRoutes',
   makeDummyRouter([
-    { id: 1, type: 'daily', date: '2025-08-01', count: 12 },
-    { id: 2, type: 'missed', date: '2025-08-02', count: 5 },
+    { id: 1, type: 'FIELD', date: '2025-08-01', status: 'PENDING' },
+    { id: 2, type: 'OFFICE', date: '2025-08-02', status: 'COMPLETED' },
   ])
 );
 const savingsTransactionsRoutes = safeLoadRoutes(
@@ -197,7 +216,9 @@ const accountingRoutes = safeLoadRoutes(
 /* -------------------------- Automatic audit hooks -------------------------- */
 /* Lazy-access AuditLog so we don't break if model is missing */
 let AuditLog;
-try { ({ AuditLog } = require('./models')); } catch {}
+try { ({ AuditLog } = require('./models')); } catch {
+  try { ({ AuditLog } = require('../models')); } catch {}
+}
 
 /**
  * Records successful non-GET API calls (POST/PUT/PATCH/DELETE).
@@ -243,11 +264,12 @@ app.use('/api/reports',        reportRoutes);
 app.use('/api/settings',       settingRoutes);
 
 /* Admin/ACL */
-app.use('/api/admin/staff',                 adminStaffRoutes);
-app.use('/api/permissions',                 permissionRoutes);
-app.use('/api/admin/audit',                 adminAuditRoutes);
+app.use('/api/admin/staff',     adminStaffRoutes);
+app.use('/api/permissions',     permissionRoutes);
+app.use('/api/admin/audit',     adminAuditRoutes);
 /* alias for current frontend (AuditManagement.jsx calls /audit-logs) */
-app.use('/api/audit-logs',                  adminAuditRoutes);
+app.use('/api/audit-logs',      adminAuditRoutes);
+app.use('/api/admin/report-subscriptions', adminReportSubRoutes);
 
 /* Other core mounts */
 app.use('/api/users',          userRoutes);
@@ -257,7 +279,7 @@ app.use('/api/user-roles',     userRoleRoutes);
 app.use('/api/user-branches',  userBranchRoutes);
 app.use('/api/loan-products',  loanProductRoutes);
 
-/* New modules (work with real route files OR dummy routers) */
+/* New modules (real routes OR dummy routers) */
 app.use('/api/collateral',           collateralRoutes);
 app.use('/api/collections',          collectionSheetsRoutes);
 app.use('/api/savings-transactions', savingsTransactionsRoutes);
@@ -275,16 +297,19 @@ app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOS
 
 // DB health (helps diagnose 500s quickly)
 try {
-  const { sequelize } = require('./models');
-  app.get('/api/health/db', async (_req, res) => {
-    try {
-      await sequelize.authenticate();
-      res.json({ db: 'ok', ts: new Date().toISOString() });
-    } catch (e) {
-      console.error('DB health error:', e);
-      res.status(500).json({ db: 'down', error: e.message });
-    }
-  });
+  let sequelize;
+  try { ({ sequelize } = require('./models')); } catch { ({ sequelize } = require('../models')); }
+  if (sequelize) {
+    app.get('/api/health/db', async (_req, res) => {
+      try {
+        await sequelize.authenticate();
+        res.json({ db: 'ok', ts: new Date().toISOString() });
+      } catch (e) {
+        console.error('DB health error:', e);
+        res.status(500).json({ db: 'down', error: e.message });
+      }
+    });
+  }
 } catch { /* ignore */ }
 
 /* ----------------------------------- 404 ----------------------------------- */

@@ -1,4 +1,6 @@
 // backend/src/routes/settingRoutes.js
+'use strict';
+
 const express = require('express');
 const router = express.Router();
 const { authenticateUser } = require('../middleware/authMiddleware');
@@ -41,6 +43,41 @@ const loanRemindersController = require('../controllers/settings/loanRemindersCo
 const loanCyclesController = require('../controllers/settings/loanCyclesController');
 const loanTemplatesController = require('../controllers/settings/loanTemplatesController');
 const loanApprovalsController = require('../controllers/settings/loanApprovalsController');
+
+/* ==============================
+   Sidebar config (FIX for 404)
+   ============================== */
+/**
+ * Returns the menu items and feature flags used by the frontend to render the sidebar.
+ * If you want this accessible pre-login, remove `authenticateUser`.
+ */
+router.get('/sidebar', authenticateUser, (req, res) => {
+  res.json({
+    items: [
+      { path: '/',                    label: 'Dashboard',           icon: 'home' },
+      { path: '/borrowers',           label: 'Borrowers',           icon: 'users' },
+      { path: '/loans',               label: 'Loans',               icon: 'credit-card' },
+      { path: '/repayments',          label: 'Repayments',          icon: 'receipt' },
+      { path: '/collections',         label: 'Collection Sheets',   icon: 'calendar' },
+      { path: '/savings-transactions',label: 'Savings Txns',        icon: 'wallet' },
+      { path: '/investors',           label: 'Investors',           icon: 'briefcase' },
+      { path: '/assets',              label: 'Assets',              icon: 'package' },
+      { path: '/reports',             label: 'Reports',             icon: 'bar-chart-2' },
+      { path: '/settings',            label: 'Settings',            icon: 'settings' },
+    ],
+    featureFlags: {
+      collections: true,
+      savingsTransactions: true,
+      investors: true,
+      collateral: true,
+      payroll: true,
+      expenses: true,
+      otherIncome: true,
+      accounting: true,
+      esignatures: true,
+    },
+  });
+});
 
 /* ==============================
    Loan Categories
