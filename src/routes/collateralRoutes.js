@@ -2,22 +2,14 @@
 const express = require('express');
 const router = express.Router();
 const ctrl = require('../controllers/collateralController');
+const { authenticateUser } = require('../middleware/authMiddleware');
 
 // Base: /api/collateral
-
-// List (pagination + search: ?page=&limit=&q=)
-router.get('/', ctrl.list);
-
-// Get by id
-router.get('/:id', ctrl.get);
-
-// Create
-router.post('/', ctrl.create);
-
-// Update
-router.put('/:id', ctrl.update);
-
-// Delete
-router.delete('/:id', ctrl.remove);
+router.get('/', authenticateUser, ctrl.list);
+router.get('/:id', authenticateUser, ctrl.get);
+router.post('/', authenticateUser, ctrl.create);
+router.put('/:id', authenticateUser, ctrl.update);
+router.post('/:id/release', authenticateUser, ctrl.release);
+router.delete('/:id', authenticateUser, ctrl.remove);
 
 module.exports = router;
