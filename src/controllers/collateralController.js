@@ -4,94 +4,142 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../models');
 const { Parser: CsvParser } = require('json2csv');
 
-const getModel = (n) => {
-  const m = sequelize?.models?.[n];
-  if (!m) throw Object.assign(new Error(`Model "${n}" not found`), { status: 500, expose: true });
+const getModel = (name) => {
+  const m = sequelize?.models?.[name];
+  if (!m) {
+    const err = new Error(`Model "${name}" not found`);
+    err.status = 500; err.expose = true;
+    throw err;
+  }
   return m;
 };
-const hasAttr = (M, k) => !!M?.rawAttributes?.[k];
-const pick = (M, body = {}) =>
-  !M.rawAttributes ? body : Object.fromEntries(Object.entries(body).filter(([k]) => M.rawAttributes[k]));
+const hasAttr = (M, a) => Boolean(M?.rawAttributes?.[a]);
+const pick = (M, body) =>
+  !M?.rawAttributes ? body :
+  Object.fromEntries(Object.entries(body || {}).filter(([k]) => M.rawAttributes[k]));
 
-const actorId = (req) => req.user?.id || req.headers['x-user-id'] || null;
+const toDate = (v) => {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
 
-const buildWhere = (M, q, status, category) => {
+const buildWhere = (M, { q, status, category, borrowerId, loanId, dateFrom, dateTo, includeDeleted }) => {
   const where = {};
+  // support paranoid later if you add deletedAt; currently table is not paranoid
   if (q) {
-    const fields = ['itemName', 'category', 'model', 'serialNumber', 'location', 'notes']
-      .filter(f => hasAttr(M, f));
-    if (fields.length) where[Op.or] = fields.map(f => ({ [f]: { [Op.iLike]: `%${q}%` } }));
+    const fields = ['itemName', 'category', 'model', 'serialNumber', 'status', 'location', 'notes']
+      .filter((f) => hasAttr(M, f));
+    if (fields.length) where[Op.or] = fields.map((f) => ({ [f]: { [Op.iLike]: `%${q}%` } }));
   }
   if (status && hasAttr(M, 'status')) where.status = status;
-  if (category && hasAttr(M, 'category')) where.category = { [Op.iLike]: category };
+  if (category && hasAttr(M, 'category')) where.category = category;
+  if (borrowerId && hasAttr(M, 'borrowerId')) where.borrowerId = borrowerId;
+  if (loanId && hasAttr(M, 'loanId')) where.loanId = loanId;
+
+  // Filter by createdAt range (or change to another column if you prefer)
+  const df = toDate(dateFrom);
+  const dt = toDate(dateTo);
+  if ((df || dt) && hasAttr(M, 'createdAt')) {
+    where.createdAt = {};
+    if (df) where.createdAt[Op.gte] = df;
+    if (dt) {
+      const end = new Date(dt);
+      end.setHours(23,59,59,999);
+      where.createdAt[Op.lte] = end;
+    }
+  }
   return where;
 };
 
+const parseSort = (M, sort) => {
+  if (!sort) return [['createdAt', 'DESC']];
+  const parts = String(sort).split(',');
+  const out = [];
+  for (const p of parts) {
+    const [field, dirRaw] = p.split(':');
+    const dir = (dirRaw || 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    if (hasAttr(M, field)) out.push([field, dir]);
+  }
+  return out.length ? out : [['createdAt', 'DESC']];
+};
+
 const sendCsv = (res, rows) => {
-  const data = rows.map(r => r.toJSON ? r.toJSON() : r);
-  const fields = Object.keys(data[0] || {});
-  const csv = new CsvParser({ fields }).parse(data);
+  const plain = rows.map((r) => (r?.toJSON ? r.toJSON() : r));
+  const fields = Object.keys(plain[0] || {});
+  const csv = new CsvParser({ fields }).parse(plain);
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="collaterals.csv"');
+  res.setHeader('Content-Disposition', 'attachment; filename="collateral.csv"');
   res.status(200).send(csv);
 };
 
-// GET /api/collateral
+// Map common PG errors to friendly messages
+const friendlyDbError = (err) => {
+  const code = err?.original?.code || err?.parent?.code;
+  if (code === '42P01') return 'Database table "collaterals" is missing. Run the migration for collaterals.';
+  if (code === '42703') return 'A referenced column does not exist on "collaterals". Check your migration vs model.';
+  return null;
+};
+
+// --------- Actions ----------
 exports.list = async (req, res) => {
   try {
     const M = getModel('Collateral');
-
     const page  = Math.max(parseInt(req.query.page  || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 200);
     const offset = (page - 1) * limit;
-    const order = [['createdAt', 'DESC']];
 
-    const where = buildWhere(M, req.query.q, req.query.status, req.query.category);
+    const where = buildWhere(M, {
+      q: req.query.q,
+      status: req.query.status,
+      category: req.query.category,
+      borrowerId: req.query.borrowerId,
+      loanId: req.query.loanId,
+      dateFrom: req.query.dateFrom,
+      dateTo: req.query.dateTo,
+    });
+    const order = parseSort(M, req.query.sort);
 
     if (String(req.query.export).toLowerCase() === 'csv') {
-      const all = await M.findAll({ where, order });
-      return sendCsv(res, all);
+      const rows = await M.findAll({ where, order });
+      return sendCsv(res, rows);
     }
 
-    const { rows, count } = await M.findAndCountAll({ where, limit, offset, order });
+    const { rows, count } = await M.findAndCountAll({ where, order, limit, offset });
     return res.json({ data: rows, pagination: { page, limit, total: count } });
   } catch (err) {
+    const friendly = friendlyDbError(err);
     const status = err.status || 500;
-    res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    return res.status(status).json({ error: friendly || (err.expose ? err.message : 'Internal Server Error') });
   }
 };
 
-// GET /api/collateral/:id
 exports.get = async (req, res) => {
   try {
     const M = getModel('Collateral');
     const row = await M.findByPk(req.params.id);
     if (!row) return res.status(404).json({ error: 'Not found' });
-    res.json(row);
+    return res.json(row);
   } catch (err) {
+    const friendly = friendlyDbError(err);
     const status = err.status || 500;
-    res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    return res.status(status).json({ error: friendly || (err.expose ? err.message : 'Internal Server Error') });
   }
 };
 
-// POST /api/collateral
 exports.create = async (req, res) => {
   try {
     const M = getModel('Collateral');
     const payload = pick(M, req.body);
-    const uid = actorId(req);
-    if (uid && hasAttr(M, 'createdBy')) payload.createdBy = uid;
-    if (uid && hasAttr(M, 'updatedBy')) payload.updatedBy = uid;
-
     const created = await M.create(payload);
-    res.status(201).json(created);
+    return res.status(201).json(created);
   } catch (err) {
+    const friendly = friendlyDbError(err);
     const status = err.status || 500;
-    res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    return res.status(status).json({ error: friendly || (err.expose ? err.message : 'Internal Server Error') });
   }
 };
 
-// PUT /api/collateral/:id
 exports.update = async (req, res) => {
   try {
     const M = getModel('Collateral');
@@ -99,47 +147,25 @@ exports.update = async (req, res) => {
     if (!row) return res.status(404).json({ error: 'Not found' });
 
     const payload = pick(M, req.body);
-    const uid = actorId(req);
-    if (uid && hasAttr(M, 'updatedBy')) payload.updatedBy = uid;
-
     await row.update(payload);
-    res.json(row);
+    return res.json(row);
   } catch (err) {
+    const friendly = friendlyDbError(err);
     const status = err.status || 500;
-    res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    return res.status(status).json({ error: friendly || (err.expose ? err.message : 'Internal Server Error') });
   }
 };
 
-// POST /api/collateral/:id/release
-exports.release = async (req, res) => {
-  try {
-    // server-side auth check: only privileged roles
-    const role = req.user?.role || req.headers['x-user-role'];
-    const allowed = new Set(['admin', 'director', 'branch_manager']);
-    if (!allowed.has(role)) return res.status(403).json({ error: 'Forbidden' });
-
-    const M = getModel('Collateral');
-    const row = await M.findByPk(req.params.id);
-    if (!row) return res.status(404).json({ error: 'Not found' });
-
-    await row.update({ status: 'RELEASED', updatedBy: actorId(req) || null });
-    res.json({ ok: true, id: row.id, status: row.status });
-  } catch (err) {
-    const status = err.status || 500;
-    res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
-  }
-};
-
-// DELETE /api/collateral/:id
 exports.remove = async (req, res) => {
   try {
     const M = getModel('Collateral');
     const row = await M.findByPk(req.params.id);
     if (!row) return res.status(404).json({ error: 'Not found' });
     await row.destroy();
-    res.json({ ok: true });
+    return res.json({ ok: true });
   } catch (err) {
+    const friendly = friendlyDbError(err);
     const status = err.status || 500;
-    res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+    return res.status(status).json({ error: friendly || (err.expose ? err.message : 'Internal Server Error') });
   }
 };
