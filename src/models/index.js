@@ -1,4 +1,4 @@
-// models/index.js
+'use strict';
 const { Sequelize, DataTypes } = require('sequelize');
 require('dotenv').config();
 
@@ -23,8 +23,6 @@ const sequelize = process.env.DATABASE_URL
     );
 
 const db = {};
-
-/* Load optional models safely */
 const tryLoad = (loader, nameForLog) => {
   try { return loader(); }
   catch (e) { console.warn(`⚠️  Model not loaded: ${nameForLog} (${e.message})`); return null; }
@@ -62,8 +60,11 @@ db.Account      = tryLoad(() => require('./account')(sequelize, DataTypes),     
 db.JournalEntry = tryLoad(() => require('./journalEntry')(sequelize, DataTypes), 'JournalEntry');
 db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes),  'LedgerEntry');
 
-/* 🚀 NEW: Collection Sheets module */
+/* Collections */
 db.CollectionSheet = tryLoad(() => require('./collectionSheet')(sequelize, DataTypes), 'CollectionSheet');
+
+/* ✅ NEW: Collateral — ensure filename is exactly `models/collateral.js` (lowercase) */
+db.Collateral = tryLoad(() => require('./collateral')(sequelize, DataTypes), 'Collateral');
 
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
@@ -82,9 +83,8 @@ if (db.Loan && db.Borrower) {
 }
 
 if (db.Loan && db.Branch) {
-  // default + friendly alias
-  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId' });               // alias: 'Branch'
-  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' }); // alias: 'branch'
+  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId' });
+  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
   db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId' });
   db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId', as: 'loans' });
 }
@@ -105,7 +105,6 @@ if (db.LoanPayment && db.User) {
 }
 
 if (db.Loan && db.LoanProduct) {
-  // `Loan.productId` maps to DB column product_id (set in Loan model)
   db.Loan.belongsTo(db.LoanProduct, { foreignKey: 'productId' });
   db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId' });
 }
@@ -116,30 +115,40 @@ const hasAttr = (model, attr) => !!(model && model.rawAttributes && model.rawAtt
 if (db.Loan && db.User) {
   const hasApproved   = hasAttr(db.Loan, 'approvedBy');
   const hasDisbursed  = hasAttr(db.Loan, 'disbursedBy');
-  const hasInitiated  = hasAttr(db.Loan, 'initiatedBy'); // only if you add it later
-  const hasRejected   = hasAttr(db.Loan, 'rejectedBy');  // only if you add it later
+  const hasInitiated  = hasAttr(db.Loan, 'initiatedBy');
+  const hasRejected   = hasAttr(db.Loan, 'rejectedBy');
 
-  // ONE alias-less association so `include: [{ model: User }]` does not throw.
   if (hasApproved) {
-    db.Loan.belongsTo(db.User, { foreignKey: 'approvedBy' });                    // alias: 'User' (implicit)
-    db.Loan.belongsTo(db.User, { foreignKey: 'approvedBy', as: 'approver' });    // explicit alias
+    db.Loan.belongsTo(db.User, { foreignKey: 'approvedBy' });
+    db.Loan.belongsTo(db.User, { foreignKey: 'approvedBy', as: 'approver' });
     db.User.hasMany(db.Loan,   { foreignKey: 'approvedBy', as: 'approvedLoans' });
   }
-
   if (hasDisbursed) {
     db.Loan.belongsTo(db.User, { foreignKey: 'disbursedBy', as: 'disburser' });
     db.User.hasMany(db.Loan,   { foreignKey: 'disbursedBy', as: 'disbursedLoans' });
   }
-
   if (hasInitiated) {
     db.Loan.belongsTo(db.User, { foreignKey: 'initiatedBy', as: 'initiator' });
     db.User.hasMany(db.Loan,   { foreignKey: 'initiatedBy', as: 'initiatedLoans' });
   }
-
   if (hasRejected) {
     db.Loan.belongsTo(db.User, { foreignKey: 'rejectedBy',  as: 'rejector' });
     db.User.hasMany(db.Loan,   { foreignKey: 'rejectedBy',  as: 'rejectedLoans' });
   }
+}
+
+/* ----- ✅ Collateral associations (soft) ----- */
+if (db.Collateral && db.Borrower) {
+  db.Collateral.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
+  db.Borrower.hasMany(db.Collateral,   { foreignKey: 'borrowerId', as: 'collateral' });
+}
+if (db.Collateral && db.Loan) {
+  db.Collateral.belongsTo(db.Loan, { foreignKey: 'loanId', as: 'loan' });
+  db.Loan.hasMany(db.Collateral,   { foreignKey: 'loanId', as: 'collateral' });
+}
+if (db.Collateral && db.User) {
+  db.Collateral.belongsTo(db.User, { foreignKey: 'createdBy', as: 'creator' });
+  db.Collateral.belongsTo(db.User, { foreignKey: 'updatedBy', as: 'updater' });
 }
 
 /* Optional: Savings/Comms/Audit/Activity/Accounting associations (unchanged) */
@@ -182,5 +191,4 @@ if (db.ActivityAssignment && db.User) {
 /* Exports */
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;
-
 module.exports = db;
