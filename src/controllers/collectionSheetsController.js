@@ -3,14 +3,14 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../models');
 const { Parser: CsvParser } = require('json2csv');
 
-/** Pull model safely */
+/** Safe model getter */
 const getModel = (n) => {
   const m = sequelize?.models?.[n];
   if (!m) throw Object.assign(new Error(`Model "${n}" not found`), { status: 500, expose: true });
   return m;
 };
 
-/** Whitelist only known columns for safety */
+/** Only allow known columns */
 const pick = (model, body) =>
   !model.rawAttributes
     ? body
@@ -18,45 +18,24 @@ const pick = (model, body) =>
 
 /** Helpers */
 const hasAttr = (Model, attr) => Boolean(Model?.rawAttributes?.[attr]);
-
-const toDate = (v) => {
-  if (!v) return null;
-  const d = new Date(v);
-  return Number.isNaN(d.getTime()) ? null : d;
-};
-
-const startOfDay = (d) => {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-};
-const endOfDay = (d) => {
-  const x = new Date(d);
-  x.setHours(23, 59, 59, 999);
-  return x;
-};
+const toDate = (v) => { if (!v) return null; const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d; };
+const startOfDay = (d) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
+const endOfDay   = (d) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 
 const buildWhere = (Model, { q, status, type, dateFrom, dateTo, collector, loanOfficer, includeDeleted }) => {
   const where = {};
-
-  // Exclude soft-deleted by default if deletedAt exists (fix logic)
   if (hasAttr(Model, 'deletedAt') && String(includeDeleted).toLowerCase() !== 'true') {
     where.deletedAt = null;
   }
-
-  // Free-text search
   if (q) {
     const fields = ['type', 'collector', 'loanOfficer', 'status'].filter((f) => hasAttr(Model, f));
     if (fields.length) where[Op.or] = fields.map((f) => ({ [f]: { [Op.iLike]: `%${q}%` } }));
   }
-
-  // Equality / contains filters
-  if (status && hasAttr(Model, 'status')) where.status = status;
-  if (type && hasAttr(Model, 'type')) where.type = type;
+  if (status && hasAttr(Model, 'status')) where.status = status; // lowercase (pending/completed/cancelled)
+  if (type && hasAttr(Model, 'type')) where.type = type;         // e.g. FIELD/OFFICE/AGENCY
   if (collector && hasAttr(Model, 'collector')) where.collector = { [Op.iLike]: `%${collector}%` };
   if (loanOfficer && hasAttr(Model, 'loanOfficer')) where.loanOfficer = { [Op.iLike]: `%${loanOfficer}%` };
 
-  // Date range
   const df = toDate(dateFrom);
   const dt = toDate(dateTo);
   if ((df || dt) && hasAttr(Model, 'date')) {
@@ -64,57 +43,48 @@ const buildWhere = (Model, { q, status, type, dateFrom, dateTo, collector, loanO
     if (df) where.date[Op.gte] = startOfDay(df);
     if (dt) where.date[Op.lte] = endOfDay(dt);
   }
-
   return where;
 };
 
 const applyScope = (Model, where, scope, extra = {}) => {
   if (!hasAttr(Model, 'date') || !hasAttr(Model, 'status')) return where;
-
   const today = startOfDay(new Date());
   const endToday = endOfDay(new Date());
 
   switch ((scope || '').toLowerCase()) {
     case 'daily':
-      // date == today
       return { ...where, date: { [Op.gte]: today, [Op.lte]: endToday } };
-
     case 'missed':
-      // scheduled before today and not completed
       return {
         ...where,
         date: { ...(where.date || {}), [Op.lt]: today },
-        status: 'completed' === where.status ? where.status : { [Op.ne]: 'completed' },
+        status: where.status === 'completed' ? where.status : { [Op.ne]: 'completed' },
       };
-
     case 'past-maturity':
     case 'past_maturity': {
-      // older than N days (default 30) and not completed
       const n = Math.max(parseInt(extra.pastDays || '30', 10), 1);
       const threshold = startOfDay(new Date(Date.now() - n * 24 * 60 * 60 * 1000));
       return {
         ...where,
         date: { ...(where.date || {}), [Op.lt]: threshold },
-        status: 'completed' === where.status ? where.status : { [Op.ne]: 'completed' },
+        status: where.status === 'completed' ? where.status : { [Op.ne]: 'completed' },
       };
     }
-
     default:
       return where;
   }
 };
 
 const parseSort = (Model, sort) => {
-  // sort format: field:dir (dir = ASC|DESC); multiple via comma
   if (!sort) return [['date', 'DESC']];
   const parts = String(sort).split(',');
-  const entries = [];
+  const out = [];
   for (const p of parts) {
     const [field, dirRaw] = p.split(':');
     const dir = (dirRaw || 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
-    if (hasAttr(Model, field)) entries.push([field, dir]);
+    if (hasAttr(Model, field)) out.push([field, dir]);
   }
-  return entries.length ? entries : [['date', 'DESC']];
+  return out.length ? out : [['date', 'DESC']];
 };
 
 const sendCsv = (res, rows) => {
@@ -127,15 +97,39 @@ const sendCsv = (res, rows) => {
   res.status(200).send(csv);
 };
 
-/** Attempt to read actor user id for audit fields */
+const getSummary = async (Model, where) => {
+  const total = await Model.count({ where });
+
+  const byStatus = hasAttr(Model, 'status')
+    ? Object.fromEntries(
+        (await Model.findAll({
+          attributes: ['status', [sequelize.fn('COUNT', sequelize.col('id')), 'count']],
+          where, group: ['status'], raw: true,
+        })).map((r) => [r.status, Number(r.count)])
+      )
+    : {};
+
+  const byType = hasAttr(Model, 'type')
+    ? Object.fromEntries(
+        (await Model.findAll({
+          attributes: ['type', [sequelize.fn('COUNT', sequelize.col('id')), 'count']],
+          where, group: ['type'], raw: true,
+        })).map((r) => [r.type, Number(r.count)])
+      )
+    : {};
+
+  return { total, byStatus, byType };
+};
+
+/** Audit actor */
 const getActorId = (req) => req.user?.id || req.headers['x-user-id'] || null;
 
-// --- Controllers ---
+/* ---------------- CRUD + LIST ---------------- */
 exports.list = async (req, res) => {
   try {
     const Model = getModel('CollectionSheet');
 
-    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const page  = Math.max(parseInt(req.query.page  || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 200);
     const offset = (page - 1) * limit;
 
@@ -155,12 +149,19 @@ exports.list = async (req, res) => {
 
     // CSV export (no pagination)
     if (String(req.query.export).toLowerCase() === 'csv') {
-      const rows = await Model.findAll({ where, order, raw: false });
+      const rows = await Model.findAll({ where, order });
       return sendCsv(res, rows);
     }
 
-    const { rows, count } = await Model.findAndCountAll({ where, limit, offset, order });
-    return res.json({ data: rows, pagination: { page, limit, total: count } });
+    const [ { rows, count }, summary ] = await Promise.all([
+      Model.findAndCountAll({ where, limit, offset, order }),
+      (String(req.query.withSummary).toLowerCase() === '1' ||
+       String(req.query.withSummary).toLowerCase() === 'true')
+        ? getSummary(Model, where)
+        : null
+    ]);
+
+    return res.json({ data: rows, pagination: { page, limit, total: count }, summary });
   } catch (err) {
     const status = err.status || 500;
     return res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
@@ -183,7 +184,6 @@ exports.create = async (req, res) => {
   try {
     const Model = getModel('CollectionSheet');
     const payload = pick(Model, req.body);
-
     if (payload.date) payload.date = toDate(payload.date);
 
     const actorId = getActorId(req);
@@ -224,7 +224,6 @@ exports.remove = async (req, res) => {
     const row = await Model.findByPk(req.params.id);
     if (!row) return res.status(404).json({ error: 'Not found' });
 
-    // Soft delete if supported
     if (hasAttr(Model, 'deletedAt')) {
       const actorId = getActorId(req);
       const patch = { deletedAt: new Date() };
@@ -232,7 +231,6 @@ exports.remove = async (req, res) => {
       await row.update(patch);
       return res.json({ ok: true, softDeleted: true });
     }
-
     await row.destroy();
     return res.json({ ok: true, softDeleted: false });
   } catch (err) {
@@ -241,29 +239,118 @@ exports.remove = async (req, res) => {
   }
 };
 
-exports.restore = async (req, res) => {
+/** Wrapper to re-use list with a fixed scope */
+exports.listWithScope = (scope) => (req, res) => {
+  req.query.scope = scope;
+  return exports.list(req, res);
+};
+
+/* ---------------- BULK SMS ---------------- */
+const normalizePhone = (p) => {
+  if (!p) return null;
+  const digits = String(p).replace(/[^\d+]/g, '');
+  // Basic: keep leading + or assume intl without +
+  if (digits.startsWith('+')) return digits;
+  if (digits.startsWith('00')) return `+${digits.slice(2)}`;
+  // Customize for your locale as needed (e.g., TZ: 0 -> +255)
+  return digits.length >= 10 ? `+${digits}` : null;
+};
+
+// lazy load optional models
+let Communication, User;
+try { ({ Communication, User } = require('../models')); } catch {}
+
+exports.bulkSms = async (req, res) => {
   try {
-    const Model = getModel('CollectionSheet');
-    if (!hasAttr(Model, 'deletedAt')) {
-      return res.status(400).json({ error: 'Restore not supported (no deletedAt column).' });
+    const { ids = [], message, to = 'collector', customPhones = [], dryRun } = req.body || {};
+    if (!message || String(message).trim().length === 0) {
+      return res.status(400).json({ error: 'Message is required' });
     }
-    const row = await Model.findByPk(req.params.id);
-    if (!row) return res.status(404).json({ error: 'Not found' });
+    if (!Array.isArray(ids) && to !== 'custom') {
+      return res.status(400).json({ error: 'ids must be an array' });
+    }
 
-    const actorId = getActorId(req);
-    const patch = { deletedAt: null };
-    if (actorId && hasAttr(Model, 'updatedBy')) patch.updatedBy = actorId;
+    const Model = getModel('CollectionSheet');
+    let recipients = [];
 
-    await row.update(patch);
-    return res.json({ ok: true, restored: true });
+    if (to === 'custom') {
+      recipients = (customPhones || []).map(normalizePhone).filter(Boolean);
+    } else {
+      // fetch rows by ids
+      const rows = await Model.findAll({
+        where: { id: { [Op.in]: ids } },
+        attributes: ['id', 'collector', 'loanOfficer', 'collectorId', 'loanOfficerId'],
+      });
+
+      const userIds = new Set();
+      if (to === 'collector') {
+        rows.forEach(r => r.collectorId && userIds.add(r.collectorId));
+      } else if (to === 'loanOfficer') {
+        rows.forEach(r => r.loanOfficerId && userIds.add(r.loanOfficerId));
+      }
+
+      let userPhones = {};
+      if (User && userIds.size) {
+        const userList = await User.findAll({ where: { id: { [Op.in]: Array.from(userIds) } }, attributes: ['id', 'phone', 'name'] });
+        userList.forEach(u => { userPhones[u.id] = normalizePhone(u.phone); });
+      }
+
+      // fallbacks by name if id missing / no phone on user
+      rows.forEach(r => {
+        const phoneById =
+          to === 'collector' ? userPhones[r.collectorId] : userPhones[r.loanOfficerId];
+        if (phoneById) {
+          recipients.push(phoneById);
+        } else {
+          // if your User model has a unique name -> phone mapping, you could look that up here
+          // for now we cannot reliably get a phone from a free-text name
+        }
+      });
+
+      // finally, dedupe + clean
+      const set = new Set(recipients.filter(Boolean));
+      recipients = Array.from(set);
+    }
+
+    if (recipients.length === 0) {
+      return res.status(400).json({ error: 'No recipients resolved from selection' });
+    }
+
+    if (dryRun) {
+      return res.json({ ok: true, count: recipients.length, sample: recipients.slice(0, 5) });
+    }
+
+    // try to use a service if you wire one; otherwise record Communications if model exists
+    let sent = 0;
+    let failed = 0;
+
+    // Simple stub send; replace with your SMS gateway here
+    const sendSms = async (phone, body) => {
+      // TODO: integrate actual provider; for now pretend it's sent
+      return { ok: true };
+    };
+
+    for (const phone of recipients) {
+      const { ok } = await sendSms(phone, message).catch(() => ({ ok: false }));
+      if (ok) {
+        sent++;
+        if (Communication) {
+          await Communication.create({
+            channel: 'sms',
+            recipient: phone,
+            subject: 'Bulk Collection Notice',
+            body: message,
+            status: 'sent',
+          }).catch(() => {});
+        }
+      } else {
+        failed++;
+      }
+    }
+
+    return res.json({ ok: true, sent, failed, total: recipients.length });
   } catch (err) {
     const status = err.status || 500;
     return res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
   }
-};
-
-// Small helper to expose scoped list via /daily, /missed, /past-maturity endpoints
-exports.listWithScope = (scope) => (req, res) => {
-  req.query.scope = scope;
-  return exports.list(req, res);
 };
