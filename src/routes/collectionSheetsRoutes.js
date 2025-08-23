@@ -5,7 +5,12 @@ const ctrl = require('../controllers/collectionSheetsController');
 
 // Base: /api/collections
 
-// List (supports ?page=&limit=&q=&status=&type=&collector=&loanOfficer=&dateFrom=&dateTo=&includeDeleted=true|false&sort=field:dir&export=csv)
+// Scopes as dedicated endpoints (frontend can also use ?scope=)
+router.get('/daily',        ctrl.listWithScope('daily'));
+router.get('/missed',       ctrl.listWithScope('missed'));
+router.get('/past-maturity',ctrl.listWithScope('past-maturity'));
+
+// List (supports ?page=&limit=&q=&scope=&pastDays=&status=&type=&dateFrom=&dateTo=&collector=&loanOfficer=)
 router.get('/', ctrl.list);
 
 // Get one by id
@@ -17,10 +22,10 @@ router.post('/', ctrl.create);
 // Update
 router.put('/:id', ctrl.update);
 
-// Soft delete (or hard delete if deletedAt not supported)
+// Delete
 router.delete('/:id', ctrl.remove);
 
-// Restore soft-deleted (only if deletedAt is supported)
+// Optional restore (if your model supports soft delete)
 router.post('/:id/restore', ctrl.restore);
 
 module.exports = router;
