@@ -3,14 +3,12 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../models');
 const { Parser: CsvParser } = require('json2csv');
 
-/** Safe model getter */
 const getModel = (n) => {
   const m = sequelize?.models?.[n];
   if (!m) throw Object.assign(new Error(`Model "${n}" not found`), { status: 500, expose: true });
   return m;
 };
 
-/** Only allow known columns */
 const pick = (model, body) =>
   !model.rawAttributes
     ? body
@@ -120,7 +118,6 @@ const getSummary = async (Model, where) => {
   return { total, byStatus, byType };
 };
 
-/** Audit actor */
 const getActorId = (req) => req.user?.id || req.headers['x-user-id'] || null;
 
 /* ---------------- CRUD + LIST ---------------- */
@@ -146,7 +143,6 @@ exports.list = async (req, res) => {
     const where = applyScope(Model, baseWhere, scope, { pastDays: req.query.pastDays });
     const order = parseSort(Model, req.query.sort);
 
-    // CSV export (no pagination)
     if (String(req.query.export).toLowerCase() === 'csv') {
       const rows = await Model.findAll({ where, order });
       return sendCsv(res, rows);
@@ -238,7 +234,6 @@ exports.remove = async (req, res) => {
   }
 };
 
-/** Optional restore (only works if you later add deletedAt) */
 exports.restore = async (req, res) => {
   try {
     const Model = getModel('CollectionSheet');
@@ -260,7 +255,6 @@ exports.restore = async (req, res) => {
   }
 };
 
-/* Change status for a sheet */
 exports.changeStatus = async (req, res) => {
   try {
     const Model = getModel('CollectionSheet');
@@ -279,7 +273,13 @@ exports.changeStatus = async (req, res) => {
   }
 };
 
-/* ---------------- BULK SMS ---------------- */
+/** ✅ add back: used by routes for /daily, /missed, /past-maturity */
+exports.listWithScope = (scope) => (req, res) => {
+  req.query.scope = scope;
+  return exports.list(req, res);
+};
+
+/* -------- BULK SMS (stubbed) -------- */
 const normalizePhone = (p) => {
   if (!p) return null;
   const digits = String(p).replace(/[^\d+]/g, '');
@@ -288,7 +288,6 @@ const normalizePhone = (p) => {
   return digits.length >= 10 ? `+${digits}` : null;
 };
 
-// lazy load optional models
 let Communication, User;
 try { ({ Communication, User } = require('../models')); } catch {}
 
@@ -346,7 +345,6 @@ exports.bulkSms = async (req, res) => {
       return res.json({ ok: true, count: recipients.length, sample: recipients.slice(0, 5) });
     }
 
-    // stub sender — replace with your SMS gateway
     const sendSms = async (_phone, _body) => ({ ok: true });
 
     let sent = 0, failed = 0;
