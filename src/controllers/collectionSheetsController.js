@@ -16,7 +16,6 @@ const pick = (model, body) =>
     ? body
     : Object.fromEntries(Object.entries(body || {}).filter(([k]) => model.rawAttributes[k]));
 
-/** Helpers */
 const hasAttr = (Model, attr) => Boolean(Model?.rawAttributes?.[attr]);
 const toDate = (v) => { if (!v) return null; const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d; };
 const startOfDay = (d) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
@@ -31,8 +30,8 @@ const buildWhere = (Model, { q, status, type, dateFrom, dateTo, collector, loanO
     const fields = ['type', 'collector', 'loanOfficer', 'status'].filter((f) => hasAttr(Model, f));
     if (fields.length) where[Op.or] = fields.map((f) => ({ [f]: { [Op.iLike]: `%${q}%` } }));
   }
-  if (status && hasAttr(Model, 'status')) where.status = status; // lowercase (pending/completed/cancelled)
-  if (type && hasAttr(Model, 'type')) where.type = type;         // e.g. FIELD/OFFICE/AGENCY
+  if (status && hasAttr(Model, 'status')) where.status = status; // pending|completed|cancelled
+  if (type && hasAttr(Model, 'type')) where.type = type;         // FIELD|OFFICE|AGENCY
   if (collector && hasAttr(Model, 'collector')) where.collector = { [Op.iLike]: `%${collector}%` };
   if (loanOfficer && hasAttr(Model, 'loanOfficer')) where.loanOfficer = { [Op.iLike]: `%${loanOfficer}%` };
 
@@ -239,20 +238,53 @@ exports.remove = async (req, res) => {
   }
 };
 
-/** Wrapper to re-use list with a fixed scope */
-exports.listWithScope = (scope) => (req, res) => {
-  req.query.scope = scope;
-  return exports.list(req, res);
+/** Optional restore (only works if you later add deletedAt) */
+exports.restore = async (req, res) => {
+  try {
+    const Model = getModel('CollectionSheet');
+    if (!hasAttr(Model, 'deletedAt')) {
+      return res.status(400).json({ error: 'Restore not supported (no deletedAt column).' });
+    }
+    const row = await Model.findByPk(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+
+    const actorId = getActorId(req);
+    const patch = { deletedAt: null };
+    if (actorId && hasAttr(Model, 'updatedBy')) patch.updatedBy = actorId;
+
+    await row.update(patch);
+    return res.json({ ok: true, restored: true });
+  } catch (err) {
+    const status = err.status || 500;
+    return res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+  }
+};
+
+/* Change status for a sheet */
+exports.changeStatus = async (req, res) => {
+  try {
+    const Model = getModel('CollectionSheet');
+    const row = await Model.findByPk(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+
+    const status = String(req.body?.status || '').toLowerCase();
+    if (!['pending','completed','cancelled'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+    await row.update({ status });
+    return res.json({ ok: true, id: row.id, status: row.status });
+  } catch (err) {
+    const status = err.status || 500;
+    return res.status(status).json({ error: err.expose ? err.message : 'Internal Server Error' });
+  }
 };
 
 /* ---------------- BULK SMS ---------------- */
 const normalizePhone = (p) => {
   if (!p) return null;
   const digits = String(p).replace(/[^\d+]/g, '');
-  // Basic: keep leading + or assume intl without +
   if (digits.startsWith('+')) return digits;
   if (digits.startsWith('00')) return `+${digits.slice(2)}`;
-  // Customize for your locale as needed (e.g., TZ: 0 -> +255)
   return digits.length >= 10 ? `+${digits}` : null;
 };
 
@@ -276,7 +308,6 @@ exports.bulkSms = async (req, res) => {
     if (to === 'custom') {
       recipients = (customPhones || []).map(normalizePhone).filter(Boolean);
     } else {
-      // fetch rows by ids
       const rows = await Model.findAll({
         where: { id: { [Op.in]: ids } },
         attributes: ['id', 'collector', 'loanOfficer', 'collectorId', 'loanOfficerId'],
@@ -291,25 +322,20 @@ exports.bulkSms = async (req, res) => {
 
       let userPhones = {};
       if (User && userIds.size) {
-        const userList = await User.findAll({ where: { id: { [Op.in]: Array.from(userIds) } }, attributes: ['id', 'phone', 'name'] });
+        const userList = await User.findAll({
+          where: { id: { [Op.in]: Array.from(userIds) } },
+          attributes: ['id', 'phone', 'name']
+        });
         userList.forEach(u => { userPhones[u.id] = normalizePhone(u.phone); });
       }
 
-      // fallbacks by name if id missing / no phone on user
       rows.forEach(r => {
         const phoneById =
           to === 'collector' ? userPhones[r.collectorId] : userPhones[r.loanOfficerId];
-        if (phoneById) {
-          recipients.push(phoneById);
-        } else {
-          // if your User model has a unique name -> phone mapping, you could look that up here
-          // for now we cannot reliably get a phone from a free-text name
-        }
+        if (phoneById) recipients.push(phoneById);
       });
 
-      // finally, dedupe + clean
-      const set = new Set(recipients.filter(Boolean));
-      recipients = Array.from(set);
+      recipients = Array.from(new Set(recipients.filter(Boolean)));
     }
 
     if (recipients.length === 0) {
@@ -320,16 +346,10 @@ exports.bulkSms = async (req, res) => {
       return res.json({ ok: true, count: recipients.length, sample: recipients.slice(0, 5) });
     }
 
-    // try to use a service if you wire one; otherwise record Communications if model exists
-    let sent = 0;
-    let failed = 0;
+    // stub sender — replace with your SMS gateway
+    const sendSms = async (_phone, _body) => ({ ok: true });
 
-    // Simple stub send; replace with your SMS gateway here
-    const sendSms = async (phone, body) => {
-      // TODO: integrate actual provider; for now pretend it's sent
-      return { ok: true };
-    };
-
+    let sent = 0, failed = 0;
     for (const phone of recipients) {
       const { ok } = await sendSms(phone, message).catch(() => ({ ok: false }));
       if (ok) {

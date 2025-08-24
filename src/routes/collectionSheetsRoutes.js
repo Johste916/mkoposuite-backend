@@ -5,10 +5,7 @@ const ctrl = require('../controllers/collectionSheetsController');
 const { authenticateUser } = require('../middleware/authMiddleware');
 
 /**
- * Minimal permission guard:
- * - If your authMiddleware puts `req.user = { role, permissions: [] }`,
- *   this will check either a matching role OR a named permission.
- * - Adjust roles/permission names to your actual ACL.
+ * Minimal permission guard (UI also hides actions; server enforces):
  */
 const allowRolesRead  = new Set(['admin','director','branch_manager','compliance','staff']);
 const allowRolesWrite = new Set(['admin','director','branch_manager']);
@@ -34,11 +31,12 @@ router.get('/',               authenticateUser, canRead, ctrl.list);
 // One sheet
 router.get('/:id',            authenticateUser, canRead, ctrl.get);
 
-// Create / Update / Delete (UI will show only when allowed; server enforces)
+// Create / Update / Delete / Restore / Status
 router.post('/',              authenticateUser, canWrite, ctrl.create);
 router.put('/:id',            authenticateUser, canWrite, ctrl.update);
 router.delete('/:id',         authenticateUser, canWrite, ctrl.remove);
 router.post('/:id/restore',   authenticateUser, canWrite, ctrl.restore);
+router.post('/:id/status',    authenticateUser, canWrite, ctrl.changeStatus);
 
 // Bulk SMS (collectors/loan officers/custom phones)
 router.post('/bulk-sms',      authenticateUser, canComms, ctrl.bulkSms);
