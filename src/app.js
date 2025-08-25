@@ -1,4 +1,3 @@
-// backend/src/app.js
 'use strict';
 const express = require('express');
 const path = require('path');
@@ -54,7 +53,7 @@ const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
   'X-Requested-With',
   'X-User-Id',
-  // 👇 your custom headers (CORS fix)
+  // 👇 custom headers used by your frontend
   'x-tenant-id',
   'x-branch-id',
   'x-timezone',
@@ -68,12 +67,12 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
-  // vary on origin and requested headers for proper caching behavior
+  // Vary ensures caches don’t mix responses for different origins/headers
   res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
 
-  // If browser asked specific headers in preflight, echo them back; else use defaults
+  // Echo requested headers if present; otherwise send our defaults
   const requested = req.headers['access-control-request-headers'];
   res.setHeader(
     'Access-Control-Allow-Headers',
@@ -82,7 +81,7 @@ app.use((req, res, next) => {
       : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
 
-  // Optional: expose headers used by downloads
+  // Optional: expose headers (useful for file downloads)
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -115,15 +114,10 @@ function makeDummyRouter(sample) {
   return r;
 }
 
-/**
- * Try requiring a module from ./routes/** first, then ../routes/** as fallback.
- * Works whether your project keeps routes under src/routes or routes/.
- */
 function safeLoadRoutes(relPathFromSrc, dummyRouter) {
   const tryPaths = [relPathFromSrc, relPathFromSrc.replace('./', '../')];
   for (const p of tryPaths) {
     try {
-      // eslint-disable-next-line import/no-dynamic-require, global-require
       const mod = require(p);
       return mod && mod.default ? mod.default : mod;
     } catch (e) {
@@ -138,7 +132,6 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
 }
 
 /* --------------------------------- Routes ---------------------------------- */
-/* Existing, already in your project */
 const authRoutes          = safeLoadRoutes('./routes/authRoutes', makeDummyRouter({ ok: true }));
 const borrowerRoutes      = safeLoadRoutes('./routes/borrowerRoutes', makeDummyRouter([]));
 const loanRoutes          = safeLoadRoutes('./routes/loanRoutes', makeDummyRouter([]));
@@ -306,6 +299,11 @@ app.use('/api/expenses',             expensesRoutes);
 app.use('/api/other-income',         otherIncomeRoutes);
 app.use('/api/assets',               assetManagementRoutes);
 app.use('/api/accounting',           accountingRoutes);
+
+/* ---------- Temporary stub to silence 404s on entitlements (optional) ------ */
+app.get('/api/tenants/me/entitlements', (_req, res) => {
+  res.json({ modules: {}, status: 'ok' });
+});
 
 /* -------------------------------- Healthchecks ----------------------------- */
 app.get('/api/test',   (_req, res) => res.send('✅ API is working!'));
