@@ -1,4 +1,3 @@
-// backend/src/routes/expensesRoutes.js
 'use strict';
 
 const express = require('express');
@@ -6,12 +5,18 @@ const router = express.Router();
 const ctrl = require('../controllers/expensesController');
 const { authenticateUser } = require('../middleware/authMiddleware');
 
-// CSV upload (memory) — install: npm i multer
-const multer = require('multer');
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
-});
+/* ---------- Multer (CSV upload) with safe fallback ---------- */
+let upload;
+try {
+  const m = require('multer');
+  upload = m({ storage: m.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
+} catch (e) {
+  // Fallback middleware that errors if CSV upload is called without multer
+  upload = {
+    single: () => (_req, _res, next) =>
+      next(Object.assign(new Error('CSV upload requires multer. Run: npm i multer'), { status: 500, expose: true })),
+  };
+}
 
 /** Roles allowed */
 const allowRead  = new Set(['admin', 'director', 'accountant', 'branch_manager', 'staff']);
@@ -70,7 +75,10 @@ function canWrite(req, res, next) {
 
 // Base: /api/expenses
 router.get('/',         authenticateUser, canRead,  ctrl.list);
+
+// CSV export MUST be before :id so "export" isn't treated as an ID
 router.get('/export',   authenticateUser, canRead,  ctrl.exportCsv);
+
 router.get('/:id',      authenticateUser, canRead,  ctrl.get);
 router.post('/',        authenticateUser, canWrite, ctrl.create);
 router.post('/csv',     authenticateUser, canWrite, upload.single('file'), ctrl.uploadCsv);

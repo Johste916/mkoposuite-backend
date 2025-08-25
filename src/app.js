@@ -81,7 +81,7 @@ app.use((req, res, next) => {
       : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
 
-  // Optional: expose headers (useful for file downloads)
+  // Let browser read filename on downloads
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
   if (req.method === 'OPTIONS') return res.sendStatus(200);

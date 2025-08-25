@@ -1,4 +1,3 @@
-// backend/src/controllers/expensesController.js
 'use strict';
 
 const { Op } = require('sequelize');
