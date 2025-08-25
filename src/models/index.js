@@ -63,8 +63,11 @@ db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes), 
 /* Collections */
 db.CollectionSheet = tryLoad(() => require('./collectionSheet')(sequelize, DataTypes), 'CollectionSheet');
 
-/* ✅ NEW: Collateral — ensure filename is exactly `models/collateral.js` (lowercase) */
+/* ✅ Collateral */
 db.Collateral = tryLoad(() => require('./collateral')(sequelize, DataTypes), 'Collateral');
+
+/* ✅ NEW: Expense */
+db.Expense = tryLoad(() => require('./expense')(sequelize, DataTypes), 'Expense');
 
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
@@ -137,7 +140,7 @@ if (db.Loan && db.User) {
   }
 }
 
-/* ----- ✅ Collateral associations (soft) ----- */
+/* ----- Collateral associations (soft) ----- */
 if (db.Collateral && db.Borrower) {
   db.Collateral.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
   db.Borrower.hasMany(db.Collateral,   { foreignKey: 'borrowerId', as: 'collateral' });
@@ -149,6 +152,15 @@ if (db.Collateral && db.Loan) {
 if (db.Collateral && db.User) {
   db.Collateral.belongsTo(db.User, { foreignKey: 'createdBy', as: 'creator' });
   db.Collateral.belongsTo(db.User, { foreignKey: 'updatedBy', as: 'updater' });
+}
+
+/* ----- ✅ Expense associations ----- */
+if (db.Expense && db.User) {
+  db.Expense.belongsTo(db.User, { foreignKey: 'createdBy', as: 'creator' });
+  db.Expense.belongsTo(db.User, { foreignKey: 'updatedBy', as: 'updater' });
+}
+if (db.Expense && db.Branch) {
+  db.Expense.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
 }
 
 /* Optional: Savings/Comms/Audit/Activity/Accounting associations (unchanged) */
