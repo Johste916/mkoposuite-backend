@@ -49,19 +49,42 @@ function isAllowedOrigin(origin) {
   return false;
 }
 
+const DEFAULT_ALLOWED_HEADERS = [
+  'Content-Type',
+  'Authorization',
+  'X-Requested-With',
+  'X-User-Id',
+  // 👇 your custom headers (CORS fix)
+  'x-tenant-id',
+  'x-branch-id',
+  'x-timezone',
+  'x-tz-offset',
+  'Accept',
+];
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && isAllowedOrigin(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
+  // vary on origin and requested headers for proper caching behavior
+  res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
+
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  // include X-User-Id for audit fields, plus common headers
+
+  // If browser asked specific headers in preflight, echo them back; else use defaults
+  const requested = req.headers['access-control-request-headers'];
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Requested-With, X-User-Id'
+    requested && String(requested).trim().length
+      ? requested
+      : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
+
+  // Optional: expose headers used by downloads
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -214,17 +237,11 @@ const accountingRoutes = safeLoadRoutes(
 );
 
 /* -------------------------- Automatic audit hooks -------------------------- */
-/* Lazy-access AuditLog so we don't break if model is missing */
 let AuditLog;
 try { ({ AuditLog } = require('./models')); } catch {
   try { ({ AuditLog } = require('../models')); } catch {}
 }
 
-/**
- * Records successful non-GET API calls (POST/PUT/PATCH/DELETE).
- * Skips OPTIONS, static, healthchecks, and the audit endpoints themselves.
- * Uses req.user if set by downstream authenticateUser middleware.
- */
 app.use((req, res, next) => {
   res.on('finish', () => {
     try {
@@ -267,7 +284,6 @@ app.use('/api/settings',       settingRoutes);
 app.use('/api/admin/staff',     adminStaffRoutes);
 app.use('/api/permissions',     permissionRoutes);
 app.use('/api/admin/audit',     adminAuditRoutes);
-/* alias for current frontend (AuditManagement.jsx calls /audit-logs) */
 app.use('/api/audit-logs',      adminAuditRoutes);
 app.use('/api/admin/report-subscriptions', adminReportSubRoutes);
 
@@ -295,7 +311,6 @@ app.use('/api/accounting',           accountingRoutes);
 app.get('/api/test',   (_req, res) => res.send('✅ API is working!'));
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-// DB health (helps diagnose 500s quickly)
 try {
   let sequelize;
   try { ({ sequelize } = require('./models')); } catch { ({ sequelize } = require('../models')); }
