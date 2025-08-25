@@ -4,13 +4,12 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../models');
 const { resolveTenantId } = require('../lib/tenant');
 
-// CSV helpers (install: npm i csv-parse csv-stringify)
-let parseSync, stringifySync;
+// ---- Optional CSV parser for uploads (export no longer needs libs)
+let parseSync;
 try {
   ({ parse: parseSync } = require('csv-parse/sync'));
-  ({ stringify: stringifySync } = require('csv-stringify/sync'));
 } catch (e) {
-  // optional; we'll throw a friendly error if CSV endpoints are hit without deps
+  /* uploadCsv will throw a friendly error if parser isn't installed */
 }
 
 const getModel = (n) => {
@@ -51,6 +50,8 @@ const filtersFromQuery = (Expense, q = {}) => {
 
   return where;
 };
+
+/* ------------------------------ LIST/GET/CRUD ------------------------------ */
 
 exports.list = async (req, res) => {
   try {
@@ -140,10 +141,24 @@ exports.remove = async (req, res) => {
 
 /* ---------------------------- CSV: Upload & Export ---------------------------- */
 
+// Minimal CSV escape
+const csvEscape = (v) => {
+  if (v === null || typeof v === 'undefined') return '';
+  const s = String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+// Build CSV string from array of objects
+const toCSV = (rows, headers) => {
+  const head = headers.join(',');
+  const body = rows.map(r => headers.map(h => csvEscape(r[h])).join(',')).join('\n');
+  return `${head}\n${body}`;
+};
+
 exports.uploadCsv = async (req, res) => {
   try {
     if (!parseSync) {
-      throw Object.assign(new Error('CSV dependencies not installed. Run: npm i csv-parse csv-stringify'), { status: 500, expose: true });
+      throw Object.assign(new Error('CSV dependencies not installed. Run: npm i csv-parse'), { status: 500, expose: true });
     }
     if (!req.file?.buffer?.length) {
       throw Object.assign(new Error('No file uploaded'), { status: 400, expose: true });
@@ -194,9 +209,6 @@ exports.uploadCsv = async (req, res) => {
 
 exports.exportCsv = async (req, res) => {
   try {
-    if (!stringifySync) {
-      throw Object.assign(new Error('CSV dependencies not installed. Run: npm i csv-parse csv-stringify'), { status: 500, expose: true });
-    }
     const Expense = getModel('Expense');
     const tenantId = resolveTenantId(req);
 
@@ -219,7 +231,8 @@ exports.exportCsv = async (req, res) => {
       branch_id: r.branchId,
     }));
 
-    const csv = stringifySync(data, { header: true });
+    const headers = ['id', 'date', 'type', 'vendor', 'reference', 'amount', 'note', 'branch_id'];
+    const csv = toCSV(data, headers);
     const fname = `expenses_${new Date().toISOString().slice(0, 10)}.csv`;
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
