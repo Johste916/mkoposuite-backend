@@ -1,3 +1,6 @@
+// src/middleware/authMiddleware.js
+'use strict';
+
 const jwt = require('jsonwebtoken');
 const db = require('../models');
 const { User, Role } = db;
@@ -16,11 +19,6 @@ function pickAttrs(model, names) {
   return names.filter((n) => !!raw[n]);
 }
 
-/**
- * authenticateUser
- *  - Non-fatal: if token missing/invalid, continues as guest (req.user undefined)
- *  - If token is valid, normalizes id and enriches user+roles from DB (without referencing non-existent columns)
- */
 async function authenticateUser(req, res, next) {
   try {
     const token = getBearerToken(req.headers.authorization);
@@ -35,7 +33,7 @@ async function authenticateUser(req, res, next) {
     let payload;
     try {
       payload = jwt.verify(token, secret);
-    } catch (e) {
+    } catch {
       // invalid token -> treat as guest; protected routes will reject later
       return next();
     }
@@ -50,26 +48,58 @@ async function authenticateUser(req, res, next) {
       (Array.isArray(payload.roles) && payload.roles.map(String)) ||
       null;
 
-    // Enrich from DB if needed (and id available)
+    // ---- Enrich from DB if needed (and id available) ----
     let dbUser = null;
     if ((!roleName || !rolesList || !payload.email || !payload.name) && normalizedId && User) {
-      try {
-        const include = Role
-          ? [{ model: Role, as: 'Roles', attributes: ['name'], through: { attributes: [] } }]
+      const attrs = pickAttrs(User, [
+        'id',
+        'email',
+        'name',
+        'fullName',
+        'role',
+        'branchId',
+        'tenantId',
+        'isActive',
+        'status',
+      ]);
+
+      // Figure out the actual alias registered for the Role association
+      const assocNames = Object.keys(User?.associations || {});
+      const rolesAlias =
+        assocNames.includes('roles')
+          ? 'roles'
+          : assocNames.includes('Roles')
+          ? 'Roles'
+          : assocNames.includes('Role')
+          ? 'Role'
+          : null;
+
+      // Build include only if the association exists
+      const include =
+        Role && rolesAlias
+          ? [{ model: Role, as: rolesAlias, attributes: ['id', 'name', 'code', 'slug'], through: { attributes: [] }, required: false }]
           : [];
 
-        const attrs = pickAttrs(User, [
-          'id', 'email', 'name', 'fullName', 'role', 'branchId', 'isActive', 'status'
-        ]);
-        dbUser = await User.findByPk(normalizedId, { include, attributes: attrs });
-
-        if (dbUser) {
-          const names = (dbUser.Roles || []).map((r) => r.name);
-          if (!roleName) roleName = names[0] || dbUser.role || null;
-          if (!rolesList) rolesList = names.length ? names : (dbUser.role ? [dbUser.role] : null);
-        }
+      try {
+        dbUser = await User.findByPk(normalizedId, { attributes: attrs, include });
       } catch (e) {
-        console.warn('authMiddleware: failed to enrich user from DB:', e.message);
+        // Fallback: retry without include so a bad alias never logs you out
+        console.warn('authMiddleware: enrich include failed, retrying without include:', e.message);
+        dbUser = await User.findByPk(normalizedId, { attributes: attrs });
+      }
+
+      if (dbUser) {
+        // Prefer roles from association if we have them
+        const assoc =
+          (rolesAlias && dbUser[rolesAlias]) ||
+          dbUser.roles || // some ORMs hydrate lower-case even if alias was caps
+          dbUser.Roles ||
+          [];
+
+        const names = Array.isArray(assoc) ? assoc.map((r) => r?.name || r?.code || r?.slug).filter(Boolean) : [];
+
+        if (!roleName) roleName = names[0] || dbUser.role || null;
+        if (!rolesList) rolesList = names.length ? names : dbUser.role ? [dbUser.role] : null;
       }
     }
 
@@ -79,6 +109,7 @@ async function authenticateUser(req, res, next) {
       email: dbUser?.email ?? payload.email ?? null,
       name: dbUser?.name ?? dbUser?.fullName ?? payload.name ?? payload.fullName ?? null,
       role: roleName || null,
+      tenantId: dbUser?.tenantId ?? payload.tenantId ?? null,
       branchId: dbUser?.branchId ?? payload.branchId ?? null,
       isActive: (dbUser?.isActive ?? dbUser?.status) ?? payload.isActive ?? true,
     };
@@ -86,9 +117,6 @@ async function authenticateUser(req, res, next) {
     if (Array.isArray(rolesList)) {
       userObj.roles = rolesList;
       userObj.Roles = rolesList.map((name) => ({ name }));
-    } else if (Array.isArray(dbUser?.Roles)) {
-      userObj.Roles = dbUser.Roles.map((r) => ({ name: r.name }));
-      userObj.roles = dbUser.Roles.map((r) => r.name);
     }
 
     req.user = userObj;
