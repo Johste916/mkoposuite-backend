@@ -6,11 +6,18 @@ const router = express.Router();
 const ctrl = require('../controllers/expensesController');
 const { authenticateUser } = require('../middleware/authMiddleware');
 
+// CSV upload (memory) — install: npm i multer
+const multer = require('multer');
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+});
+
 /** Roles allowed */
 const allowRead  = new Set(['admin', 'director', 'accountant', 'branch_manager', 'staff']);
 const allowWrite = new Set(['admin', 'director', 'accountant', 'branch_manager']);
 
-/** Helpers to normalize roles/permissions from various token/db shapes */
+/** Helpers to normalize roles/permissions */
 const norm = (v) => String(v || '').trim().toLowerCase();
 
 function extractRoles(u) {
@@ -25,9 +32,7 @@ function extractPerms(u) {
   const fromStringArray = Array.isArray(u?.permissions) ? u.permissions : null;
   const fromObjArray    = Array.isArray(u?.Permissions) ? u.Permissions : null;
 
-  if (fromStringArray) {
-    return fromStringArray.map(norm).filter(Boolean);
-  }
+  if (fromStringArray) return fromStringArray.map(norm).filter(Boolean);
   if (fromObjArray) {
     return fromObjArray
       .map(p => p?.code || p?.slug || p?.name || '')
@@ -39,27 +44,19 @@ function extractPerms(u) {
 
 function canRead(req, res, next) {
   if (!req.user?.id) return res.status(401).json({ error: 'Unauthorized' });
-
   const roles = new Set(extractRoles(req.user));
   const perms = new Set(extractPerms(req.user));
 
-  // role-based allowance
   for (const r of roles) {
-    if (allowRead.has(r) || r === 'admin' || r === 'administrator') return next();
+    if (allowRead.has(r) || allowWrite.has(r) || r === 'admin' || r === 'administrator') return next();
   }
-  // permission-based allowance
-  if (perms.has('expenses.read') || perms.has('expenses:*') || perms.has('*')) return next();
-
-  // writer roles can read too
-  for (const r of roles) if (allowWrite.has(r)) return next();
-  if (perms.has('expenses.write')) return next();
+  if (perms.has('expenses.read') || perms.has('expenses.write') || perms.has('expenses:*') || perms.has('*')) return next();
 
   return res.status(403).json({ error: 'Forbidden' });
 }
 
 function canWrite(req, res, next) {
   if (!req.user?.id) return res.status(401).json({ error: 'Unauthorized' });
-
   const roles = new Set(extractRoles(req.user));
   const perms = new Set(extractPerms(req.user));
 
@@ -72,10 +69,12 @@ function canWrite(req, res, next) {
 }
 
 // Base: /api/expenses
-router.get('/',       authenticateUser, canRead,  ctrl.list);
-router.get('/:id',    authenticateUser, canRead,  ctrl.get);
-router.post('/',      authenticateUser, canWrite, ctrl.create);
-router.put('/:id',    authenticateUser, canWrite, ctrl.update);
-router.delete('/:id', authenticateUser, canWrite, ctrl.remove);
+router.get('/',         authenticateUser, canRead,  ctrl.list);
+router.get('/export',   authenticateUser, canRead,  ctrl.exportCsv);
+router.get('/:id',      authenticateUser, canRead,  ctrl.get);
+router.post('/',        authenticateUser, canWrite, ctrl.create);
+router.post('/csv',     authenticateUser, canWrite, upload.single('file'), ctrl.uploadCsv);
+router.put('/:id',      authenticateUser, canWrite, ctrl.update);
+router.delete('/:id',   authenticateUser, canWrite, ctrl.remove);
 
 module.exports = router;
