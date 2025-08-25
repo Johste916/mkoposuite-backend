@@ -8,7 +8,7 @@ module.exports = (sequelize, DataTypes) => {
       primaryKey: true,
     },
 
-    // multi-tenant & org context (no FKs to avoid cross-env breakage)
+    // multi-tenant & org context (soft, non-FK)
     tenantId:   { type: DataTypes.UUID, allowNull: true },
     branchId:   { type: DataTypes.UUID, allowNull: true },
 
@@ -26,7 +26,7 @@ module.exports = (sequelize, DataTypes) => {
   }, {
     tableName: 'expenses',
     schema: 'public',
-    timestamps: true, // uses createdAt / updatedAt (camelCase)
+    timestamps: true, // createdAt / updatedAt (camelCase)
   });
 
   Expense.associate = (models) => {

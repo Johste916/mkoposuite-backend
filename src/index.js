@@ -67,6 +67,16 @@ async function ensureSavingsTables() {
   console.log('✅ SavingsTransaction ready');
 }
 
+async function ensureExpensesTables() {
+  if (!db.Expense) {
+    console.log('ℹ️ Expense model not loaded; skipping expenses sync.');
+    return;
+  }
+  console.log('🔧 Syncing Expense table…');
+  await db.Expense.sync({ alter: true });
+  console.log('✅ Expense ready');
+}
+
 /* --------------------------------- Startup --------------------------------- */
 (async () => {
   try {
@@ -77,6 +87,7 @@ async function ensureSavingsTables() {
     const syncACL          = process.env.SYNC_ACL === 'true';
     const syncAudit        = process.env.SYNC_AUDIT === 'true';
     const syncSavings      = process.env.SYNC_SAVINGS === 'true';
+    const syncExpenses     = process.env.SYNC_EXPENSES === 'true';
 
     if (syncSettingsOnly) await ensureSettingsOnly();
     else console.log('⏭  Skipping settings sync (set SYNC_SETTINGS_ONLY=true for one-off)');
@@ -89,6 +100,9 @@ async function ensureSavingsTables() {
 
     if (syncSavings) await ensureSavingsTables();
     else console.log('⏭  Skipping Savings sync (set SYNC_SAVINGS=true for one-off)');
+
+    if (syncExpenses) await ensureExpensesTables();
+    else console.log('⏭  Skipping Expense sync (set SYNC_EXPENSES=true for one-off)');
 
     server = app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);

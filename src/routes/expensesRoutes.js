@@ -15,10 +15,10 @@ const canRead  = (req, _res, next) => (hasRole(req.user, allowRead)  || hasPerm(
 const canWrite = (req, _res, next) => (hasRole(req.user, allowWrite) || hasPerm(req.user, 'expenses.write')) ? next() : next(Object.assign(new Error('Forbidden'), { status: 403, expose: true }));
 
 // Base: /api/expenses
-router.get('/',      authenticateUser, canRead,  ctrl.list);
-router.get('/:id',   authenticateUser, canRead,  ctrl.get);
-router.post('/',     authenticateUser, canWrite, ctrl.create);
-router.put('/:id',   authenticateUser, canWrite, ctrl.update);
-router.delete('/:id',authenticateUser, canWrite, ctrl.remove);
+router.get('/',       authenticateUser, canRead,  ctrl.list);
+router.get('/:id',    authenticateUser, canRead,  ctrl.get);
+router.post('/',      authenticateUser, canWrite, ctrl.create);
+router.put('/:id',    authenticateUser, canWrite, ctrl.update);
+router.delete('/:id', authenticateUser, canWrite, ctrl.remove);
 
 module.exports = router;

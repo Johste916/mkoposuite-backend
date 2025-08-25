@@ -63,10 +63,10 @@ db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes), 
 /* Collections */
 db.CollectionSheet = tryLoad(() => require('./collectionSheet')(sequelize, DataTypes), 'CollectionSheet');
 
-/* ✅ Collateral */
+/* Collateral */
 db.Collateral = tryLoad(() => require('./collateral')(sequelize, DataTypes), 'Collateral');
 
-/* ✅ NEW: Expense */
+/* Expense */
 db.Expense = tryLoad(() => require('./expense')(sequelize, DataTypes), 'Expense');
 
 /* ---------------- Associations (core) ---------------- */
@@ -112,7 +112,7 @@ if (db.Loan && db.LoanProduct) {
   db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId' });
 }
 
-/* ----- Loan ↔ User workflow associations ----- */
+/* Loan ↔ User workflow (soft) */
 const hasAttr = (model, attr) => !!(model && model.rawAttributes && model.rawAttributes[attr]);
 
 if (db.Loan && db.User) {
@@ -140,7 +140,7 @@ if (db.Loan && db.User) {
   }
 }
 
-/* ----- Collateral associations (soft) ----- */
+/* Collateral */
 if (db.Collateral && db.Borrower) {
   db.Collateral.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
   db.Borrower.hasMany(db.Collateral,   { foreignKey: 'borrowerId', as: 'collateral' });
@@ -154,7 +154,7 @@ if (db.Collateral && db.User) {
   db.Collateral.belongsTo(db.User, { foreignKey: 'updatedBy', as: 'updater' });
 }
 
-/* ----- ✅ Expense associations ----- */
+/* Expense */
 if (db.Expense && db.User) {
   db.Expense.belongsTo(db.User, { foreignKey: 'createdBy', as: 'creator' });
   db.Expense.belongsTo(db.User, { foreignKey: 'updatedBy', as: 'updater' });
@@ -163,7 +163,7 @@ if (db.Expense && db.Branch) {
   db.Expense.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
 }
 
-/* Optional: Savings/Comms/Audit/Activity/Accounting associations (unchanged) */
+/* Optional modules (unchanged) */
 if (db.SavingsTransaction && db.Borrower) {
   db.SavingsTransaction.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
   db.Borrower.hasMany(db.SavingsTransaction,   { foreignKey: 'borrowerId', as: 'savingsTransactions' });
@@ -200,7 +200,6 @@ if (db.ActivityAssignment && db.User) {
   db.ActivityAssignment.belongsTo(db.User, { foreignKey: 'assignerId', as: 'assigner' });
 }
 
-/* Exports */
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;
 module.exports = db;

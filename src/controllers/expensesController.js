@@ -22,7 +22,7 @@ const searchWhere = (m, q) => {
 exports.list = async (req, res) => {
   try {
     const Expense = getModel('Expense');
-    const tenantId = resolveTenantId(req);          // optional fallback
+    const tenantId = resolveTenantId(req); // optional fallback unless mode=enforced
     const page  = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 200);
     const offset = (page - 1) * limit;
@@ -32,7 +32,7 @@ exports.list = async (req, res) => {
       where,
       limit,
       offset,
-      order: [['date','DESC'], ['createdAt','DESC']],
+      order: [['date', 'DESC'], ['createdAt', 'DESC']],
     });
     res.json({ data: rows, pagination: { page, limit, total: count } });
   } catch (err) {
@@ -55,7 +55,7 @@ exports.get = async (req, res) => {
 exports.create = async (req, res) => {
   try {
     const Expense = getModel('Expense');
-    const tenantId = resolveTenantId(req, { requireForWrite: true }); // only enforced when mode=enforced
+    const tenantId = resolveTenantId(req, { requireForWrite: true }); // enforced only when mode=enforced
     const payload = pick(Expense, req.body);
     payload.tenantId = tenantId;
     if (!payload.date) payload.date = new Date();

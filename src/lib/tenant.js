@@ -19,7 +19,6 @@ function getDefaultTenantId() {
 function resolveTenantId(req, { requireForWrite = false } = {}) {
   const mode = readMode();
 
-  // Try to pick up context from header or the authenticated user
   const claim =
     req.headers?.['x-tenant-id'] ||
     req.user?.tenantId ||
@@ -29,7 +28,6 @@ function resolveTenantId(req, { requireForWrite = false } = {}) {
     null;
 
   if (mode === 'off') return getDefaultTenantId();
-
   if (mode === 'optional') return claim || getDefaultTenantId();
 
   // mode === 'enforced'
