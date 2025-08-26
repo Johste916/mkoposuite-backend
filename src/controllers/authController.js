@@ -1,51 +1,55 @@
+'use strict';
+
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { sequelize } = require('../models'); // ⬅️ Make sure you import sequelize directly
+const { sequelize } = require('../models');
+const { QueryTypes } = require('sequelize'); // ✅ proper QueryTypes source
 require('dotenv').config();
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
 exports.login = async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password } = req.body || {};
+
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email and password are required' });
+  }
+  if (!JWT_SECRET) {
+    return res.status(500).json({ message: 'Server misconfigured (missing JWT secret)' });
+  }
 
   try {
-    // 🔥 Use raw SQL query instead of Sequelize findOne
-    const [users] = await sequelize.query(
-      `SELECT id, name, email, role, password_hash FROM "Users" WHERE email = :email LIMIT 1`,
+    // With QueryTypes.SELECT, sequelize returns an array of rows (no [rows, meta])
+    const rows = await sequelize.query(
+      `SELECT id, name, email, role, password_hash
+       FROM "Users"
+       WHERE email = :email
+       LIMIT 1`,
       {
         replacements: { email },
-        type: sequelize.QueryTypes.SELECT
+        type: QueryTypes.SELECT
       }
     );
 
-    const user = users;
+    const user = rows && rows[0];
 
     if (!user) {
-      console.log("❌ No user found with email:", email);
-      return res.status(401).json({ message: 'Invalid email or password ❌' });
+      return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    console.log("✅ User found:", user.email);
-    console.log("🔐 Hashed password from DB:", user.password_hash);
-    console.log("🔑 Password entered by user:", password);
-
-    const isMatch = await bcrypt.compare(password, user.password_hash);
-
+    const isMatch = await bcrypt.compare(String(password), String(user.password_hash || ''));
     if (!isMatch) {
-      console.log("❌ Password mismatch");
-      return res.status(401).json({ message: 'Invalid email or password ❌' });
+      return res.status(401).json({ message: 'Invalid email or password' });
     }
-
-    console.log("✅ Password matched. Logging in...");
 
     const token = jwt.sign(
-      { userId: user.id, email: user.email },
+      { userId: user.id, email: user.email, role: user.role },
       JWT_SECRET,
       { expiresIn: '2h' }
     );
 
-    res.status(200).json({
-      message: 'Login successful ✅',
+    return res.status(200).json({
+      message: 'Login successful',
       token,
       user: {
         id: user.id,
@@ -54,9 +58,8 @@ exports.login = async (req, res) => {
         role: user.role
       }
     });
-
   } catch (error) {
-    console.error('❌ Login error (raw SQL):', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Login error:', error);
+    return res.status(500).json({ message: 'Server error' });
   }
 };

@@ -1,4 +1,3 @@
-// backend/src/routes/settingRoutes.js
 'use strict';
 
 const express = require('express');
@@ -8,74 +7,84 @@ const { authenticateUser } = require('../middleware/authMiddleware');
 /* ==============================
    Controllers (existing)
    ============================== */
-const loanCategoriesController = require('../controllers/settings/loanCategoriesController');
-const loanSettingsController = require('../controllers/settings/loanSettingsController');
-const systemSettingsController = require('../controllers/settings/systemSettingsController');
-const penaltySettingsController = require('../controllers/settings/penaltySettingsController');
-const integrationSettingsOldController = require('../controllers/settings/integrationSettingsController');
-const branchSettingsController = require('../controllers/settings/branchSettingsController');
-const borrowerSettingsController = require('../controllers/settings/borrowerSettingsController');
-const userManagementController = require('../controllers/settings/userManagementController');
-const bulkSmsSettingsController = require('../controllers/settings/bulkSmsSettingsController');
+const loanCategoriesController     = require('../controllers/settings/loanCategoriesController');
+const loanSettingsController       = require('../controllers/settings/loanSettingsController');
+const systemSettingsController     = require('../controllers/settings/systemSettingsController');
+const penaltySettingsController    = require('../controllers/settings/penaltySettingsController');
+// rename for clarity (it’s the current controller, not truly "old")
+const integrationSettingsController = require('../controllers/settings/integrationSettingsController');
+const branchSettingsController     = require('../controllers/settings/branchSettingsController');
+const borrowerSettingsController   = require('../controllers/settings/borrowerSettingsController');
+const userManagementController     = require('../controllers/settings/userManagementController');
+const bulkSmsSettingsController    = require('../controllers/settings/bulkSmsSettingsController');
 const savingAccountSettingsController = require('../controllers/settings/savingAccountSettingsController');
-const payrollSettingsController = require('../controllers/settings/payrollSettingsController');
-const paymentSettingsController = require('../controllers/settings/paymentSettingsController');
-const commentSettingsController = require('../controllers/settings/commentSettingsController');
-const dashboardSettingsController = require('../controllers/settings/dashboardSettingsController');
+const payrollSettingsController    = require('../controllers/settings/payrollSettingsController');
+const paymentSettingsController    = require('../controllers/settings/paymentSettingsController');
+const commentSettingsController    = require('../controllers/settings/commentSettingsController');
+const dashboardSettingsController  = require('../controllers/settings/dashboardSettingsController');
 const loanSectorSettingsController = require('../controllers/settings/loanSectorSettingsController');
 const incomeSourceSettingsController = require('../controllers/settings/incomeSourceSettingsController');
-const holidaySettingsController = require('../controllers/settings/holidaySettingsController');
+const holidaySettingsController    = require('../controllers/settings/holidaySettingsController');
 const communicationSettingsController = require('../controllers/settings/communicationSettingsController');
 
 /* ==============================
    NEW controllers (Batch 1)
    ============================== */
-const generalSettingsController = require('../controllers/settings/generalSettingsController');
-const apiSettingsController = require('../controllers/settings/apiSettingsController');
-const smsSettingsController = require('../controllers/settings/smsSettingsController');
-const emailSettingsController = require('../controllers/settings/emailSettingsController');
-const loanFeesController = require('../controllers/settings/loanFeesController');
-const loanRemindersController = require('../controllers/settings/loanRemindersController');
+const generalSettingsController    = require('../controllers/settings/generalSettingsController');
+const apiSettingsController        = require('../controllers/settings/apiSettingsController');
+const smsSettingsController        = require('../controllers/settings/smsSettingsController');
+const emailSettingsController      = require('../controllers/settings/emailSettingsController');
+const loanFeesController           = require('../controllers/settings/loanFeesController');
+const loanRemindersController      = require('../controllers/settings/loanRemindersController');
 
 /* ==============================
    NEW controllers (Loans batch 2)
    ============================== */
-const loanCyclesController = require('../controllers/settings/loanCyclesController');
-const loanTemplatesController = require('../controllers/settings/loanTemplatesController');
-const loanApprovalsController = require('../controllers/settings/loanApprovalsController');
+const loanCyclesController         = require('../controllers/settings/loanCyclesController');
+const loanTemplatesController      = require('../controllers/settings/loanTemplatesController');
+const loanApprovalsController      = require('../controllers/settings/loanApprovalsController');
 
 /* ==============================
-   Sidebar config (FIX for 404)
+   Sidebar config
    ============================== */
 /**
- * Returns the menu items and feature flags used by the frontend to render the sidebar.
- * If you want this accessible pre-login, remove `authenticateUser`.
+ * API the frontend can hit to get the sidebar + feature flags from the server.
+ * If you want it available pre-login, remove authenticateUser from this route.
+ * NOTE: This mirrors the current React nav (e-Signatures & Legacy removed).
  */
-router.get('/sidebar', authenticateUser, (req, res) => {
+router.get('/sidebar', authenticateUser, (_req, res) => {
   res.json({
     items: [
-      { path: '/',                    label: 'Dashboard',           icon: 'home' },
-      { path: '/borrowers',           label: 'Borrowers',           icon: 'users' },
-      { path: '/loans',               label: 'Loans',               icon: 'credit-card' },
-      { path: '/repayments',          label: 'Repayments',          icon: 'receipt' },
-      { path: '/collections',         label: 'Collection Sheets',   icon: 'calendar' },
-      { path: '/savings-transactions',label: 'Savings Txns',        icon: 'wallet' },
-      { path: '/investors',           label: 'Investors',           icon: 'briefcase' },
-      { path: '/assets',              label: 'Assets',              icon: 'package' },
-      { path: '/reports',             label: 'Reports',             icon: 'bar-chart-2' },
-      { path: '/settings',            label: 'Settings',            icon: 'settings' },
+      { path: '/',               label: 'Dashboard',          icon: 'home' },
+      { path: '/borrowers',      label: 'Borrowers',          icon: 'users' },
+      { path: '/loans',          label: 'Loans',              icon: 'credit-card' },
+      { path: '/repayments',     label: 'Repayments',         icon: 'receipt' },
+      { path: '/collateral',     label: 'Collateral Register',icon: 'briefcase' },
+      { path: '/collections',    label: 'Collection Sheets',  icon: 'calendar' },
+      { path: '/savings',        label: 'Savings',            icon: 'wallet' },            // was /savings-transactions
+      { path: '/investors',      label: 'Investors',          icon: 'briefcase' },
+      { path: '/expenses',       label: 'Expenses',           icon: 'credit-card' },
+      { path: '/other-income',   label: 'Other Income',       icon: 'dollar-sign' },
+      { path: '/assets',         label: 'Assets',             icon: 'package' },
+      { path: '/accounting',     label: 'Accounting',         icon: 'database' },
+      { path: '/reports',        label: 'Reports',            icon: 'bar-chart-2' },
+      { path: '/payroll',        label: 'HR & Payroll',       icon: 'user-check' },
+      { path: '/admin',          label: 'Admin',              icon: 'settings' }
     ],
     featureFlags: {
       collections: true,
-      savingsTransactions: true,
+      savings: true,
       investors: true,
       collateral: true,
       payroll: true,
+      hr: true,
       expenses: true,
       otherIncome: true,
       accounting: true,
-      esignatures: true,
-    },
+      // removed legacy + e-signatures
+      legacy: false,
+      esignatures: false
+    }
   });
 });
 
@@ -112,18 +121,20 @@ router.route('/penalty-settings')
   .put(authenticateUser, penaltySettingsController.updatePenaltySettings);
 
 /* ==============================
-   Integration Settings (legacy)
+   Integration Settings
    ============================== */
 router.route('/integration-settings')
-  .get(authenticateUser, integrationSettingsOldController.getIntegrationSettings)
-  .put(authenticateUser, integrationSettingsOldController.updateIntegrationSettings);
+  .get(authenticateUser, integrationSettingsController.getIntegrationSettings)
+  .put(authenticateUser, integrationSettingsController.updateIntegrationSettings);
 
 /* ==============================
    Branch Settings
    ============================== */
 router.route('/branch-settings')
   .get(authenticateUser, branchSettingsController.getBranchSettings);
-router.put('/branch-settings/:id',
+
+router.put(
+  '/branch-settings/:id',
   authenticateUser,
   branchSettingsController.updateBranchSettings
 );
@@ -217,12 +228,14 @@ router.route('/communications/:id')
   .put(authenticateUser, communicationSettingsController.updateCommunication)
   .delete(authenticateUser, communicationSettingsController.deleteCommunication);
 
-router.post('/communications/:id/attachments',
+router.post(
+  '/communications/:id/attachments',
   authenticateUser,
   communicationSettingsController.addAttachment
 );
 
-router.delete('/communications/:id/attachments/:attId',
+router.delete(
+  '/communications/:id/attachments/:attId',
   authenticateUser,
   communicationSettingsController.removeAttachment
 );
@@ -235,7 +248,7 @@ router.route('/general')
   .put(authenticateUser, generalSettingsController.updateGeneral);
 
 /* ==============================
-   NEW — API (kept for parity)
+   NEW — API
    ============================== */
 router.route('/api')
   .get(authenticateUser, apiSettingsController.getApiSettings)

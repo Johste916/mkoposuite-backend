@@ -1,4 +1,3 @@
-// backend/src/models/setting.js
 module.exports = (sequelize, DataTypes) => {
   // Pick JSON type based on dialect
   const JSON_TYPE =
@@ -21,13 +20,12 @@ module.exports = (sequelize, DataTypes) => {
         unique: true,
         validate: {
           len: [2, 200],
-          // allow letters, numbers, dots, dashes and underscores: e.g. "loan.reminders", "userManagement_defaultRole"
+          // allow letters, numbers, dots, dashes and underscores
           is: /^[A-Za-z0-9._-]+$/i,
         },
       },
 
       value: {
-        // JSONB on Postgres, JSON elsewhere
         type: JSON_TYPE,
         allowNull: false,
         defaultValue: {},
@@ -39,23 +37,14 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: '',
       },
 
-      createdBy: {
-        type: DataTypes.UUID,
-        allowNull: true,
-      },
-
-      updatedBy: {
-        type: DataTypes.UUID,
-        allowNull: true,
-      },
+      createdBy: { type: DataTypes.UUID, allowNull: true },
+      updatedBy: { type: DataTypes.UUID, allowNull: true },
     },
     {
       timestamps: true,
       tableName: 'settings',
       indexes: [
-        // Fast lookup by key (also enforced unique)
         { unique: true, fields: ['key'] },
-        // Helpful when querying by value on Postgres
         ...(sequelize.getDialect() === 'postgres'
           ? [{ fields: ['value'], using: 'gin', name: 'settings_value_gin_idx' }]
           : []),
@@ -71,17 +60,23 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   /* -----------------------------------------------------------
-   * Convenience helpers (keep controllers thin & consistent)
+   * Helper: namespacing without migrations (tenant-aware keys)
    * --------------------------------------------------------- */
+  const nsKey = (key, tenantId) => {
+    const cleanKey = String(key).trim();
+    if (!tenantId) return cleanKey; // global scope
+    return `${String(tenantId)}:${cleanKey}`;
+  };
 
   /**
    * Get a settings blob by key, with optional defaults if missing.
    * @param {string} key
    * @param {any} defaults
+   * @param {{tenantId?: string}} [opts]
    * @returns {Promise<any>}
    */
-  Setting.get = async function get(key, defaults = {}) {
-    const row = await Setting.findOne({ where: { key } });
+  Setting.get = async function get(key, defaults = {}, opts = {}) {
+    const row = await Setting.findOne({ where: { key: nsKey(key, opts.tenantId) } });
     return row?.value ?? defaults;
   };
 
@@ -90,14 +85,16 @@ module.exports = (sequelize, DataTypes) => {
    * Missing keys fall back to `null` unless defaults provided.
    * @param {string[]} keys
    * @param {Record<string, any>} defaultsMap
-   * @returns {Promise<Record<string, any>>}
+   * @param {{tenantId?: string}} [opts]
    */
-  Setting.getMany = async function getMany(keys = [], defaultsMap = {}) {
+  Setting.getMany = async function getMany(keys = [], defaultsMap = {}, opts = {}) {
     if (!Array.isArray(keys) || keys.length === 0) return {};
-    const rows = await Setting.findAll({ where: { key: keys } });
+    const namespaced = keys.map(k => nsKey(k, opts.tenantId));
+    const rows = await Setting.findAll({ where: { key: namespaced } });
     const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     return keys.reduce((acc, k) => {
-      acc[k] = k in map ? map[k] : defaultsMap[k] ?? null;
+      const nk = nsKey(k, opts.tenantId);
+      acc[k] = nk in map ? map[nk] : defaultsMap[k] ?? null;
       return acc;
     }, {});
   };
@@ -106,16 +103,15 @@ module.exports = (sequelize, DataTypes) => {
    * Set/replace a settings blob by key.
    * @param {string} key
    * @param {any} value
-   * @param {string|null} updatedBy
-   * @param {string|null} createdBy
-   * @returns {Promise<any>}
+   * @param {{updatedBy?: string|null, createdBy?: string|null, tenantId?: string}} [opts]
    */
-  Setting.set = async function set(key, value, updatedBy = null, createdBy = null) {
+  Setting.set = async function set(key, value, opts = {}) {
+    const { updatedBy = null, createdBy = null, tenantId } = opts || {};
     const [row] = await Setting.upsert({
-      key: String(key).trim(),
+      key: nsKey(key, tenantId),
       value,
-      updatedBy: updatedBy || null,
-      createdBy: createdBy || null,
+      updatedBy,
+      createdBy,
     });
     return row?.value ?? value;
   };
@@ -124,16 +120,16 @@ module.exports = (sequelize, DataTypes) => {
    * Merge patch into existing settings (shallow merge).
    * @param {string} key
    * @param {object} patch
-   * @param {string|null} updatedBy
-   * @returns {Promise<any>}
+   * @param {{updatedBy?: string|null, tenantId?: string}} [opts]
    */
-  Setting.merge = async function merge(key, patch = {}, updatedBy = null) {
-    const current = await Setting.get(key, {});
+  Setting.merge = async function merge(key, patch = {}, opts = {}) {
+    const { updatedBy = null, tenantId } = opts || {};
+    const current = await Setting.get(key, {}, { tenantId });
     const next = { ...(current || {}), ...(patch || {}) };
     const [row] = await Setting.upsert({
-      key: String(key).trim(),
+      key: nsKey(key, tenantId),
       value: next,
-      updatedBy: updatedBy || null,
+      updatedBy,
     });
     return row?.value ?? next;
   };
