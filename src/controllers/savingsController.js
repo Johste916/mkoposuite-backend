@@ -1,7 +1,8 @@
 // controllers/savingsController.js
+'use strict';
 const { SavingsTransaction } = require('../models');
 
-// Record a deposit, withdrawal, charge, or interest
+// Record a deposit, withdrawal, charge, or interest (starts as PENDING)
 exports.createTransaction = async (req, res) => {
   try {
     const { borrowerId, type, amount, date, notes } = req.body;
@@ -10,6 +11,9 @@ exports.createTransaction = async (req, res) => {
     if (!validTypes.includes(type)) {
       return res.status(400).json({ error: 'Invalid transaction type' });
     }
+    if (!borrowerId || !amount || !date) {
+      return res.status(400).json({ error: 'borrowerId, amount and date are required' });
+    }
 
     const transaction = await SavingsTransaction.create({
       borrowerId,
@@ -17,6 +21,8 @@ exports.createTransaction = async (req, res) => {
       amount,
       date,
       notes,
+      status: 'pending',
+      createdBy: req.user?.id ? String(req.user.id) : null,
     });
 
     res.status(201).json(transaction);
@@ -27,14 +33,19 @@ exports.createTransaction = async (req, res) => {
 };
 
 // Get savings transactions with filter and summary
+// NOTE: only APPROVED transactions contribute to balance/summary by default.
 exports.getSavingsByBorrower = async (req, res) => {
   try {
     const borrowerId = req.params.borrowerId;
-    const { type } = req.query;
+    const { type, includePending } = req.query;
 
     const where = { borrowerId };
     if (type && ['deposit', 'withdrawal', 'charge', 'interest'].includes(type)) {
       where.type = type;
+    }
+    if (!includePending) {
+      // Only approved affect balances
+      where.status = 'approved';
     }
 
     const transactions = await SavingsTransaction.findAll({

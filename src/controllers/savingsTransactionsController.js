@@ -7,7 +7,8 @@ const getModel = (n) => {
   if (!m) throw Object.assign(new Error(`Model "${n}" not found`), { status: 500, expose: true });
   return m;
 };
-const pick = (m, b) => !m.rawAttributes ? b : Object.fromEntries(Object.entries(b).filter(([k]) => m.rawAttributes[k]));
+const pick = (m, b) =>
+  !m.rawAttributes ? b : Object.fromEntries(Object.entries(b).filter(([k]) => m.rawAttributes[k]));
 const searchWhere = (m, q) => {
   if (!q) return {};
   const fields = ['type', 'reference', 'notes']; // safe defaults
@@ -46,8 +47,11 @@ exports.get = async (req, res) => {
 exports.create = async (req, res) => {
   const Model = getModel('SavingsTransaction');
   const body = pick(Model, req.body);
+  if (!body.type || !['deposit','withdrawal','charge','interest'].includes(body.type)) {
+    return res.status(400).json({ error: 'Invalid type' });
+  }
   if (!body.status) body.status = 'pending';
-  if (!body.createdBy && req.user?.id) body.createdBy = req.user.id;
+  if (!body.createdBy && req.user?.id) body.createdBy = String(req.user.id);
   const created = await Model.create(body);
   res.status(201).json(created);
 };
@@ -58,8 +62,8 @@ exports.bulkCreate = async (req, res) => {
   if (!items.length) return res.status(400).json({ error: 'No items' });
   const mapped = items.map((x) => {
     const p = pick(Model, x);
-    if (!p.status) p.status = 'approved'; // CSV imports can be treated as approved
-    if (!p.createdBy && req.user?.id) p.createdBy = req.user.id;
+    if (!p.status) p.status = 'pending';
+    if (!p.createdBy && req.user?.id) p.createdBy = String(req.user.id);
     return p;
   });
   const created = await Model.bulkCreate(mapped, { returning: true });
@@ -87,7 +91,14 @@ exports.approve = async (req, res) => {
   const Model = getModel('SavingsTransaction');
   const row = await Model.findByPk(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
-  await row.update({ status: 'approved', approvedBy: req.user?.id || null, approvedAt: new Date() });
+  const comment = (req.body?.comment || req.query?.comment || '').trim();
+  if (!comment) return res.status(400).json({ error: 'approval comment is required' });
+  await row.update({
+    status: 'approved',
+    approvedBy: req.user?.id ? String(req.user.id) : null,
+    approvedAt: new Date(),
+    approvalComment: comment,
+  });
   res.json(row);
 };
 
@@ -95,7 +106,14 @@ exports.reject = async (req, res) => {
   const Model = getModel('SavingsTransaction');
   const row = await Model.findByPk(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
-  await row.update({ status: 'rejected', approvedBy: req.user?.id || null, approvedAt: new Date() });
+  const comment = (req.body?.comment || req.query?.comment || '').trim();
+  if (!comment) return res.status(400).json({ error: 'rejection comment is required' });
+  await row.update({
+    status: 'rejected',
+    approvedBy: req.user?.id ? String(req.user.id) : null,
+    approvedAt: new Date(),
+    approvalComment: comment,
+  });
   res.json(row);
 };
 

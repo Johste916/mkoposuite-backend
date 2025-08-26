@@ -222,10 +222,16 @@ exports.addComment = async (req, res) => {
 };
 
 // ---------- Savings ----------
+/**
+ * Aligns with /api/savings/borrower/:borrowerId logic:
+ * - ignores reversed transactions in totals/balance
+ * - supports deposit, withdrawal, charge, interest
+ * - returns { balance, transactions, totals } (totals is additive; does not break callers)
+ */
 exports.getSavingsByBorrower = async (req, res) => {
   try {
     if (!SavingsTransaction) {
-      return res.json({ balance: 0, transactions: [] });
+      return res.json({ balance: 0, transactions: [], totals: { deposits: 0, withdrawals: 0, charges: 0, interest: 0 } });
     }
 
     const txs = await SavingsTransaction.findAll({
@@ -234,14 +240,35 @@ exports.getSavingsByBorrower = async (req, res) => {
       limit: 500,
     });
 
-    let deposits = 0, withdrawals = 0;
-    for (const t of txs) {
-      if (t.type === 'deposit') deposits += safeNum(t.amount);
-      else if (t.type === 'withdrawal') withdrawals += safeNum(t.amount);
-    }
-    const balance = deposits - withdrawals;
+    const totals = { deposits: 0, withdrawals: 0, charges: 0, interest: 0 };
+    let balance = 0;
 
-    res.json({ balance, transactions: txs });
+    for (const t of txs) {
+      if (t.reversed === true) continue;
+      const amt = safeNum(t.amount);
+      switch (t.type) {
+        case 'deposit':
+          totals.deposits += amt;
+          balance += amt;
+          break;
+        case 'withdrawal':
+          totals.withdrawals += amt;
+          balance -= amt;
+          break;
+        case 'charge':
+          totals.charges += amt;
+          balance -= amt;
+          break;
+        case 'interest':
+          totals.interest += amt;
+          balance += amt;
+          break;
+        default:
+          break;
+      }
+    }
+
+    res.json({ balance, transactions: txs, totals });
   } catch (error) {
     console.error('getSavingsByBorrower error:', error);
     res.status(500).json({ error: 'Failed to fetch savings' });
