@@ -49,6 +49,15 @@ exports.update = async (req, res) => {
   res.json(row);
 };
 
+exports.reverse = async (req, res) => {
+  const Model = getModel('SavingsTransaction');
+  const row = await Model.findByPk(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  if (row.reversed === true) return res.json(row);
+  await row.update({ reversed: true });
+  res.json(row);
+};
+
 exports.remove = async (req, res) => {
   const Model = getModel('SavingsTransaction');
   const row = await Model.findByPk(req.params.id);

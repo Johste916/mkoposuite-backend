@@ -1,4 +1,4 @@
-// Minimal SavingsTransaction model used by savings-transactions endpoints & reports
+// Minimal SavingsTransaction model used by savings endpoints & reports
 module.exports = (sequelize, DataTypes) => {
   const SavingsTransaction = sequelize.define(
     'SavingsTransaction',
@@ -9,7 +9,7 @@ module.exports = (sequelize, DataTypes) => {
         autoIncrement: true,
       },
       borrowerId: {
-        type: DataTypes.INTEGER, // matches typical Borrower PK (integer)
+        type: DataTypes.INTEGER,
         allowNull: false,
       },
       type: {
@@ -28,6 +28,11 @@ module.exports = (sequelize, DataTypes) => {
       notes: {
         type: DataTypes.TEXT,
         allowNull: true,
+      },
+      reversed: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
       },
     },
     {
