@@ -1,15 +1,13 @@
 'use strict';
+
 const express = require('express');
 const router = express.Router();
 const { authenticateUser } = require('../middleware/authMiddleware');
 
-router.get('/settings/billing', authenticateUser, (_req, res) => {
-  res.json({
-    plan: 'free',
-    status: 'ok',
-    seats: 1,
-    renewsAt: null
-  });
-});
+const billing = require('../controllers/account/billingController');
+
+// /api/account/settings/billing
+router.get('/settings/billing', authenticateUser, billing.getBilling);
+router.put('/settings/billing', authenticateUser, billing.updateBilling);
 
 module.exports = router;

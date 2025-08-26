@@ -67,12 +67,9 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
-  // Vary ensures caches don’t mix responses for different origins/headers
   res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
-
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
 
-  // Echo requested headers if present; otherwise send our defaults
   const requested = req.headers['access-control-request-headers'];
   res.setHeader(
     'Access-Control-Allow-Headers',
@@ -81,7 +78,6 @@ app.use((req, res, next) => {
       : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
 
-  // Let browser read filename on downloads
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -132,25 +128,26 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
 }
 
 /* --------------------------------- Routes ---------------------------------- */
-const authRoutes          = safeLoadRoutes('./routes/authRoutes', makeDummyRouter({ ok: true }));
+// Auth (NOTE: mount at /api/auth for 2FA + keep legacy /api/login)
+const authRoutes = safeLoadRoutes('./routes/authRoutes', makeDummyRouter({ ok: true }));
 
-// IMPORTANT: dedicate a small router for borrower search and mount it BEFORE /api/borrowers
+// Dedicated borrower search must come BEFORE /api/borrowers
 const borrowerSearchRoutes = safeLoadRoutes('./routes/borrowerSearchRoutes', makeDummyRouter([]));
-const borrowerRoutes      = safeLoadRoutes('./routes/borrowerRoutes', makeDummyRouter([]));
+const borrowerRoutes       = safeLoadRoutes('./routes/borrowerRoutes', makeDummyRouter([]));
 
-const loanRoutes          = safeLoadRoutes('./routes/loanRoutes', makeDummyRouter([]));
-const dashboardRoutes     = safeLoadRoutes('./routes/dashboardRoutes', makeDummyRouter({}));
-const savingsRoutes       = safeLoadRoutes('./routes/savingsRoutes', makeDummyRouter([]));
-const disbursementRoutes  = safeLoadRoutes('./routes/loanDisbursementRoutes', makeDummyRouter([]));
-const repaymentRoutes     = safeLoadRoutes('./routes/repaymentRoutes', makeDummyRouter([]));
-const reportRoutes        = safeLoadRoutes('./routes/reportRoutes', makeDummyRouter({}));
-const settingRoutes       = safeLoadRoutes('./routes/settingRoutes', makeDummyRouter({}));
-const userRoutes          = safeLoadRoutes('./routes/userRoutes', makeDummyRouter([]));
-const roleRoutes          = safeLoadRoutes('./routes/roleRoutes', makeDummyRouter([]));
-const branchRoutes        = safeLoadRoutes('./routes/branchRoutes', makeDummyRouter([]));
-const userRoleRoutes      = safeLoadRoutes('./routes/userRoleRoutes', makeDummyRouter([]));
-const userBranchRoutes    = safeLoadRoutes('./routes/userBranchRoutes', makeDummyRouter([]));
-const loanProductRoutes   = safeLoadRoutes('./routes/loanProductRoutes', makeDummyRouter([]));
+const loanRoutes           = safeLoadRoutes('./routes/loanRoutes', makeDummyRouter([]));
+const dashboardRoutes      = safeLoadRoutes('./routes/dashboardRoutes', makeDummyRouter({}));
+const savingsRoutes        = safeLoadRoutes('./routes/savingsRoutes', makeDummyRouter([]));
+const disbursementRoutes   = safeLoadRoutes('./routes/loanDisbursementRoutes', makeDummyRouter([]));
+const repaymentRoutes      = safeLoadRoutes('./routes/repaymentRoutes', makeDummyRouter([]));
+const reportRoutes         = safeLoadRoutes('./routes/reportRoutes', makeDummyRouter({}));
+const settingRoutes        = safeLoadRoutes('./routes/settingRoutes', makeDummyRouter({}));
+const userRoutes           = safeLoadRoutes('./routes/userRoutes', makeDummyRouter([]));
+const roleRoutes           = safeLoadRoutes('./routes/roleRoutes', makeDummyRouter([]));
+const branchRoutes         = safeLoadRoutes('./routes/branchRoutes', makeDummyRouter([]));
+const userRoleRoutes       = safeLoadRoutes('./routes/userRoleRoutes', makeDummyRouter([]));
+const userBranchRoutes     = safeLoadRoutes('./routes/userBranchRoutes', makeDummyRouter([]));
+const loanProductRoutes    = safeLoadRoutes('./routes/loanProductRoutes', makeDummyRouter([]));
 
 /* Admin modules */
 const adminStaffRoutes     = safeLoadRoutes('./routes/staffRoutes', makeDummyRouter([]));
@@ -233,6 +230,9 @@ const accountingRoutes = safeLoadRoutes(
   })
 );
 
+/* ---------- New settings/account/auth routers (real or dummy) -------------- */
+const accountRoutes = safeLoadRoutes('./routes/accountRoutes', makeDummyRouter({ settings: {} }));
+
 /* -------------------------- Automatic audit hooks -------------------------- */
 let AuditLog;
 try { ({ AuditLog } = require('./models')); } catch {
@@ -267,10 +267,13 @@ app.use((req, res, next) => {
 });
 
 /* --------------------------------- Mounting -------------------------------- */
-// borrower search must come BEFORE /api/borrowers to avoid /:id catching "search"
+// borrower search must come BEFORE /api/borrowers
 app.use('/api/borrowers/search', borrowerSearchRoutes);
 
-app.use('/api/login',          authRoutes);
+// ✅ Correct mounts for auth + account (before 404)
+app.use('/api/auth', authRoutes);        // 2FA endpoints live here (…/2fa/status, etc.)
+app.use('/api/login', authRoutes);       // legacy/back-compat if your router also exposes login
+
 app.use('/api/borrowers',      borrowerRoutes);
 app.use('/api/loans',          loanRoutes);
 app.use('/api/dashboard',      dashboardRoutes);
@@ -348,8 +351,5 @@ app.use((err, _req, res, _next) => {
   if (process.env.NODE_ENV !== 'production') console.error('❌ Error:', err);
   res.status(status).json({ error: message || 'Unexpected error' });
 });
-
-const accountRoutes = require('./routes/accountRoutes');
-app.use('/api/account', accountRoutes);
 
 module.exports = app;
