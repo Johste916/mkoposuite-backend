@@ -43,8 +43,10 @@ db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes),       'Ro
 db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes),   'UserRole');
 db.Permission = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
 
+/* ✅ SavingsTransaction must be present (fixes "Model not found") */
+db.SavingsTransaction = require('./savingstransaction')(sequelize, DataTypes);
+
 /* Optional modules */
-db.SavingsTransaction      = tryLoad(() => require('./SavingsTransaction')(sequelize, DataTypes), 'SavingsTransaction');
 db.ReportSubscription      = tryLoad(() => require('./ReportSubscription')(sequelize, DataTypes), 'ReportSubscription');
 db.Communication           = tryLoad(() => require('./Communication')(sequelize, DataTypes), 'Communication');
 db.CommunicationAttachment = tryLoad(() => require('./CommunicationAttachment')(sequelize, DataTypes), 'CommunicationAttachment');
