@@ -1,65 +1,90 @@
 'use strict';
 
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const { sequelize } = require('../models');
-const { QueryTypes } = require('sequelize'); // ✅ proper QueryTypes source
-require('dotenv').config();
+const { Setting } = require('../models');           // uses your generic Setting model (no DB migration)
+const { authenticator } = require('otplib');        // npm i otplib
+authenticator.options = { window: 1 };              // tolerate slight clock drift
 
-const JWT_SECRET = process.env.JWT_SECRET;
+const APP_NAME = process.env.APP_NAME || 'MkopoSuite';
+const KEY_FOR = (userId) => `user.2fa.${userId}`;
 
-exports.login = async (req, res) => {
-  const { email, password } = req.body || {};
+/**
+ * GET /api/auth/2fa/status
+ * -> { enabled: boolean }
+ */
+exports.status = async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
 
-  if (!email || !password) {
-    return res.status(400).json({ message: 'Email and password are required' });
+  const cfg = await Setting.get(KEY_FOR(userId), null);
+  res.json({ enabled: !!(cfg && cfg.enabled && cfg.secret) });
+};
+
+/**
+ * POST /api/auth/2fa/setup
+ * -> { secret, otpauthUrl }
+ *
+ * Generates a secret and stores it (enabled=false). User must verify next.
+ */
+exports.setup = async (req, res) => {
+  const userId = req.user?.id;
+  const email  = req.user?.email || 'user@example.com';
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  const secret = authenticator.generateSecret();
+  const otpauthUrl = authenticator.keyuri(email, APP_NAME, secret);
+
+  await Setting.set(
+    KEY_FOR(userId),
+    { enabled: false, secret },
+    String(userId)
+  );
+
+  res.status(201).json({ secret, otpauthUrl });
+};
+
+/**
+ * POST /api/auth/2fa/verify  body: { token }
+ * -> enables 2FA if token matches the stored secret
+ */
+exports.verify = async (req, res) => {
+  const userId = req.user?.id;
+  const token  = String(req.body?.token || '').trim();
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+  if (!token)  return res.status(400).json({ message: 'Token is required' });
+
+  const cfg = await Setting.get(KEY_FOR(userId), null);
+  if (!cfg?.secret) return res.status(400).json({ message: 'No 2FA setup in progress' });
+
+  const isValid = authenticator.verify({ token, secret: cfg.secret });
+  if (!isValid) return res.status(400).json({ message: 'Invalid code' });
+
+  await Setting.set(
+    KEY_FOR(userId),
+    { enabled: true, secret: cfg.secret },
+    String(userId)
+  );
+
+  res.json({ enabled: true });
+};
+
+/**
+ * POST /api/auth/2fa/disable  body: { token }
+ * -> disables 2FA (requires a valid current code)
+ */
+exports.disable = async (req, res) => {
+  const userId = req.user?.id;
+  const token  = String(req.body?.token || '').trim();
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+  if (!token)  return res.status(400).json({ message: 'Token is required' });
+
+  const cfg = await Setting.get(KEY_FOR(userId), null);
+  if (!cfg?.secret || !cfg?.enabled) {
+    return res.status(400).json({ message: '2FA is not enabled' });
   }
-  if (!JWT_SECRET) {
-    return res.status(500).json({ message: 'Server misconfigured (missing JWT secret)' });
-  }
 
-  try {
-    // With QueryTypes.SELECT, sequelize returns an array of rows (no [rows, meta])
-    const rows = await sequelize.query(
-      `SELECT id, name, email, role, password_hash
-       FROM "Users"
-       WHERE email = :email
-       LIMIT 1`,
-      {
-        replacements: { email },
-        type: QueryTypes.SELECT
-      }
-    );
+  const isValid = authenticator.verify({ token, secret: cfg.secret });
+  if (!isValid) return res.status(400).json({ message: 'Invalid code' });
 
-    const user = rows && rows[0];
-
-    if (!user) {
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
-
-    const isMatch = await bcrypt.compare(String(password), String(user.password_hash || ''));
-    if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
-
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      JWT_SECRET,
-      { expiresIn: '2h' }
-    );
-
-    return res.status(200).json({
-      message: 'Login successful',
-      token,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role
-      }
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    return res.status(500).json({ message: 'Server error' });
-  }
+  await Setting.set(KEY_FOR(userId), { enabled: false, secret: null }, String(userId));
+  res.json({ enabled: false });
 };

@@ -349,4 +349,7 @@ app.use((err, _req, res, _next) => {
   res.status(status).json({ error: message || 'Unexpected error' });
 });
 
+const accountRoutes = require('./routes/accountRoutes');
+app.use('/api/account', accountRoutes);
+
 module.exports = app;
