@@ -1,25 +1,26 @@
 'use strict';
-
 const express = require('express');
 const router = express.Router();
 const ctrl = require('../controllers/savingsTransactionsController');
 
-// Base: /api/savings/transactions  (also mounted at /api/savings-transactions)
-
-// List (supports ?page=&limit=&q=&accountId=&type=deposit|withdrawal)
+// List / filter
 router.get('/', ctrl.list);
 
-// Get one by ID
+// Staff report
+router.get('/staff-report', ctrl.staffReport);
+
+// Bulk import
+router.post('/bulk', ctrl.bulkCreate);
+
+// CRUD
 router.get('/:id', ctrl.get);
-
-// Create
 router.post('/', ctrl.create);
-
-// Update
 router.put('/:id', ctrl.update);
-
-// Reverse (mark as reversed = true)
 router.patch('/:id/reverse', ctrl.reverse);
+
+// Approvals
+router.patch('/:id/approve', ctrl.approve);
+router.patch('/:id/reject', ctrl.reject);
 
 // Delete
 router.delete('/:id', ctrl.remove);

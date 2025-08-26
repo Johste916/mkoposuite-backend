@@ -53,6 +53,7 @@ const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
   'X-Requested-With',
   'X-User-Id',
+  // custom headers used by your frontend
   'x-tenant-id',
   'x-branch-id',
   'x-timezone',
@@ -66,9 +67,12 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
+  // Vary ensures caches don’t mix responses for different origins/headers
   res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
+
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
 
+  // Echo requested headers if present; otherwise send our defaults
   const requested = req.headers['access-control-request-headers'];
   res.setHeader(
     'Access-Control-Allow-Headers',
@@ -77,6 +81,7 @@ app.use((req, res, next) => {
       : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
 
+  // Let browser read filename on downloads
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -128,7 +133,11 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
 
 /* --------------------------------- Routes ---------------------------------- */
 const authRoutes          = safeLoadRoutes('./routes/authRoutes', makeDummyRouter({ ok: true }));
+
+// IMPORTANT: dedicate a small router for borrower search and mount it BEFORE /api/borrowers
+const borrowerSearchRoutes = safeLoadRoutes('./routes/borrowerSearchRoutes', makeDummyRouter([]));
 const borrowerRoutes      = safeLoadRoutes('./routes/borrowerRoutes', makeDummyRouter([]));
+
 const loanRoutes          = safeLoadRoutes('./routes/loanRoutes', makeDummyRouter([]));
 const dashboardRoutes     = safeLoadRoutes('./routes/dashboardRoutes', makeDummyRouter({}));
 const savingsRoutes       = safeLoadRoutes('./routes/savingsRoutes', makeDummyRouter([]));
@@ -258,12 +267,15 @@ app.use((req, res, next) => {
 });
 
 /* --------------------------------- Mounting -------------------------------- */
+// borrower search must come BEFORE /api/borrowers to avoid /:id catching "search"
+app.use('/api/borrowers/search', borrowerSearchRoutes);
+
 app.use('/api/login',          authRoutes);
 app.use('/api/borrowers',      borrowerRoutes);
 app.use('/api/loans',          loanRoutes);
 app.use('/api/dashboard',      dashboardRoutes);
 app.use('/api/savings',        savingsRoutes);                   // base savings (create + borrower summary)
-app.use('/api/savings/transactions', savingsTransactionsRoutes); // ✅ alias under /savings
+app.use('/api/savings/transactions', savingsTransactionsRoutes); // combined module under /savings
 app.use('/api/disbursements',  disbursementRoutes);
 app.use('/api/repayments',     repaymentRoutes);
 app.use('/api/reports',        reportRoutes);
@@ -287,7 +299,7 @@ app.use('/api/loan-products',  loanProductRoutes);
 /* New modules (real routes OR dummy routers) */
 app.use('/api/collateral',           collateralRoutes);
 app.use('/api/collections',          collectionSheetsRoutes);
-app.use('/api/savings-transactions', savingsTransactionsRoutes); // old mount kept for back-compat
+app.use('/api/savings-transactions', savingsTransactionsRoutes); // legacy path kept for back-compat
 app.use('/api/investors',            investorsRoutes);
 app.use('/api/esignatures',          esignaturesRoutes);
 app.use('/api/payroll',              payrollRoutes);
