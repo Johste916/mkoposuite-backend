@@ -4,10 +4,15 @@ const express = require('express');
 const router = express.Router();
 const { authenticateUser } = require('../middleware/authMiddleware');
 
-const billing = require('../controllers/account/billingController');
+const {
+  getBilling,
+  updateBilling,
+  changePassword,
+} = require('../controllers/account/accountSettingsController');
 
-// /api/account/settings/billing
-router.get('/settings/billing', authenticateUser, billing.getBilling);
-router.put('/settings/billing', authenticateUser, billing.updateBilling);
+router.get('/settings/billing', authenticateUser, getBilling);
+router.put('/settings/billing', authenticateUser, updateBilling);
+
+router.post('/change-password', authenticateUser, changePassword);
 
 module.exports = router;
