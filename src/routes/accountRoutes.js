@@ -3,16 +3,13 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateUser } = require('../middleware/authMiddleware');
+const account = require('../controllers/account/accountSettingsController');
 
-const {
-  getBilling,
-  updateBilling,
-  changePassword,
-} = require('../controllers/account/accountSettingsController');
+// Billing
+router.get('/billing', authenticateUser, account.getBilling);
+router.put('/billing', authenticateUser, account.updateBilling);
 
-router.get('/settings/billing', authenticateUser, getBilling);
-router.put('/settings/billing', authenticateUser, updateBilling);
-
-router.post('/change-password', authenticateUser, changePassword);
+// Change password
+router.post('/change-password', authenticateUser, account.changePassword);
 
 module.exports = router;
