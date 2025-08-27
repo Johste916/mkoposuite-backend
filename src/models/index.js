@@ -43,7 +43,7 @@ db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes),       'Ro
 db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes),   'UserRole');
 db.Permission = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
 
-/* ✅ SavingsTransaction must be present (fixes "Model not found") */
+/* SavingsTransaction (required) */
 db.SavingsTransaction = require('./savingstransaction')(sequelize, DataTypes);
 
 /* Optional modules */
@@ -70,6 +70,9 @@ db.Collateral = tryLoad(() => require('./collateral')(sequelize, DataTypes), 'Co
 
 /* Expense */
 db.Expense = tryLoad(() => require('./expense')(sequelize, DataTypes), 'Expense');
+
+/* NEW: Investor (optional — controllers fallback to Setting if absent) */
+db.Investor = tryLoad(() => require('./investor')(sequelize, DataTypes), 'Investor');
 
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {

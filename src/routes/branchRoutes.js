@@ -1,36 +1,16 @@
+'use strict';
+
 const express = require('express');
 const router = express.Router();
 const { authenticateUser } = require('../middleware/authMiddleware');
+const ctrl = require('../controllers/branchController');
 
-let branchController;
-try {
-  branchController = require('../controllers/branchController');
-} catch {}
+router.use(authenticateUser);
 
-/** Fallback: simple list using model if controller missing */
-const { Branch } = require('../models');
-
-router.get('/', authenticateUser, async (req, res) => {
-  // Prefer controller if present
-  if (branchController?.getBranches) return branchController.getBranches(req, res);
-  try {
-    const rows = await (Branch?.findAll?.({ attributes: ['id', 'name', 'code'], order: [['name', 'ASC']] }) || []);
-    res.json(rows);
-  } catch (e) {
-    console.error('branches fallback error:', e);
-    res.status(500).json({ error: 'Failed to load branches' });
-  }
-});
-
-router.post('/', authenticateUser, async (req, res) => {
-  if (branchController?.createBranch) return branchController.createBranch(req, res);
-  if (!Branch?.create) return res.status(501).json({ error: 'Branch controller not available' });
-  try {
-    const created = await Branch.create({ name: req.body?.name, code: req.body?.code || null, location: req.body?.location || null });
-    res.status(201).json(created);
-  } catch (e) {
-    res.status(400).json({ error: 'Failed to create branch' });
-  }
-});
+router.get('/', ctrl.list);
+router.post('/', ctrl.create);
+router.get('/:id', ctrl.get);
+router.put('/:id', ctrl.update);
+router.delete('/:id', ctrl.remove);
 
 module.exports = router;
