@@ -19,7 +19,7 @@ if (helmet) {
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 }
 if (compression) app.use(compression());
-if (process.env.NODE_ENV !== 'production' && morgan) app.use(morgan('dev')));
+if (process.env.NODE_ENV !== 'production' && morgan) app.use(morgan('dev'));
 
 /* ----------------------------------- CORS ---------------------------------- */
 const defaultOrigins = [
