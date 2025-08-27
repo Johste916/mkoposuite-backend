@@ -2,14 +2,17 @@
 
 const express = require('express');
 const router = express.Router();
-const { authenticateUser } = require('../middleware/authMiddleware');
 
-const twoFA = require('../controllers/auth/twoFactorController');
+const { login, getTwoFAStatus } = require('../controllers/authController');
 
-// 2FA status/setup/verify/disable
-router.get('/2fa/status', authenticateUser, twoFA.status);
-router.post('/2fa/setup', authenticateUser, twoFA.setup);
-router.post('/2fa/verify', authenticateUser, twoFA.verify);
-router.post('/2fa/disable', authenticateUser, twoFA.disable);
+// Support both mounts:
+//
+// app.use('/api/login', authRoutes) -> POST /api/login
+// app.use('/api/auth',  authRoutes) -> POST /api/auth/login
+router.post('/', login);
+router.post('/login', login);
+
+// 2FA status used by the UI
+router.get('/2fa/status', getTwoFAStatus);
 
 module.exports = router;

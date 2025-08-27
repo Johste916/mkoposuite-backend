@@ -78,6 +78,7 @@ app.use((req, res, next) => {
       : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
 
+  // Let browser read filename on downloads
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -128,32 +129,41 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
 }
 
 /* --------------------------------- Routes ---------------------------------- */
-// Auth (NOTE: mount at /api/auth for 2FA + keep legacy /api/login)
-const authRoutes = safeLoadRoutes('./routes/authRoutes', makeDummyRouter({ ok: true }));
+/** 🚫 DO NOT use safeLoadRoutes for auth — fail fast if broken */
+let authRoutes;
+try {
+  authRoutes = require('./routes/authRoutes');
+} catch (e) {
+  console.error('FATAL: Failed to load ./routes/authRoutes. Login will not work.', e);
+  throw e;
+}
 
-// Dedicated borrower search must come BEFORE /api/borrowers
-const borrowerSearchRoutes = safeLoadRoutes('./routes/borrowerSearchRoutes', makeDummyRouter([]));
-const borrowerRoutes       = safeLoadRoutes('./routes/borrowerRoutes', makeDummyRouter([]));
+/** Account can remain optional */
+const accountRoutes         = safeLoadRoutes('./routes/accountRoutes', makeDummyRouter({ settings: {} }));
 
-const loanRoutes           = safeLoadRoutes('./routes/loanRoutes', makeDummyRouter([]));
-const dashboardRoutes      = safeLoadRoutes('./routes/dashboardRoutes', makeDummyRouter({}));
-const savingsRoutes        = safeLoadRoutes('./routes/savingsRoutes', makeDummyRouter([]));
-const disbursementRoutes   = safeLoadRoutes('./routes/loanDisbursementRoutes', makeDummyRouter([]));
-const repaymentRoutes      = safeLoadRoutes('./routes/repaymentRoutes', makeDummyRouter([]));
-const reportRoutes         = safeLoadRoutes('./routes/reportRoutes', makeDummyRouter({}));
-const settingRoutes        = safeLoadRoutes('./routes/settingRoutes', makeDummyRouter({}));
-const userRoutes           = safeLoadRoutes('./routes/userRoutes', makeDummyRouter([]));
-const roleRoutes           = safeLoadRoutes('./routes/roleRoutes', makeDummyRouter([]));
-const branchRoutes         = safeLoadRoutes('./routes/branchRoutes', makeDummyRouter([]));
-const userRoleRoutes       = safeLoadRoutes('./routes/userRoleRoutes', makeDummyRouter([]));
-const userBranchRoutes     = safeLoadRoutes('./routes/userBranchRoutes', makeDummyRouter([]));
-const loanProductRoutes    = safeLoadRoutes('./routes/loanProductRoutes', makeDummyRouter([]));
+// IMPORTANT: dedicate a small router for borrower search and mount it BEFORE /api/borrowers
+const borrowerSearchRoutes  = safeLoadRoutes('./routes/borrowerSearchRoutes', makeDummyRouter([]));
+const borrowerRoutes        = safeLoadRoutes('./routes/borrowerRoutes', makeDummyRouter([]));
+
+const loanRoutes            = safeLoadRoutes('./routes/loanRoutes', makeDummyRouter([]));
+const dashboardRoutes       = safeLoadRoutes('./routes/dashboardRoutes', makeDummyRouter({}));
+const savingsRoutes         = safeLoadRoutes('./routes/savingsRoutes', makeDummyRouter([]));
+const disbursementRoutes    = safeLoadRoutes('./routes/loanDisbursementRoutes', makeDummyRouter([]));
+const repaymentRoutes       = safeLoadRoutes('./routes/repaymentRoutes', makeDummyRouter([]));
+const reportRoutes          = safeLoadRoutes('./routes/reportRoutes', makeDummyRouter({}));
+const settingRoutes         = safeLoadRoutes('./routes/settingRoutes', makeDummyRouter({}));
+const userRoutes            = safeLoadRoutes('./routes/userRoutes', makeDummyRouter([]));
+const roleRoutes            = safeLoadRoutes('./routes/roleRoutes', makeDummyRouter([]));
+const branchRoutes          = safeLoadRoutes('./routes/branchRoutes', makeDummyRouter([]));
+const userRoleRoutes        = safeLoadRoutes('./routes/userRoleRoutes', makeDummyRouter([]));
+const userBranchRoutes      = safeLoadRoutes('./routes/userBranchRoutes', makeDummyRouter([]));
+const loanProductRoutes     = safeLoadRoutes('./routes/loanProductRoutes', makeDummyRouter([]));
 
 /* Admin modules */
-const adminStaffRoutes     = safeLoadRoutes('./routes/staffRoutes', makeDummyRouter([]));
-const permissionRoutes     = safeLoadRoutes('./routes/permissionRoutes', makeDummyRouter([]));
-const adminAuditRoutes     = safeLoadRoutes('./routes/admin/auditRoutes', makeDummyRouter([]));
-const adminReportSubRoutes = safeLoadRoutes('./routes/admin/reportSubscriptionRoutes', makeDummyRouter([]));
+const adminStaffRoutes      = safeLoadRoutes('./routes/staffRoutes', makeDummyRouter([]));
+const permissionRoutes      = safeLoadRoutes('./routes/permissionRoutes', makeDummyRouter([]));
+const adminAuditRoutes      = safeLoadRoutes('./routes/admin/auditRoutes', makeDummyRouter([]));
+const adminReportSubRoutes  = safeLoadRoutes('./routes/admin/reportSubscriptionRoutes', makeDummyRouter([]));
 
 /* New modules — try to load real files, else mount dummy */
 const collateralRoutes = safeLoadRoutes(
@@ -230,9 +240,6 @@ const accountingRoutes = safeLoadRoutes(
   })
 );
 
-/* ---------- New settings/account/auth routers (real or dummy) -------------- */
-const accountRoutes = safeLoadRoutes('./routes/accountRoutes', makeDummyRouter({ settings: {} }));
-
 /* -------------------------- Automatic audit hooks -------------------------- */
 let AuditLog;
 try { ({ AuditLog } = require('./models')); } catch {
@@ -267,12 +274,14 @@ app.use((req, res, next) => {
 });
 
 /* --------------------------------- Mounting -------------------------------- */
-// borrower search must come BEFORE /api/borrowers
+// borrower search must come BEFORE /api/borrowers to avoid /:id catching "search"
 app.use('/api/borrowers/search', borrowerSearchRoutes);
 
-// ✅ Correct mounts for auth + account (before 404)
-app.use('/api/auth', authRoutes);        // 2FA endpoints live here (…/2fa/status, etc.)
-app.use('/api/login', authRoutes);       // legacy/back-compat if your router also exposes login
+// ✅ Auth FIRST (real router; enables POST /api/login and GET /api/auth/2fa/status)
+app.use('/api/auth',   authRoutes);   // 2FA endpoints live here (e.g., /api/auth/2fa/status)
+app.use('/api/login',  authRoutes);   // legacy/back-compat; router handles POST /
+
+app.use('/api/account', accountRoutes);
 
 app.use('/api/borrowers',      borrowerRoutes);
 app.use('/api/loans',          loanRoutes);
