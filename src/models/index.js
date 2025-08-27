@@ -205,6 +205,8 @@ if (db.ActivityAssignment && db.User) {
   db.ActivityAssignment.belongsTo(db.User, { foreignKey: 'assignerId', as: 'assigner' });
 }
 
+db.Investor = tryLoad(() => require('./investor')(sequelize, DataTypes), 'Investor');
+
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;
 module.exports = db;

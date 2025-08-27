@@ -1,27 +1,21 @@
 'use strict';
-
 module.exports = (sequelize, DataTypes) => {
   const Investor = sequelize.define('Investor', {
-    id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
-    tenantId: { type: DataTypes.UUID, allowNull: true, index: true },
-    name: { type: DataTypes.STRING(150), allowNull: false },
-    phone: { type: DataTypes.STRING(40), allowNull: true },
-    email: { type: DataTypes.STRING(120), allowNull: true, validate: { isEmail: true } },
-    address: { type: DataTypes.STRING(250), allowNull: true },
-    notes: { type: DataTypes.TEXT, allowNull: true },
-    status: { type: DataTypes.ENUM('ACTIVE', 'INACTIVE'), allowNull: false, defaultValue: 'ACTIVE' },
-    productsCount: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    id:         { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+    name:       { type: DataTypes.STRING, allowNull: false },
+    email:      { type: DataTypes.STRING },
+    phone:      { type: DataTypes.STRING },
+    address:    { type: DataTypes.STRING },
+    photoUrl:   { type: DataTypes.STRING },
+    shares:     { type: DataTypes.DECIMAL(18,2), defaultValue: 0 },
+    contributions: { type: DataTypes.DECIMAL(18,2), defaultValue: 0 },
+    positions:  { type: DataTypes.JSONB, defaultValue: [] }, // array of strings
+    bio:        { type: DataTypes.TEXT },
+    notes:      { type: DataTypes.TEXT },
+    status:     { type: DataTypes.ENUM('ACTIVE','INACTIVE'), defaultValue: 'ACTIVE' },
   }, {
     tableName: 'investors',
-    paranoid: true,
-    timestamps: true,
-    indexes: [
-      { fields: ['tenantId'] },
-      { fields: ['name'] },
-      { fields: ['phone'] },
-      { fields: ['email'] },
-    ],
+    underscored: true,
   });
-
   return Investor;
 };

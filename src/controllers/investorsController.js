@@ -2,8 +2,7 @@
 
 const { v4: uuidv4 } = require('uuid');
 
-let Investor, sequelize, Op;
-let Setting;
+let Investor, sequelize, Op, Setting;
 try {
   ({ Investor, Setting, sequelize, Sequelize: { Op } } = require('../models'));
 } catch (e) {
@@ -24,6 +23,17 @@ const pick = (obj = {}, keys = []) => {
   return out;
 };
 
+const hasAttr = (model, attr) => !!(model && model.rawAttributes && model.rawAttributes[attr]);
+const n = (v, d = 0) => (v === null || v === undefined || v === '' ? d : Number(v));
+const toPositions = (raw) => {
+  if (Array.isArray(raw)) return raw.filter(Boolean).map(String);
+  if (!raw) return [];
+  return String(raw)
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+};
+
 function normalizeQuery(q = {}) {
   const page = Math.max(parseInt(q.page || '1', 10), 1);
   const pageSizeRaw = q.pageSize || q.limit || '25'; // accept both
@@ -37,13 +47,14 @@ function normalizeQuery(q = {}) {
 async function dbList(req, res, tenantId) {
   const { page, pageSize, search, status } = normalizeQuery(req.query);
   const where = {};
-  if (tenantId && Investor?.rawAttributes?.tenantId) where.tenantId = tenantId;
-  if (status && Investor?.rawAttributes?.status) where.status = status;
+  if (tenantId && hasAttr(Investor, 'tenantId')) where.tenantId = tenantId;
+  if (status && hasAttr(Investor, 'status')) where.status = status;
   if (search && Op) {
+    const like = Op.iLike || Op.like;
     where[Op.or] = [
-      { name: { [Op.iLike || Op.like]: `%${search}%` } },
-      { phone: { [Op.iLike || Op.like]: `%${search}%` } },
-      { email: { [Op.iLike || Op.like]: `%${search}%` } },
+      { name:  { [like]: `%${search}%` } },
+      { phone: { [like]: `%${search}%` } },
+      { email: { [like]: `%${search}%` } },
     ];
   }
 
@@ -54,7 +65,12 @@ async function dbList(req, res, tenantId) {
     limit: pageSize,
   });
 
+  // Return BOTH shapes to be compatible with any hook variant
   return res.json({
+    rows,
+    total: count,
+    page,
+    limit: pageSize,
     data: rows,
     meta: { page, pageSize, total: count, pages: Math.ceil(count / pageSize) },
   });
@@ -62,7 +78,7 @@ async function dbList(req, res, tenantId) {
 
 async function dbGet(req, res, tenantId) {
   const where = { id: req.params.id };
-  if (tenantId && Investor?.rawAttributes?.tenantId) where.tenantId = tenantId;
+  if (tenantId && hasAttr(Investor, 'tenantId')) where.tenantId = tenantId;
 
   const row = await Investor.findOne({ where });
   if (!row) return res.status(404).json({ message: 'Investor not found' });
@@ -70,22 +86,25 @@ async function dbGet(req, res, tenantId) {
 }
 
 async function dbCreate(req, res, tenantId) {
-  const body = pick(req.body, [
-    'name',
-    'phone',
-    'email',
-    'address',
-    'notes',
-    'status',
-    'productsCount',
-  ]);
+  // Dynamically allow only attributes that exist on the model
+  const allowed = [
+    'name','phone','email','address','notes','status',
+    'shares','contributions','positions','bio','photoUrl'
+  ].filter(k => hasAttr(Investor, k));
+
+  // Parse/normalize incoming
+  const body = pick(req.body, allowed);
   if (!body.name) return res.status(400).json({ message: 'name is required' });
   if (!body.phone && !body.email) return res.status(400).json({ message: 'phone or email is required' });
-  if (!body.status && Investor?.rawAttributes?.status) body.status = 'ACTIVE';
-  if (tenantId && Investor?.rawAttributes?.tenantId) body.tenantId = tenantId;
-  if (typeof body.productsCount === 'undefined' && Investor?.rawAttributes?.productsCount) {
-    body.productsCount = 0;
+
+  if (hasAttr(Investor, 'status') && !body.status) body.status = 'ACTIVE';
+  if (hasAttr(Investor, 'shares')) body.shares = n(body.shares, 0);
+  if (hasAttr(Investor, 'contributions')) body.contributions = n(body.contributions, 0);
+  if (hasAttr(Investor, 'positions')) body.positions = toPositions(body.positions);
+  if (req.file && hasAttr(Investor, 'photoUrl')) {
+    body.photoUrl = `/uploads/investors/${req.file.filename}`;
   }
+  if (tenantId && hasAttr(Investor, 'tenantId')) body.tenantId = tenantId;
 
   const created = await Investor.create(body);
   return res.status(201).json(created);
@@ -93,27 +112,29 @@ async function dbCreate(req, res, tenantId) {
 
 async function dbUpdate(req, res, tenantId) {
   const where = { id: req.params.id };
-  if (tenantId && Investor?.rawAttributes?.tenantId) where.tenantId = tenantId;
+  if (tenantId && hasAttr(Investor, 'tenantId')) where.tenantId = tenantId;
 
   const row = await Investor.findOne({ where });
   if (!row) return res.status(404).json({ message: 'Investor not found' });
 
-  const body = pick(req.body, [
-    'name',
-    'phone',
-    'email',
-    'address',
-    'notes',
-    'status',
-    'productsCount',
-  ]);
-  await row.update(body);
+  const allowed = [
+    'name','phone','email','address','notes','status',
+    'shares','contributions','positions','bio','photoUrl'
+  ].filter(k => hasAttr(Investor, k));
+
+  const patch = pick(req.body, allowed);
+  if (hasAttr(Investor, 'shares') && patch.shares !== undefined) patch.shares = n(patch.shares, 0);
+  if (hasAttr(Investor, 'contributions') && patch.contributions !== undefined) patch.contributions = n(patch.contributions, 0);
+  if (hasAttr(Investor, 'positions') && patch.positions !== undefined) patch.positions = toPositions(patch.positions);
+  if (req.file && hasAttr(Investor, 'photoUrl')) patch.photoUrl = `/uploads/investors/${req.file.filename}`;
+
+  await row.update(patch);
   return res.json(row);
 }
 
 async function dbDelete(req, res, tenantId) {
   const where = { id: req.params.id };
-  if (tenantId && Investor?.rawAttributes?.tenantId) where.tenantId = tenantId;
+  if (tenantId && hasAttr(Investor, 'tenantId')) where.tenantId = tenantId;
 
   const row = await Investor.findOne({ where });
   if (!row) return res.status(404).json({ message: 'Investor not found' });
@@ -141,7 +162,14 @@ async function kvList(req, res, tenantId) {
   const start = (page - 1) * pageSize;
   const data = filtered.slice(start, start + pageSize);
 
-  return res.json({ data, meta: { page, pageSize, total, pages: Math.ceil(total / pageSize) } });
+  return res.json({
+    rows: data,
+    total,
+    page,
+    limit: pageSize,
+    data,
+    meta: { page, pageSize, total, pages: Math.ceil(total / pageSize) }
+  });
 }
 
 async function kvGet(req, res, tenantId) {
@@ -154,13 +182,8 @@ async function kvGet(req, res, tenantId) {
 
 async function kvCreate(req, res, tenantId, userId) {
   const body = pick(req.body, [
-    'name',
-    'phone',
-    'email',
-    'address',
-    'notes',
-    'status',
-    'productsCount',
+    'name','phone','email','address','notes','status',
+    'shares','contributions','positions','bio','photoUrl'
   ]);
   if (!body.name) return res.status(400).json({ message: 'name is required' });
   if (!body.phone && !body.email) return res.status(400).json({ message: 'phone or email is required' });
@@ -168,11 +191,16 @@ async function kvCreate(req, res, tenantId, userId) {
   const key = investorsKey(tenantId);
   const all = (await Setting.get(key, [])) || [];
   const now = new Date().toISOString();
+
   const row = {
     id: uuidv4(),
     ...body,
     status: body.status || 'ACTIVE',
-    productsCount: typeof body.productsCount === 'number' ? body.productsCount : 0,
+    shares: n(body.shares, 0),
+    contributions: n(body.contributions, 0),
+    positions: toPositions(body.positions),
+    // photoUrl via upload:
+    photoUrl: req.file ? `/uploads/investors/${req.file.filename}` : (body.photoUrl || null),
     createdAt: now,
     updatedAt: now,
     createdBy: userId || null,
@@ -189,18 +217,17 @@ async function kvUpdate(req, res, tenantId, userId) {
   if (idx === -1) return res.status(404).json({ message: 'Investor not found' });
 
   const patch = pick(req.body, [
-    'name',
-    'phone',
-    'email',
-    'address',
-    'notes',
-    'status',
-    'productsCount',
+    'name','phone','email','address','notes','status',
+    'shares','contributions','positions','bio','photoUrl'
   ]);
 
   const updated = {
     ...all[idx],
     ...patch,
+    shares: patch.shares !== undefined ? n(patch.shares, 0) : all[idx].shares,
+    contributions: patch.contributions !== undefined ? n(patch.contributions, 0) : all[idx].contributions,
+    positions: patch.positions !== undefined ? toPositions(patch.positions) : all[idx].positions,
+    photoUrl: (req.file ? `/uploads/investors/${req.file.filename}` : patch.photoUrl) ?? all[idx].photoUrl ?? null,
     updatedAt: new Date().toISOString(),
     updatedBy: userId || null,
   };

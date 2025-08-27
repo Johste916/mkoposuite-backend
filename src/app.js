@@ -19,7 +19,7 @@ if (helmet) {
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 }
 if (compression) app.use(compression());
-if (process.env.NODE_ENV !== 'production' && morgan) app.use(morgan('dev'));
+if (process.env.NODE_ENV !== 'production' && morgan) app.use(morgan('dev')));
 
 /* ----------------------------------- CORS ---------------------------------- */
 const defaultOrigins = [
@@ -187,13 +187,16 @@ const savingsTransactionsRoutes = safeLoadRoutes(
     { id: 2, borrower: 'Jane Smith', type: 'withdrawal', amount: 80, date: '2025-08-03' },
   ])
 );
-const investorsRoutes = safeLoadRoutes(
-  './routes/investorsRoutes',
+
+/* 🔧 Load YOUR singular investor route file */
+const investorRoutes = safeLoadRoutes(
+  './routes/investorRoute',
   makeDummyRouter([
-    { id: 1, name: 'Alpha Capital', phone: '255700000001', products: 2 },
-    { id: 2, name: 'Beta Partners', phone: '255700000002', products: 1 },
+    { id: 1, name: 'Alpha Capital', phone: '255700000001', shares: 10000, totalContribution: 45000000 },
+    { id: 2, name: 'Beta Partners', phone: '255700000002', shares: 5500,  totalContribution: 22000000 },
   ])
 );
+
 const esignaturesRoutes = safeLoadRoutes(
   './routes/esignaturesRoutes',
   makeDummyRouter([
@@ -312,7 +315,7 @@ app.use('/api/loan-products',  loanProductRoutes);
 app.use('/api/collateral',           collateralRoutes);
 app.use('/api/collections',          collectionSheetsRoutes);
 app.use('/api/savings-transactions', savingsTransactionsRoutes); // legacy path kept for back-compat
-app.use('/api/investors',            investorsRoutes);
+app.use('/api/investors',            investorRoutes);            // ✅ singular file wired here
 app.use('/api/esignatures',          esignaturesRoutes);
 app.use('/api/payroll',              payrollRoutes);
 app.use('/api/expenses',             expensesRoutes);
