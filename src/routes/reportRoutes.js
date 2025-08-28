@@ -12,6 +12,9 @@ router.get('/trends', authenticateUser, reportController.getTrends);
 // 🧮 Loan Summary with filters (branch/officer/timeRange)
 router.get('/loan-summary', authenticateUser, reportController.getLoanSummary);
 
+// 🔎 Filters for reports (branches + loan officers) — raw SQL to avoid paranoid joins
+router.get('/filters', authenticateUser, reportController.getFilters);
+
 // 📄 Export to CSV (supports same filters)
 router.get('/export/csv', authenticateUser, reportController.exportCSV);
 // alias for back-compat if UI calls /export-csv

@@ -1,30 +1,99 @@
 // src/controllers/reportController.js
-const { Loan, LoanRepayment, SavingsTransaction, Borrower } = require('../models');
-const { Op } = require('sequelize');
+const models = require('../models');
+const { Op, fn, col, where: sqlWhere, literal } = require('sequelize');
 const { Parser } = require('json2csv');
 const PDFDocument = require('pdfkit');
 
-/** ---------- utils ---------- */
+/* ----------------------------- models & helpers ---------------------------- */
+const Loan = models.Loan;
+const Borrower = models.Borrower;
+// Savings model naming tends to be stable; keep a couple fallbacks.
+const SavingsTx =
+  models.SavingsTransaction ||
+  models.SavingTransaction ||
+  models.SavingsAccountTransaction ||
+  null;
+
+// Repayments can be named differently across codebases
+const Repayment =
+  models.LoanRepayment ||
+  models.LoanPayment ||
+  models.Repayment ||
+  models.LoanInstallment ||
+  models.Installment ||
+  null;
+
+const sequelize = models?.sequelize;
+
+/** Check if a model has a column */
 const hasAttr = (Model, key) => !!Model?.rawAttributes && !!Model.rawAttributes[key];
 
+/** Pick the first attribute that exists on a model */
+const pickAttr = (Model, prefs, fallback = null) => {
+  if (!Model?.rawAttributes) return fallback;
+  for (const k of prefs) if (Model.rawAttributes[k]) return k;
+  return fallback;
+};
+
+/** Resolve common field names for each model */
+const FIELDS = (() => {
+  const loanAmount = pickAttr(Loan, [
+    'amount', 'principal', 'principalAmount', 'loanAmount', 'approvedAmount', 'disbursedAmount'
+  ], 'amount');
+
+  const loanCreatedAt = hasAttr(Loan, 'createdAt') ? 'createdAt'
+                        : hasAttr(Loan, 'created_at') ? 'created_at'
+                        : 'createdAt';
+
+  const repayAmount = Repayment ? pickAttr(Repayment, [
+    'total', 'amount', 'amountPaid', 'paidAmount', 'paymentAmount', 'installmentAmount'
+  ], null) : null;
+
+  const repayBalance = Repayment ? pickAttr(Repayment, [
+    'balance', 'remaining', 'outstanding', 'amountDue', 'remainingBalance', 'principalOutstanding'
+  ], null) : null;
+
+  const repayDueDate = Repayment ? pickAttr(Repayment, [
+    'dueDate', 'due_date', 'due_on', 'installmentDueDate'
+  ], null) : null;
+
+  const repayCreatedAt = Repayment
+    ? (hasAttr(Repayment, 'createdAt') ? 'createdAt' : (hasAttr(Repayment, 'created_at') ? 'created_at' : 'createdAt'))
+    : 'createdAt';
+
+  const repayStatus = Repayment ? (hasAttr(Repayment, 'status') ? 'status' : (hasAttr(Repayment, 'isPaid') ? 'isPaid' : null)) : null;
+
+  const repayInstallmentNo = Repayment ? pickAttr(Repayment, [
+    'installmentNumber', 'installment_no', 'installment', 'sequence', 'number'
+  ], null) : null;
+
+  const repayLoanId = Repayment
+    ? (hasAttr(Repayment, 'loanId') ? 'loanId' : (hasAttr(Repayment, 'loan_id') ? 'loan_id' : 'loanId'))
+    : 'loanId';
+
+  const savingsAmount = SavingsTx ? pickAttr(SavingsTx, ['amount', 'value', 'txnAmount'], 'amount') : 'amount';
+
+  return {
+    loanAmount, loanCreatedAt,
+    repayAmount, repayBalance, repayDueDate, repayCreatedAt, repayStatus, repayInstallmentNo, repayLoanId,
+    savingsAmount
+  };
+})();
+
+/** Build a date range from UI's timeRange */
 function parseRange(timeRange) {
   const now = new Date();
-  const start = new Date(0); // default: all time
-  let end = new Date(now);
-
-  if (!timeRange) return { start: null, end: null };
-
   const y = now.getFullYear();
-  const m = now.getMonth(); // 0..11
+  const m = now.getMonth();
 
-  switch (timeRange) {
+  switch ((timeRange || '').trim()) {
     case 'today': {
       const s = new Date(y, m, now.getDate(), 0, 0, 0, 0);
       const e = new Date(y, m, now.getDate(), 23, 59, 59, 999);
       return { start: s, end: e };
     }
     case 'week': {
-      const day = now.getDay(); // 0 Sun..6 Sat
+      const day = now.getDay();
       const diffToMon = (day + 6) % 7;
       const s = new Date(y, m, now.getDate() - diffToMon, 0, 0, 0, 0);
       const e = new Date(y, m, now.getDate() + (6 - diffToMon), 23, 59, 59, 999);
@@ -57,36 +126,74 @@ function parseRange(timeRange) {
   }
 }
 
-function buildDateWhere(field, range) {
-  if (!range?.start || !range?.end) return {};
-  return { [field]: { [Op.between]: [range.start, range.end] } };
-}
-
-function toNumber(n) {
+const toNumber = (n) => {
   const v = Number(n);
   return Number.isFinite(v) ? v : 0;
-}
+};
 
-/** ---------- Summary (lightweight) ---------- */
+const paidFilter = () => {
+  if (!Repayment || !FIELDS.repayStatus) return {};
+  if (FIELDS.repayStatus === 'isPaid') return { [FIELDS.repayStatus]: true };
+  // assume string status column
+  return { [FIELDS.repayStatus]: 'paid' };
+};
+
+const notPaidFilter = () => {
+  if (!Repayment || !FIELDS.repayStatus) return {};
+  if (FIELDS.repayStatus === 'isPaid') return { [FIELDS.repayStatus]: false };
+  return { [FIELDS.repayStatus]: { [Op.ne]: 'paid' } };
+};
+
+/* --------------------------------- Filters --------------------------------- */
+// Lightweight lists for Reports filters using raw SQL (avoids paranoid joins)
+exports.getFilters = async (_req, res) => {
+  try {
+    if (!sequelize) return res.json({ branches: [], officers: [] });
+
+    const [branches] = await sequelize.query('SELECT id, name FROM "public"."branches" ORDER BY name ASC;');
+    const [officers] = await sequelize.query(
+      'SELECT id, COALESCE(name, email) AS label FROM "public"."Users" WHERE role = :role ORDER BY label ASC;',
+      { replacements: { role: 'loan_officer' } }
+    );
+
+    res.json({
+      branches: Array.isArray(branches) ? branches : [],
+      officers: Array.isArray(officers) ? officers.map(o => ({ id: o.id, name: o.label })) : [],
+    });
+  } catch (err) {
+    console.error('filters error:', err);
+    res.json({ branches: [], officers: [] });
+  }
+};
+
+/* --------------------------------- Summary --------------------------------- */
 exports.getSummary = async (_req, res) => {
   try {
     const [loanCount, totalLoanAmount] = await Promise.all([
-      Loan.count(),
-      Loan.sum('amount'),
+      Loan?.count?.() ?? 0,
+      Loan?.sum?.(FIELDS.loanAmount) ?? 0,
     ]);
 
-    const [totalRepayments, totalSavings, defaulterCount] = await Promise.all([
-      // "paid" might be your settled status; adjust if your schema differs
-      LoanRepayment.sum('total', { where: { status: 'paid' } }),
-      SavingsTransaction.sum('amount'),
-      // count installments overdue (dueDate < now && not paid)
-      LoanRepayment.count({
+    // repayments (paid only) — if we can detect a usable amount column
+    const totalRepayments = (Repayment && FIELDS.repayAmount)
+      ? (await Repayment.sum(FIELDS.repayAmount, { where: paidFilter() })) || 0
+      : 0;
+
+    // savings total
+    const totalSavings = (SavingsTx && SavingsTx.sum)
+      ? (await SavingsTx.sum(FIELDS.savingsAmount)) || 0
+      : 0;
+
+    // defaulter count (overdue & not paid)
+    let defaulterCount = 0;
+    if (Repayment && FIELDS.repayDueDate && Repayment.count) {
+      defaulterCount = await Repayment.count({
         where: {
-          status: { [Op.ne]: 'paid' },
-          dueDate: { [Op.lt]: new Date() },
+          ...notPaidFilter(),
+          [FIELDS.repayDueDate]: { [Op.lt]: new Date() },
         },
-      }),
-    ]);
+      });
+    }
 
     res.json({
       loanCount: loanCount || 0,
@@ -101,7 +208,7 @@ exports.getSummary = async (_req, res) => {
   }
 };
 
-/** ---------- Monthly trends (amount per month) ---------- */
+/* ---------------------------------- Trends --------------------------------- */
 exports.getTrends = async (req, res) => {
   try {
     const year = Number(req.query.year) || new Date().getFullYear();
@@ -115,18 +222,28 @@ exports.getTrends = async (req, res) => {
     }));
 
     const [loans, repayments] = await Promise.all([
-      Loan.findAll({ where: { createdAt: { [Op.between]: [start, end] } }, attributes: ['amount', 'createdAt'] }),
-      LoanRepayment.findAll({ where: { createdAt: { [Op.between]: [start, end] } }, attributes: ['total', 'createdAt'] }),
+      Loan.findAll({
+        where: { [FIELDS.loanCreatedAt]: { [Op.between]: [start, end] } },
+        attributes: [FIELDS.loanAmount, FIELDS.loanCreatedAt],
+        raw: true,
+      }),
+      Repayment && FIELDS.repayAmount
+        ? Repayment.findAll({
+            where: { [FIELDS.repayCreatedAt]: { [Op.between]: [start, end] } },
+            attributes: [FIELDS.repayAmount, FIELDS.repayCreatedAt],
+            raw: true,
+          })
+        : Promise.resolve([]),
     ]);
 
     loans.forEach(l => {
-      const m = new Date(l.createdAt).getMonth(); // 0..11
-      monthly[m].loans += toNumber(l.amount);
+      const m = new Date(l[FIELDS.loanCreatedAt]).getMonth();
+      monthly[m].loans += toNumber(l[FIELDS.loanAmount]);
     });
 
-    repayments.forEach(r => {
-      const m = new Date(r.createdAt).getMonth(); // 0..11
-      monthly[m].repayments += toNumber(r.total);
+    (repayments || []).forEach(r => {
+      const m = new Date(r[FIELDS.repayCreatedAt]).getMonth();
+      monthly[m].repayments += toNumber(r[FIELDS.repayAmount]);
     });
 
     res.json(monthly);
@@ -136,112 +253,86 @@ exports.getTrends = async (req, res) => {
   }
 };
 
-/** ---------- Loan Summary with filters ---------- */
+/* ------------------------------- Loan Summary ------------------------------ */
 exports.getLoanSummary = async (req, res) => {
   try {
     const { branchId, officerId, timeRange } = req.query || {};
     const range = parseRange(String(timeRange || '').trim());
 
-    // Build includes/where dynamically based on available attributes
+    // WHEREs
     const loanWhere = {};
-    const borrowerWhere = {};
     const repaymentWhere = {};
+    const borrowerWhere = {};
 
     if (range.start && range.end) {
-      Object.assign(loanWhere, buildDateWhere('createdAt', range));
-      Object.assign(repaymentWhere, buildDateWhere('createdAt', range));
+      loanWhere[FIELDS.loanCreatedAt] = { [Op.between]: [range.start, range.end] };
+      repaymentWhere[FIELDS.repayCreatedAt] = { [Op.between]: [range.start, range.end] };
     }
 
+    // branch filter (prefer Loan.branchId, fallback Borrower.branchId)
     if (branchId) {
-      // Prefer Loan.branchId if exists, else Borrower.branchId
       if (hasAttr(Loan, 'branchId')) loanWhere.branchId = branchId;
       else if (hasAttr(Borrower, 'branchId')) borrowerWhere.branchId = branchId;
     }
 
+    // officer filter (try common fields on Loan)
     if (officerId) {
-      // Try common officer fields
       const key = ['loanOfficerId', 'officerId', 'assignedOfficerId', 'userId']
         .find(k => hasAttr(Loan, k));
       if (key) loanWhere[key] = officerId;
     }
 
-    const includeLoanBorrower = {
-      model: Loan,
-      attributes: ['id', 'amount', 'createdAt'],
-      where: loanWhere,
-      include: []
-    };
-
-    if (Object.keys(borrowerWhere).length) {
-      includeLoanBorrower.include.push({
-        model: Borrower,
-        attributes: ['id', 'name'],
-        where: borrowerWhere,
-        required: true,
-      });
-    } else {
-      includeLoanBorrower.include.push({
-        model: Borrower,
-        attributes: ['id', 'name'],
-        required: false,
-      });
-    }
-
-    // Queries
-    const [
-      loansInScope,
-      repaymentsInScope,
-      overdueInstallments,
-      overdueAmount
-    ] = await Promise.all([
-      Loan.findAll({ where: loanWhere, attributes: ['id', 'amount', 'createdAt'] }),
-      LoanRepayment.findAll({
-        where: repaymentWhere,
-        attributes: ['id', 'loanId', 'total', 'balance', 'status', 'dueDate', 'createdAt'],
-        include: [includeLoanBorrower],
-      }),
-      LoanRepayment.count({
-        where: {
-          status: { [Op.ne]: 'paid' },
-          dueDate: { [Op.lt]: new Date() },
-        },
-        include: [includeLoanBorrower],
-      }),
-      LoanRepayment.sum('balance', {
-        where: {
-          status: { [Op.ne]: 'paid' },
-          dueDate: { [Op.lt]: new Date() },
-        },
-        include: [includeLoanBorrower],
-      })
+    // sums/counts
+    const [loansInScope, totalRepayments] = await Promise.all([
+      Loan.findAll({ where: loanWhere, attributes: ['id', FIELDS.loanAmount], raw: true }),
+      (Repayment && FIELDS.repayAmount)
+        ? Repayment.sum(FIELDS.repayAmount, { where: repaymentWhere })
+        : 0
     ]);
 
-    // Basic metrics
-    const totalLoansCount   = loansInScope.length;
-    const totalDisbursed    = loansInScope.reduce((acc, l) => acc + toNumber(l.amount), 0);
-    const totalRepayments   = repaymentsInScope.reduce((acc, r) => acc + toNumber(r.total), 0);
+    // outstanding (non-paid)
+    let outstandingBalance = 0;
+    if (Repayment && FIELDS.repayBalance) {
+      outstandingBalance = await Repayment.sum(FIELDS.repayBalance, {
+        where: { ...repaymentWhere, ...notPaidFilter() },
+      }) || 0;
+    }
 
-    // Outstanding (approx: sum of balances for all non-paid installments in scope)
-    const outstandingBalance = repaymentsInScope
-      .filter(r => (r.status || '').toLowerCase() !== 'paid')
-      .reduce((acc, r) => acc + toNumber(r.balance), 0);
+    // arrears (overdue & non-paid)
+    let arrearsCount = 0;
+    let arrearsAmount = 0;
+    if (Repayment && FIELDS.repayDueDate) {
+      arrearsCount = await Repayment.count({
+        where: {
+          ...notPaidFilter(),
+          [FIELDS.repayDueDate]: { [Op.lt]: new Date() },
+          ...(repaymentWhere || {}),
+        },
+      });
 
-    // Arrears (overdue only)
-    const arrearsCount  = overdueInstallments || 0;
-    const arrearsAmount = toNumber(overdueAmount || 0);
+      if (FIELDS.repayBalance) {
+        arrearsAmount = await Repayment.sum(FIELDS.repayBalance, {
+          where: {
+            ...notPaidFilter(),
+            [FIELDS.repayDueDate]: { [Op.lt]: new Date() },
+            ...(repaymentWhere || {}),
+          },
+        }) || 0;
+      }
+    }
+
+    const totalDisbursed = loansInScope.reduce((acc, l) => acc + toNumber(l[FIELDS.loanAmount]), 0);
+    const totalLoansCount = loansInScope.length;
 
     const payload = {
       totalLoansCount,
       totalDisbursed,
-      totalRepayments,
-      outstandingBalance,
-      arrearsCount,
-      arrearsAmount,
+      totalRepayments: toNumber(totalRepayments || 0),
+      outstandingBalance: toNumber(outstandingBalance || 0),
+      arrearsCount: arrearsCount || 0,
+      arrearsAmount: toNumber(arrearsAmount || 0),
       period: timeRange || 'all',
-      scope: {
-        branchId: branchId || null,
-        officerId: officerId || null,
-      }
+      scope: { branchId: branchId || null, officerId: officerId || null }
     };
 
     res.json(payload);
@@ -251,50 +342,66 @@ exports.getLoanSummary = async (req, res) => {
   }
 };
 
-/** ---------- Export CSV (supports filters) ---------- */
+/* ---------------------------------- Export --------------------------------- */
 exports.exportCSV = async (req, res) => {
   try {
+    if (!Repayment) return res.status(400).json({ error: 'Repayments model not found' });
+
     const { branchId, officerId, timeRange } = req.query || {};
     const range = parseRange(String(timeRange || '').trim());
 
-    const loanWhere = {};
-    const borrowerWhere = {};
     const repaymentWhere = {};
-
-    if (range.start && range.end) Object.assign(repaymentWhere, buildDateWhere('createdAt', range));
-    if (branchId) {
-      if (hasAttr(Loan, 'branchId')) loanWhere.branchId = branchId;
-      else if (hasAttr(Borrower, 'branchId')) borrowerWhere.branchId = branchId;
-    }
-    if (officerId) {
-      const key = ['loanOfficerId', 'officerId', 'assignedOfficerId', 'userId']
-        .find(k => hasAttr(Loan, k));
-      if (key) loanWhere[key] = officerId;
+    if (range.start && range.end) {
+      repaymentWhere[FIELDS.repayCreatedAt] = { [Op.between]: [range.start, range.end] };
     }
 
-    const rows = await LoanRepayment.findAll({
+    // We try to include Loan/Borrower only if associations exist
+    const include = [];
+    const haveLoanAssoc = !!Repayment?.associations?.Loan;
+    const haveBorrowerAssoc = !!Loan?.associations?.Borrower;
+
+    if (haveLoanAssoc) {
+      const loanWhere = {};
+      if (branchId && hasAttr(Loan, 'branchId')) loanWhere.branchId = branchId;
+      if (officerId) {
+        const key = ['loanOfficerId', 'officerId', 'assignedOfficerId', 'userId'].find(k => hasAttr(Loan, k));
+        if (key) loanWhere[key] = officerId;
+      }
+      const loanInc = { model: Loan, attributes: ['id', FIELDS.loanAmount], where: Object.keys(loanWhere).length ? loanWhere : undefined };
+      if (haveBorrowerAssoc) {
+        const bw = {};
+        if (branchId && !hasAttr(Loan, 'branchId') && hasAttr(Borrower, 'branchId')) bw.branchId = branchId;
+        loanInc.include = [{ model: Borrower, attributes: ['id', 'name'], where: Object.keys(bw).length ? bw : undefined, required: !!Object.keys(bw).length }];
+      }
+      include.push(loanInc);
+    }
+
+    const attrs = [
+      FIELDS.repayLoanId,
+      FIELDS.repayInstallmentNo,
+      FIELDS.repayDueDate,
+      FIELDS.repayAmount,
+      FIELDS.repayBalance,
+      FIELDS.repayStatus,
+      FIELDS.repayCreatedAt
+    ].filter(Boolean);
+
+    const rows = await Repayment.findAll({
       where: repaymentWhere,
-      include: [{
-        model: Loan,
-        attributes: ['id', 'amount'],
-        where: loanWhere,
-        include: [{ model: Borrower, attributes: ['id', 'name', 'branchId'], where: borrowerWhere, required: !!Object.keys(borrowerWhere).length }],
-        required: Object.keys(loanWhere).length > 0 || Object.keys(borrowerWhere).length > 0,
-      }],
-      order: [['dueDate', 'DESC']],
+      include,
+      order: [[FIELDS.repayDueDate || FIELDS.repayCreatedAt, 'DESC']],
+      attributes: attrs,
     });
 
     const data = rows.map(r => ({
       borrower: r.Loan?.Borrower?.name || '',
-      branchId: r.Loan?.Borrower?.branchId ?? '',
-      loanId: r.loanId,
-      loanAmount: toNumber(r.Loan?.amount || 0),
-      installment: r.installmentNumber,
-      dueDate: r.dueDate,
-      total: toNumber(r.total || 0),
-      balance: toNumber(r.balance || 0),
-      status: r.status || '',
-      createdAt: r.createdAt,
+      loanId: r[FIELDS.repayLoanId],
+      installment: FIELDS.repayInstallmentNo ? r[FIELDS.repayInstallmentNo] : '',
+      dueDate: FIELDS.repayDueDate ? r[FIELDS.repayDueDate] : null,
+      total: FIELDS.repayAmount ? toNumber(r[FIELDS.repayAmount]) : 0,
+      balance: FIELDS.repayBalance ? toNumber(r[FIELDS.repayBalance]) : 0,
+      status: FIELDS.repayStatus ? r[FIELDS.repayStatus] : '',
+      createdAt: r[FIELDS.repayCreatedAt],
     }));
 
     const parser = new Parser();
@@ -311,37 +418,53 @@ exports.exportCSV = async (req, res) => {
   }
 };
 
-/** ---------- Export PDF (supports filters) ---------- */
 exports.exportPDF = async (req, res) => {
   try {
+    if (!Repayment) return res.status(400).json({ error: 'Repayments model not found' });
+
     const { branchId, officerId, timeRange } = req.query || {};
     const range = parseRange(String(timeRange || '').trim());
 
-    const loanWhere = {};
-    const borrowerWhere = {};
     const repaymentWhere = {};
-
-    if (range.start && range.end) Object.assign(repaymentWhere, buildDateWhere('createdAt', range));
-    if (branchId) {
-      if (hasAttr(Loan, 'branchId')) loanWhere.branchId = branchId;
-      else if (hasAttr(Borrower, 'branchId')) borrowerWhere.branchId = branchId;
-    }
-    if (officerId) {
-      const key = ['loanOfficerId', 'officerId', 'assignedOfficerId', 'userId']
-        .find(k => hasAttr(Loan, k));
-      if (key) loanWhere[key] = officerId;
+    if (range.start && range.end) {
+      repaymentWhere[FIELDS.repayCreatedAt] = { [Op.between]: [range.start, range.end] };
     }
 
-    const rows = await LoanRepayment.findAll({
+    const include = [];
+    const haveLoanAssoc = !!Repayment?.associations?.Loan;
+    const haveBorrowerAssoc = !!Loan?.associations?.Borrower;
+
+    if (haveLoanAssoc) {
+      const loanWhere = {};
+      if (branchId && hasAttr(Loan, 'branchId')) loanWhere.branchId = branchId;
+      if (officerId) {
+        const key = ['loanOfficerId', 'officerId', 'assignedOfficerId', 'userId'].find(k => hasAttr(Loan, k));
+        if (key) loanWhere[key] = officerId;
+      }
+      const loanInc = { model: Loan, attributes: ['id', FIELDS.loanAmount], where: Object.keys(loanWhere).length ? loanWhere : undefined };
+      if (haveBorrowerAssoc) {
+        const bw = {};
+        if (branchId && !hasAttr(Loan, 'branchId') && hasAttr(Borrower, 'branchId')) bw.branchId = branchId;
+        loanInc.include = [{ model: Borrower, attributes: ['id', 'name'], where: Object.keys(bw).length ? bw : undefined, required: !!Object.keys(bw).length }];
+      }
+      include.push(loanInc);
+    }
+
+    const attrs = [
+      FIELDS.repayLoanId,
+      FIELDS.repayInstallmentNo,
+      FIELDS.repayDueDate,
+      FIELDS.repayAmount,
+      FIELDS.repayBalance,
+      FIELDS.repayStatus,
+      FIELDS.repayCreatedAt
+    ].filter(Boolean);
+
+    const rows = await Repayment.findAll({
       where: repaymentWhere,
-      include: [{
-        model: Loan,
-        attributes: ['id', 'amount'],
-        where: loanWhere,
-        include: [{ model: Borrower, attributes: ['id', 'name', 'branchId'], where: borrowerWhere, required: !!Object.keys(borrowerWhere).length }],
-        required: Object.keys(loanWhere).length > 0 || Object.keys(borrowerWhere).length > 0,
-      }],
-      order: [['dueDate', 'DESC']],
+      include,
+      order: [[FIELDS.repayDueDate || FIELDS.repayCreatedAt, 'DESC']],
+      attributes: attrs,
     });
 
     const doc = new PDFDocument({ margin: 36 });
@@ -365,18 +488,16 @@ exports.exportPDF = async (req, res) => {
     ].filter(Boolean).join('  •  ');
     if (scope) doc.fontSize(10).fillColor('#555').text(scope, { align: 'center' }).fillColor('#000').moveDown();
 
-    // Table-like listing
     doc.fontSize(11);
     rows.forEach(r => {
       const line = [
         `Borrower: ${r.Loan?.Borrower?.name || 'N/A'}`,
-        `Loan #${r.loanId}`,
-        `Amt: ${toNumber(r.Loan?.amount || 0)}`,
-        `Inst: ${r.installmentNumber ?? '-'}`,
-        `Due: ${r.dueDate ? new Date(r.dueDate).toISOString().slice(0,10) : '-'}`,
-        `Total: ${toNumber(r.total || 0)}`,
-        `Bal: ${toNumber(r.balance || 0)}`,
-        `Status: ${r.status || ''}`
+        `Loan #${r[FIELDS.repayLoanId] ?? '-'}`,
+        ...(FIELDS.repayInstallmentNo ? [`Inst: ${r[FIELDS.repayInstallmentNo] ?? '-'}`] : []),
+        ...(FIELDS.repayDueDate ? [`Due: ${r[FIELDS.repayDueDate] ? new Date(r[FIELDS.repayDueDate]).toISOString().slice(0,10) : '-'}`] : []),
+        ...(FIELDS.repayAmount ? [`Amt: ${toNumber(r[FIELDS.repayAmount])}`] : []),
+        ...(FIELDS.repayBalance ? [`Bal: ${toNumber(r[FIELDS.repayBalance])}`] : []),
+        ...(FIELDS.repayStatus ? [`Status: ${r[FIELDS.repayStatus] ?? ''}`] : []),
       ].join('  |  ');
       doc.text(line);
     });
