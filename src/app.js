@@ -276,21 +276,37 @@ app.use((req, res, next) => {
   next();
 });
 
+/* ----------------------------- Branch fallback ----------------------------- */
+/** ✅ Branch list fallback: avoids "deletedAt" errors from paranoid models. */
+let sequelize;
+try { ({ sequelize } = require('./models')); } catch { try { ({ sequelize } = require('../models')); } catch {} }
+if (sequelize) {
+  app.get('/api/branches', async (req, res, next) => {
+    try {
+      const [rows] = await sequelize.query('SELECT id, name, code FROM "public"."branches" ORDER BY name ASC;');
+      return res.json(rows);
+    } catch (e) {
+      // If raw SQL fails, let the original router handle it.
+      return next();
+    }
+  });
+}
+
 /* --------------------------------- Mounting -------------------------------- */
 // borrower search must come BEFORE /api/borrowers to avoid /:id catching "search"
 app.use('/api/borrowers/search', borrowerSearchRoutes);
 
-// ✅ Auth FIRST (real router; enables POST /api/login and GET /api/auth/2fa/status)
-app.use('/api/auth',   authRoutes);   // 2FA endpoints live here (e.g., /api/auth/2fa/status)
-app.use('/api/login',  authRoutes);   // legacy/back-compat; router handles POST /
+// ✅ Auth FIRST
+app.use('/api/auth',   authRoutes);
+app.use('/api/login',  authRoutes);
 
 app.use('/api/account', accountRoutes);
 
 app.use('/api/borrowers',      borrowerRoutes);
 app.use('/api/loans',          loanRoutes);
 app.use('/api/dashboard',      dashboardRoutes);
-app.use('/api/savings',        savingsRoutes);                   // base savings (create + borrower summary)
-app.use('/api/savings/transactions', savingsTransactionsRoutes); // combined module under /savings
+app.use('/api/savings',        savingsRoutes);
+app.use('/api/savings/transactions', savingsTransactionsRoutes);
 app.use('/api/disbursements',  disbursementRoutes);
 app.use('/api/repayments',     repaymentRoutes);
 app.use('/api/reports',        reportRoutes);
@@ -306,7 +322,7 @@ app.use('/api/admin/report-subscriptions', adminReportSubRoutes);
 /* Other core mounts */
 app.use('/api/users',          userRoutes);
 app.use('/api/roles',          roleRoutes);
-app.use('/api/branches',       branchRoutes);
+app.use('/api/branches',       branchRoutes); // original router still mounted
 app.use('/api/user-roles',     userRoleRoutes);
 app.use('/api/user-branches',  userBranchRoutes);
 app.use('/api/loan-products',  loanProductRoutes);
@@ -315,7 +331,7 @@ app.use('/api/loan-products',  loanProductRoutes);
 app.use('/api/collateral',           collateralRoutes);
 app.use('/api/collections',          collectionSheetsRoutes);
 app.use('/api/savings-transactions', savingsTransactionsRoutes); // legacy path kept for back-compat
-app.use('/api/investors',            investorRoutes);            // ✅ singular file wired here
+app.use('/api/investors',            investorRoutes);
 app.use('/api/esignatures',          esignaturesRoutes);
 app.use('/api/payroll',              payrollRoutes);
 app.use('/api/expenses',             expensesRoutes);
@@ -333,12 +349,12 @@ app.get('/api/test',   (_req, res) => res.send('✅ API is working!'));
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
 try {
-  let sequelize;
-  try { ({ sequelize } = require('./models')); } catch { ({ sequelize } = require('../models')); }
-  if (sequelize) {
+  let sequelize2;
+  try { ({ sequelize: sequelize2 } = require('./models')); } catch { ({ sequelize: sequelize2 } = require('../models')); }
+  if (sequelize2) {
     app.get('/api/health/db', async (_req, res) => {
       try {
-        await sequelize.authenticate();
+        await sequelize2.authenticate();
         res.json({ db: 'ok', ts: new Date().toISOString() });
       } catch (e) {
         console.error('DB health error:', e);
