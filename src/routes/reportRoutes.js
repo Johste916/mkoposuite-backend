@@ -3,26 +3,22 @@ const router = express.Router();
 const reportController = require('../controllers/reportController');
 const { authenticateUser } = require('../middleware/authMiddleware');
 
-// 📊 Summary data (counts, totals)
-router.get('/summary', authenticateUser, reportController.getSummary);
-
-// 📈 Monthly trends
-router.get('/trends', authenticateUser, reportController.getTrends);
-
-// 🧮 Loan Summary with filters (branch/officer/timeRange)
-router.get('/loan-summary', authenticateUser, reportController.getLoanSummary);
-
-// 🔎 Filters for reports (branches + loan officers) — raw SQL to avoid paranoid joins
+// -------- Filters (branches, officers, borrowers) --------
 router.get('/filters', authenticateUser, reportController.getFilters);
 
-// 📄 Export to CSV (supports same filters)
-router.get('/export/csv', authenticateUser, reportController.exportCSV);
-// alias for back-compat if UI calls /export-csv
-router.get('/export-csv', authenticateUser, reportController.exportCSV);
+// -------- Dashboard-style summary + trends --------
+router.get('/summary', authenticateUser, reportController.getSummary);
+router.get('/trends', authenticateUser, reportController.getTrends);
 
-// 📄 Export to PDF (supports same filters)
+// -------- Loan Summary (scoped + date-range aware) --------
+router.get('/loan-summary', authenticateUser, reportController.getLoanSummary);
+
+// -------- Exports --------
+router.get('/export/csv', authenticateUser, reportController.exportCSV);
 router.get('/export/pdf', authenticateUser, reportController.exportPDF);
-// alias for back-compat if UI calls /export-pdf
+
+// Back-compat aliases (so older frontends continue working)
+router.get('/export-csv', authenticateUser, reportController.exportCSV);
 router.get('/export-pdf', authenticateUser, reportController.exportPDF);
 
 module.exports = router;

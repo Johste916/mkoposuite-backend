@@ -1,206 +1,230 @@
-// src/controllers/reportController.js
-const models = require('../models');
-const { Op, fn, col, where: sqlWhere, literal } = require('sequelize');
+// Robust reporting controller that tolerates small schema differences
+// and provides scoped, date-range aware summaries.
+
+const { Op, fn, col, literal, where } = require('sequelize');
 const { Parser } = require('json2csv');
 const PDFDocument = require('pdfkit');
 
-/* ----------------------------- models & helpers ---------------------------- */
-const Loan = models.Loan;
-const Borrower = models.Borrower;
-// Savings model naming tends to be stable; keep a couple fallbacks.
-const SavingsTx =
-  models.SavingsTransaction ||
-  models.SavingTransaction ||
-  models.SavingsAccountTransaction ||
-  null;
+// Models registry
+const models = require('../models');
+const sequelize = models.sequelize;
 
-// Repayments can be named differently across codebases
-const Repayment =
+// Try to resolve the best repayment model available
+const RepaymentModel =
   models.LoanRepayment ||
   models.LoanPayment ||
   models.Repayment ||
-  models.LoanInstallment ||
-  models.Installment ||
   null;
 
-const sequelize = models?.sequelize;
+const Loan = models.Loan || models.Loans;
+const Borrower = models.Borrower || models.Borrowers || models.Customer || null;
+const Branch = models.Branch || models.branches || null;
+const User = models.User || models.Users || null;
 
-/** Check if a model has a column */
-const hasAttr = (Model, key) => !!Model?.rawAttributes && !!Model.rawAttributes[key];
-
-/** Pick the first attribute that exists on a model */
-const pickAttr = (Model, prefs, fallback = null) => {
-  if (!Model?.rawAttributes) return fallback;
-  for (const k of prefs) if (Model.rawAttributes[k]) return k;
+// ---------- small helpers ----------
+const TABLE_NAME = (mdl, fallback) => {
+  try {
+    if (mdl && typeof mdl.getTableName === 'function') {
+      const t = mdl.getTableName();
+      return typeof t === 'string' ? t : t.tableName || fallback;
+    }
+  } catch {}
   return fallback;
 };
 
-/** Resolve common field names for each model */
-const FIELDS = (() => {
-  const loanAmount = pickAttr(Loan, [
-    'amount', 'principal', 'principalAmount', 'loanAmount', 'approvedAmount', 'disbursedAmount'
-  ], 'amount');
-
-  const loanCreatedAt = hasAttr(Loan, 'createdAt') ? 'createdAt'
-                        : hasAttr(Loan, 'created_at') ? 'created_at'
-                        : 'createdAt';
-
-  const repayAmount = Repayment ? pickAttr(Repayment, [
-    'total', 'amount', 'amountPaid', 'paidAmount', 'paymentAmount', 'installmentAmount'
-  ], null) : null;
-
-  const repayBalance = Repayment ? pickAttr(Repayment, [
-    'balance', 'remaining', 'outstanding', 'amountDue', 'remainingBalance', 'principalOutstanding'
-  ], null) : null;
-
-  const repayDueDate = Repayment ? pickAttr(Repayment, [
-    'dueDate', 'due_date', 'due_on', 'installmentDueDate'
-  ], null) : null;
-
-  const repayCreatedAt = Repayment
-    ? (hasAttr(Repayment, 'createdAt') ? 'createdAt' : (hasAttr(Repayment, 'created_at') ? 'created_at' : 'createdAt'))
-    : 'createdAt';
-
-  const repayStatus = Repayment ? (hasAttr(Repayment, 'status') ? 'status' : (hasAttr(Repayment, 'isPaid') ? 'isPaid' : null)) : null;
-
-  const repayInstallmentNo = Repayment ? pickAttr(Repayment, [
-    'installmentNumber', 'installment_no', 'installment', 'sequence', 'number'
-  ], null) : null;
-
-  const repayLoanId = Repayment
-    ? (hasAttr(Repayment, 'loanId') ? 'loanId' : (hasAttr(Repayment, 'loan_id') ? 'loan_id' : 'loanId'))
-    : 'loanId';
-
-  const savingsAmount = SavingsTx ? pickAttr(SavingsTx, ['amount', 'value', 'txnAmount'], 'amount') : 'amount';
-
-  return {
-    loanAmount, loanCreatedAt,
-    repayAmount, repayBalance, repayDueDate, repayCreatedAt, repayStatus, repayInstallmentNo, repayLoanId,
-    savingsAmount
-  };
-})();
-
-/** Build a date range from UI's timeRange */
-function parseRange(timeRange) {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = now.getMonth();
-
-  switch ((timeRange || '').trim()) {
-    case 'today': {
-      const s = new Date(y, m, now.getDate(), 0, 0, 0, 0);
-      const e = new Date(y, m, now.getDate(), 23, 59, 59, 999);
-      return { start: s, end: e };
+const describeSafe = async (table) => {
+  // Try exact name, then lowercase, then quoted variations
+  const qi = sequelize.getQueryInterface();
+  try {
+    return await qi.describeTable(table);
+  } catch {
+    try {
+      return await qi.describeTable(String(table).toLowerCase());
+    } catch {
+      try {
+        return await qi.describeTable(String(table).replace(/"/g, ''));
+      } catch {
+        return {};
+      }
     }
+  }
+};
+
+const hasColumn = async (table, column) => {
+  const desc = await describeSafe(table);
+  return !!desc[column];
+};
+
+// prefer the first existing column name in order
+const chooseColumn = async (table, candidates, fallback = null) => {
+  for (const c of candidates) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await hasColumn(table, c)) return c;
+  }
+  return fallback;
+};
+
+const parseDateRange = (timeRange, startDate, endDate) => {
+  const now = new Date();
+  const start = new Date(now);
+  const end = new Date(now);
+
+  const normalize = (d) => new Date(new Date(d).toISOString());
+
+  if (timeRange === 'custom' && startDate && endDate) {
+    return { start: normalize(startDate), end: normalize(new Date(endDate).setHours(23,59,59,999)) };
+  }
+
+  // set UTC midnight for starts
+  const startOf = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
+  const endOf = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59, 999));
+
+  switch ((timeRange || '').toLowerCase()) {
+    case 'today':
+      return { start: startOf(now), end: endOf(now) };
     case 'week': {
-      const day = now.getDay();
-      const diffToMon = (day + 6) % 7;
-      const s = new Date(y, m, now.getDate() - diffToMon, 0, 0, 0, 0);
-      const e = new Date(y, m, now.getDate() + (6 - diffToMon), 23, 59, 59, 999);
-      return { start: s, end: e };
+      const day = now.getUTCDay() || 7;
+      const s = new Date(now);
+      s.setUTCDate(now.getUTCDate() - (day - 1));
+      const e = new Date(s);
+      e.setUTCDate(s.getUTCDate() + 6);
+      return { start: startOf(s), end: endOf(e) };
     }
     case 'month': {
-      const s = new Date(y, m, 1, 0, 0, 0, 0);
-      const e = new Date(y, m + 1, 0, 23, 59, 59, 999);
+      const s = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const e = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59, 999));
       return { start: s, end: e };
     }
     case 'quarter': {
-      const qStartMonth = Math.floor(m / 3) * 3;
-      const s = new Date(y, qStartMonth, 1, 0, 0, 0, 0);
-      const e = new Date(y, qStartMonth + 3, 0, 23, 59, 59, 999);
+      const q = Math.floor(now.getUTCMonth() / 3);
+      const s = new Date(Date.UTC(now.getUTCFullYear(), q * 3, 1));
+      const e = new Date(Date.UTC(now.getUTCFullYear(), q * 3 + 3, 0, 23, 59, 59, 999));
       return { start: s, end: e };
     }
-    case 'semiAnnual': {
-      const half = m < 6 ? 0 : 6;
-      const s = new Date(y, half, 1, 0, 0, 0, 0);
-      const e = new Date(y, half + 6, 0, 23, 59, 59, 999);
+    case 'semiannual': {
+      const isH1 = now.getUTCMonth() < 6;
+      const s = new Date(Date.UTC(now.getUTCFullYear(), isH1 ? 0 : 6, 1));
+      const e = new Date(Date.UTC(now.getUTCFullYear(), isH1 ? 6 : 12, 0, 23, 59, 59, 999));
       return { start: s, end: e };
     }
     case 'annual': {
-      const s = new Date(y, 0, 1, 0, 0, 0, 0);
-      const e = new Date(y, 11, 31, 23, 59, 59, 999);
+      const s = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+      const e = new Date(Date.UTC(now.getUTCFullYear(), 11, 31, 23, 59, 59, 999));
       return { start: s, end: e };
     }
     default:
-      return { start: null, end: null };
+      return { start: null, end: null }; // "All time"
   }
-}
-
-const toNumber = (n) => {
-  const v = Number(n);
-  return Number.isFinite(v) ? v : 0;
 };
 
-const paidFilter = () => {
-  if (!Repayment || !FIELDS.repayStatus) return {};
-  if (FIELDS.repayStatus === 'isPaid') return { [FIELDS.repayStatus]: true };
-  // assume string status column
-  return { [FIELDS.repayStatus]: 'paid' };
+const humanScope = ({ branch, officer, borrower, timeRange, start, end }) => {
+  const bits = [];
+  bits.push(branch ? `Branch: ${branch}` : 'All branches');
+  bits.push(officer ? `Officer: ${officer}` : 'All officers');
+  bits.push(borrower ? `Borrower: ${borrower}` : 'All borrowers');
+
+  let period = 'All time';
+  if (start && end) {
+    const fmt = (d) => d.toISOString().slice(0, 10);
+    period = `${fmt(start)} → ${fmt(end)}`;
+  } else if (timeRange) {
+    period = timeRange.replace(/([A-Z])/g, ' $1').toLowerCase(); // e.g. "semiAnnual"
+  }
+  return { scopeLabel: bits.join(' · '), periodLabel: period };
 };
 
-const notPaidFilter = () => {
-  if (!Repayment || !FIELDS.repayStatus) return {};
-  if (FIELDS.repayStatus === 'isPaid') return { [FIELDS.repayStatus]: false };
-  return { [FIELDS.repayStatus]: { [Op.ne]: 'paid' } };
-};
-
-/* --------------------------------- Filters --------------------------------- */
-// Lightweight lists for Reports filters using raw SQL (avoids paranoid joins)
+// ---------- /filters ----------
 exports.getFilters = async (_req, res) => {
+  const out = { branches: [], officers: [], borrowers: [] };
+
+  // Branches
   try {
-    if (!sequelize) return res.json({ branches: [], officers: [] });
-
-    const [branches] = await sequelize.query('SELECT id, name FROM "public"."branches" ORDER BY name ASC;');
-    const [officers] = await sequelize.query(
-      'SELECT id, COALESCE(name, email) AS label FROM "public"."Users" WHERE role = :role ORDER BY label ASC;',
-      { replacements: { role: 'loan_officer' } }
+    const branchTable = TABLE_NAME(Branch, 'branches');
+    const rows = await sequelize.query(
+      `SELECT id, name FROM ${JSON.stringify(branchTable).replace(/"/g,'"')} ORDER BY name ASC`,
+      { type: sequelize.QueryTypes.SELECT }
     );
-
-    res.json({
-      branches: Array.isArray(branches) ? branches : [],
-      officers: Array.isArray(officers) ? officers.map(o => ({ id: o.id, name: o.label })) : [],
-    });
-  } catch (err) {
-    console.error('filters error:', err);
-    res.json({ branches: [], officers: [] });
+    out.branches = rows;
+  } catch {
+    out.branches = [];
   }
+
+  // Officers
+  try {
+    const userTable = TABLE_NAME(User, '"Users"');
+    const rows = await sequelize.query(
+      `SELECT id, name, email FROM ${userTable}
+       WHERE LOWER(COALESCE(role,'')) = 'loan_officer'
+       ORDER BY name NULLS LAST, email ASC`,
+      { type: sequelize.QueryTypes.SELECT }
+    );
+    out.officers = rows;
+  } catch {
+    out.officers = [];
+  }
+
+  // Borrowers
+  try {
+    const borrowerTable = TABLE_NAME(Borrower, '"Borrowers"');
+    const rows = await sequelize.query(
+      `SELECT id, name FROM ${borrowerTable} ORDER BY name ASC LIMIT 200`,
+      { type: sequelize.QueryTypes.SELECT }
+    );
+    out.borrowers = rows;
+  } catch {
+    out.borrowers = [];
+  }
+
+  res.json(out);
 };
 
-/* --------------------------------- Summary --------------------------------- */
+// ---------- /summary ----------
 exports.getSummary = async (_req, res) => {
   try {
-    const [loanCount, totalLoanAmount] = await Promise.all([
-      Loan?.count?.() ?? 0,
-      Loan?.sum?.(FIELDS.loanAmount) ?? 0,
-    ]);
+    const loanTable = TABLE_NAME(Loan, 'loans');
+    const repayTable = TABLE_NAME(RepaymentModel, 'loan_payments');
 
-    // repayments (paid only) — if we can detect a usable amount column
-    const totalRepayments = (Repayment && FIELDS.repayAmount)
-      ? (await Repayment.sum(FIELDS.repayAmount, { where: paidFilter() })) || 0
-      : 0;
+    // loans
+    let loanCount = 0;
+    let totalLoanAmount = 0;
+    try {
+      const [c, s] = await Promise.all([
+        sequelize.query(`SELECT COUNT(*)::int AS c FROM ${loanTable}`, { type: sequelize.QueryTypes.SELECT }),
+        sequelize.query(`SELECT COALESCE(SUM(amount),0)::bigint AS s FROM ${loanTable}`, { type: sequelize.QueryTypes.SELECT }),
+      ]);
+      loanCount = Number(c[0]?.c || 0);
+      totalLoanAmount = Number(s[0]?.s || 0);
+    } catch {}
 
-    // savings total
-    const totalSavings = (SavingsTx && SavingsTx.sum)
-      ? (await SavingsTx.sum(FIELDS.savingsAmount)) || 0
-      : 0;
+    // repayments (tolerate either "total" or "amount" column)
+    let totalRepayments = 0;
+    try {
+      const repAmountCol = await chooseColumn(repayTable, ['total', 'amount', 'amountPaid']);
+      if (repAmountCol) {
+        const rows = await sequelize.query(
+          `SELECT COALESCE(SUM("${repAmountCol}"),0) AS s FROM ${repayTable} WHERE status = 'paid'`,
+          { type: sequelize.QueryTypes.SELECT }
+        );
+        totalRepayments = Number(rows[0]?.s || 0);
+      }
+    } catch {}
 
-    // defaulter count (overdue & not paid)
+    // defaulters count: overdue installments
     let defaulterCount = 0;
-    if (Repayment && FIELDS.repayDueDate && Repayment.count) {
-      defaulterCount = await Repayment.count({
-        where: {
-          ...notPaidFilter(),
-          [FIELDS.repayDueDate]: { [Op.lt]: new Date() },
-        },
-      });
-    }
+    try {
+      const rows = await sequelize.query(
+        `SELECT COUNT(*)::int AS c FROM ${repayTable} WHERE status != 'paid' AND "dueDate" < NOW()`,
+        { type: sequelize.QueryTypes.SELECT }
+      );
+      defaulterCount = Number(rows[0]?.c || 0);
+    } catch {}
 
     res.json({
-      loanCount: loanCount || 0,
-      totalLoanAmount: toNumber(totalLoanAmount || 0),
-      totalRepayments: toNumber(totalRepayments || 0),
-      totalSavings: toNumber(totalSavings || 0),
-      defaulterCount: defaulterCount || 0,
+      loanCount,
+      totalLoanAmount,
+      totalRepayments,
+      totalSavings: 0, // not shown in UI currently
+      defaulterCount,
     });
   } catch (err) {
     console.error('Summary error:', err);
@@ -208,209 +232,289 @@ exports.getSummary = async (_req, res) => {
   }
 };
 
-/* ---------------------------------- Trends --------------------------------- */
+// ---------- /trends ----------
 exports.getTrends = async (req, res) => {
   try {
-    const year = Number(req.query.year) || new Date().getFullYear();
-    const start = new Date(`${year}-01-01T00:00:00.000Z`);
-    const end = new Date(`${year}-12-31T23:59:59.999Z`);
+    const year = Number(req.query.year) || new Date().getUTCFullYear();
+    const start = new Date(Date.UTC(year, 0, 1, 0, 0, 0, 0));
+    const end = new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999));
 
-    const monthly = Array.from({ length: 12 }, (_, i) => ({
-      month: i + 1,
-      loans: 0,
-      repayments: 0,
-    }));
+    const loanTable = TABLE_NAME(Loan, 'loans');
+    const repayTable = TABLE_NAME(RepaymentModel, 'loan_payments');
+    const repAmountCol = await chooseColumn(repayTable, ['total', 'amount', 'amountPaid']);
 
-    const [loans, repayments] = await Promise.all([
-      Loan.findAll({
-        where: { [FIELDS.loanCreatedAt]: { [Op.between]: [start, end] } },
-        attributes: [FIELDS.loanAmount, FIELDS.loanCreatedAt],
-        raw: true,
-      }),
-      Repayment && FIELDS.repayAmount
-        ? Repayment.findAll({
-            where: { [FIELDS.repayCreatedAt]: { [Op.between]: [start, end] } },
-            attributes: [FIELDS.repayAmount, FIELDS.repayCreatedAt],
-            raw: true,
-          })
-        : Promise.resolve([]),
-    ]);
+    // 12 empty months
+    const base = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, loans: 0, repayments: 0 }));
 
-    loans.forEach(l => {
-      const m = new Date(l[FIELDS.loanCreatedAt]).getMonth();
-      monthly[m].loans += toNumber(l[FIELDS.loanAmount]);
-    });
+    // loans by month
+    try {
+      const loanRows = await sequelize.query(
+        `SELECT EXTRACT(MONTH FROM "createdAt")::int AS m, COALESCE(SUM(amount),0) AS s
+           FROM ${loanTable}
+          WHERE "createdAt" BETWEEN :start AND :end
+          GROUP BY m`,
+        { replacements: { start, end }, type: sequelize.QueryTypes.SELECT }
+      );
+      loanRows.forEach(r => { base[r.m - 1].loans = Number(r.s || 0); });
+    } catch {}
 
-    (repayments || []).forEach(r => {
-      const m = new Date(r[FIELDS.repayCreatedAt]).getMonth();
-      monthly[m].repayments += toNumber(r[FIELDS.repayAmount]);
-    });
+    // repayments by month
+    try {
+      if (repAmountCol) {
+        const repRows = await sequelize.query(
+          `SELECT EXTRACT(MONTH FROM "createdAt")::int AS m, COALESCE(SUM("${repAmountCol}"),0) AS s
+             FROM ${repayTable}
+            WHERE "createdAt" BETWEEN :start AND :end
+            GROUP BY m`,
+          { replacements: { start, end }, type: sequelize.QueryTypes.SELECT }
+        );
+        repRows.forEach(r => { base[r.m - 1].repayments = Number(r.s || 0); });
+      }
+    } catch {}
 
-    res.json(monthly);
+    res.json(base);
   } catch (err) {
     console.error('Trend error:', err);
     res.status(500).json({ error: 'Failed to load trend data' });
   }
 };
 
-/* ------------------------------- Loan Summary ------------------------------ */
+// ---------- /loan-summary (scoped) ----------
 exports.getLoanSummary = async (req, res) => {
   try {
-    const { branchId, officerId, timeRange } = req.query || {};
-    const range = parseRange(String(timeRange || '').trim());
+    const {
+      branchId = '',
+      officerId = '',
+      borrowerId = '',
+      timeRange = '',
+      startDate = '',
+      endDate = '',
+    } = req.query;
 
-    // WHEREs
-    const loanWhere = {};
-    const repaymentWhere = {};
-    const borrowerWhere = {};
+    const loanTable = TABLE_NAME(Loan, 'loans');
+    const repayTable = TABLE_NAME(RepaymentModel, 'loan_payments');
+    const borrowerTable = TABLE_NAME(Borrower, '"Borrowers"');
 
-    if (range.start && range.end) {
-      loanWhere[FIELDS.loanCreatedAt] = { [Op.between]: [range.start, range.end] };
-      repaymentWhere[FIELDS.repayCreatedAt] = { [Op.between]: [range.start, range.end] };
+    // resolve dynamic columns
+    const repAmountCol = await chooseColumn(repayTable, ['total', 'amount', 'amountPaid']);
+    const balanceCol = await chooseColumn(repayTable, ['balance', 'outstanding', 'remaining'], null);
+
+    // Build WHERE fragments (raw SQL, but all values are parameterized)
+    const whereLoan = [];
+    const params = {};
+
+    if (branchId) { whereLoan.push(`"${loanTable}". "branchId" = :branchId`); params.branchId = branchId; }
+
+    // officer can be loanOfficerId or officerId; include both if present
+    const hasOfficerId = await hasColumn(loanTable, 'officerId');
+    const hasLoanOfficerId = await hasColumn(loanTable, 'loanOfficerId');
+    if (officerId && (hasOfficerId || hasLoanOfficerId)) {
+      if (hasOfficerId && hasLoanOfficerId) {
+        whereLoan.push(`( "${loanTable}"."officerId" = :officerId OR "${loanTable}"."loanOfficerId" = :officerId )`);
+      } else if (hasOfficerId) {
+        whereLoan.push(`"${loanTable}"."officerId" = :officerId`);
+      } else {
+        whereLoan.push(`"${loanTable}"."loanOfficerId" = :officerId`);
+      }
+      params.officerId = officerId;
     }
 
-    // branch filter (prefer Loan.branchId, fallback Borrower.branchId)
-    if (branchId) {
-      if (hasAttr(Loan, 'branchId')) loanWhere.branchId = branchId;
-      else if (hasAttr(Borrower, 'branchId')) borrowerWhere.branchId = branchId;
+    if (borrowerId && await hasColumn(loanTable, 'borrowerId')) {
+      whereLoan.push(`"${loanTable}"."borrowerId" = :borrowerId`);
+      params.borrowerId = borrowerId;
     }
 
-    // officer filter (try common fields on Loan)
-    if (officerId) {
-      const key = ['loanOfficerId', 'officerId', 'assignedOfficerId', 'userId']
-        .find(k => hasAttr(Loan, k));
-      if (key) loanWhere[key] = officerId;
-    }
+    // date range (applies to both loans.createdAt and repayments.createdAt)
+    const { start, end } = parseDateRange(timeRange, startDate, endDate);
+    const loanDateClause = (start && end) ? ` AND "${loanTable}"."createdAt" BETWEEN :dStart AND :dEnd` : '';
+    const repayDateClause = (start && end) ? ` AND "${repayTable}"."createdAt" BETWEEN :dStart AND :dEnd` : '';
+    if (start && end) { params.dStart = start; params.dEnd = end; }
 
-    // sums/counts
-    const [loansInScope, totalRepayments] = await Promise.all([
-      Loan.findAll({ where: loanWhere, attributes: ['id', FIELDS.loanAmount], raw: true }),
-      (Repayment && FIELDS.repayAmount)
-        ? Repayment.sum(FIELDS.repayAmount, { where: repaymentWhere })
-        : 0
-    ]);
+    const loanFilterSQL = whereLoan.length ? `WHERE ${whereLoan.join(' AND ')}` : '';
 
-    // outstanding (non-paid)
+    // total loans count
+    let totalLoansCount = 0;
+    try {
+      const rows = await sequelize.query(
+        `SELECT COUNT(*)::int AS c FROM ${loanTable} ${loanFilterSQL}${loanDateClause}`,
+        { replacements: params, type: sequelize.QueryTypes.SELECT }
+      );
+      totalLoansCount = Number(rows[0]?.c || 0);
+    } catch {}
+
+    // total disbursed
+    let totalDisbursed = 0;
+    try {
+      const rows = await sequelize.query(
+        `SELECT COALESCE(SUM(amount),0) AS s FROM ${loanTable} ${loanFilterSQL}${loanDateClause}`,
+        { replacements: params, type: sequelize.QueryTypes.SELECT }
+      );
+      totalDisbursed = Number(rows[0]?.s || 0);
+    } catch {}
+
+    // total repayments (respect filters via loan join)
+    let totalRepayments = 0;
+    try {
+      if (repAmountCol) {
+        const rows = await sequelize.query(
+          `SELECT COALESCE(SUM(r."${repAmountCol}"),0) AS s
+             FROM ${repayTable} r
+             JOIN ${loanTable} l ON r."loanId" = l."id"
+             ${loanFilterSQL.replaceAll(`"${loanTable}"`, 'l')}
+             ${repayDateClause.replaceAll(`"${repayTable}"`, 'r')}`,
+          { replacements: params, type: sequelize.QueryTypes.SELECT }
+        );
+        totalRepayments = Number(rows[0]?.s || 0);
+      }
+    } catch {}
+
+    // outstanding balance: prefer summing balance column; fallback to disbursed - repayments
     let outstandingBalance = 0;
-    if (Repayment && FIELDS.repayBalance) {
-      outstandingBalance = await Repayment.sum(FIELDS.repayBalance, {
-        where: { ...repaymentWhere, ...notPaidFilter() },
-      }) || 0;
+    try {
+      if (balanceCol) {
+        const rows = await sequelize.query(
+          `SELECT COALESCE(SUM(r."${balanceCol}"),0) AS s
+             FROM ${repayTable} r
+             JOIN ${loanTable} l ON r."loanId" = l."id"
+             WHERE r.status != 'paid' ${repayDateClause ? repayDateClause.replace('WHERE','AND') : ''}
+             ${loanFilterSQL ? ' AND ' + loanFilterSQL.replaceAll(`"${loanTable}"`, 'l').replace('WHERE ','') : ''}`,
+          { replacements: params, type: sequelize.QueryTypes.SELECT }
+        );
+        outstandingBalance = Number(rows[0]?.s || 0);
+      } else {
+        outstandingBalance = Math.max(totalDisbursed - totalRepayments, 0);
+      }
+    } catch {
+      outstandingBalance = Math.max(totalDisbursed - totalRepayments, 0);
     }
 
-    // arrears (overdue & non-paid)
+    // arrears count & amount (overdue)
     let arrearsCount = 0;
     let arrearsAmount = 0;
-    if (Repayment && FIELDS.repayDueDate) {
-      arrearsCount = await Repayment.count({
-        where: {
-          ...notPaidFilter(),
-          [FIELDS.repayDueDate]: { [Op.lt]: new Date() },
-          ...(repaymentWhere || {}),
-        },
-      });
+    try {
+      const overdueEnd = end || new Date();
+      const baseWhere =
+        `r.status != 'paid' AND r."dueDate" < :odEnd` +
+        (repayDateClause ? repayDateClause.replace('BETWEEN :dStart AND :dEnd', 'BETWEEN :dStart AND :dEnd') : '');
+      const rowsC = await sequelize.query(
+        `SELECT COUNT(*)::int AS c
+           FROM ${repayTable} r
+           JOIN ${loanTable} l ON r."loanId" = l."id"
+          WHERE ${baseWhere}
+          ${loanFilterSQL ? ' AND ' + loanFilterSQL.replaceAll(`"${loanTable}"`, 'l').replace('WHERE ','') : ''}`,
+        { replacements: { ...params, odEnd: overdueEnd }, type: sequelize.QueryTypes.SELECT }
+      );
+      arrearsCount = Number(rowsC[0]?.c || 0);
 
-      if (FIELDS.repayBalance) {
-        arrearsAmount = await Repayment.sum(FIELDS.repayBalance, {
-          where: {
-            ...notPaidFilter(),
-            [FIELDS.repayDueDate]: { [Op.lt]: new Date() },
-            ...(repaymentWhere || {}),
-          },
-        }) || 0;
+      // amount use balance if exists; else sum the repayment amount for overdue items
+      if (balanceCol) {
+        const rowsA = await sequelize.query(
+          `SELECT COALESCE(SUM(r."${balanceCol}"),0) AS s
+             FROM ${repayTable} r
+             JOIN ${loanTable} l ON r."loanId" = l."id"
+            WHERE ${baseWhere}
+            ${loanFilterSQL ? ' AND ' + loanFilterSQL.replaceAll(`"${loanTable}"`, 'l').replace('WHERE ','') : ''}`,
+          { replacements: { ...params, odEnd: overdueEnd }, type: sequelize.QueryTypes.SELECT }
+        );
+        arrearsAmount = Number(rowsA[0]?.s || 0);
+      } else if (repAmountCol) {
+        const rowsA2 = await sequelize.query(
+          `SELECT COALESCE(SUM(r."${repAmountCol}"),0) AS s
+             FROM ${repayTable} r
+             JOIN ${loanTable} l ON r."loanId" = l."id"
+            WHERE ${baseWhere}
+            ${loanFilterSQL ? ' AND ' + loanFilterSQL.replaceAll(`"${loanTable}"`, 'l').replace('WHERE ','') : ''}`,
+          { replacements: { ...params, odEnd: overdueEnd }, type: sequelize.QueryTypes.SELECT }
+        );
+        arrearsAmount = Number(rowsA2[0]?.s || 0);
       }
-    }
+    } catch {}
 
-    const totalDisbursed = loansInScope.reduce((acc, l) => acc + toNumber(l[FIELDS.loanAmount]), 0);
-    const totalLoansCount = loansInScope.length;
-
-    const payload = {
-      totalLoansCount,
-      totalDisbursed,
-      totalRepayments: toNumber(totalRepayments || 0),
-      outstandingBalance: toNumber(outstandingBalance || 0),
-      arrearsCount: arrearsCount || 0,
-      arrearsAmount: toNumber(arrearsAmount || 0),
-      period: timeRange || 'all',
-      scope: { branchId: branchId || null, officerId: officerId || null }
+    // human labels (fixes the "scope bug")
+    // Try to resolve names for the labels if IDs provided
+    const resolveName = async (table, id, fallback) => {
+      if (!id) return null;
+      try {
+        const rows = await sequelize.query(
+          `SELECT name FROM ${table} WHERE id = :id LIMIT 1`,
+          { replacements: { id }, type: sequelize.QueryTypes.SELECT }
+        );
+        return rows[0]?.name || fallback || String(id);
+      } catch {
+        return fallback || String(id);
+      }
     };
 
-    res.json(payload);
+    const branchName = branchId ? await resolveName(TABLE_NAME(Branch, 'branches'), branchId, null) : null;
+    const borrowerName = borrowerId ? await resolveName(borrowerTable, borrowerId, null) : null;
+    let officerName = null;
+    if (officerId) {
+      try {
+        const userTable = TABLE_NAME(User, '"Users"');
+        const rows = await sequelize.query(
+          `SELECT COALESCE(NULLIF(TRIM(COALESCE(name,'')),'') , email) AS label
+             FROM ${userTable} WHERE id = :id LIMIT 1`,
+          { replacements: { id: officerId }, type: sequelize.QueryTypes.SELECT }
+        );
+        officerName = rows[0]?.label || null;
+      } catch {}
+    }
+
+    const meta = humanScope({
+      branch: branchName,
+      officer: officerName,
+      borrower: borrowerName,
+      timeRange,
+      start,
+      end,
+    });
+
+    res.json({
+      totalLoansCount,
+      totalDisbursed,
+      totalRepayments,
+      outstandingBalance,
+      arrearsCount,
+      arrearsAmount,
+      period: meta.periodLabel,
+      scope: meta.scopeLabel,
+    });
   } catch (err) {
     console.error('LoanSummary error:', err);
     res.status(500).json({ error: 'Failed to load loan summary' });
   }
 };
 
-/* ---------------------------------- Export --------------------------------- */
-exports.exportCSV = async (req, res) => {
+// ---------- Exports ----------
+exports.exportCSV = async (_req, res) => {
   try {
-    if (!Repayment) return res.status(400).json({ error: 'Repayments model not found' });
+    const loanTable = TABLE_NAME(Loan, 'loans');
+    const repayTable = TABLE_NAME(RepaymentModel, 'loan_payments');
 
-    const { branchId, officerId, timeRange } = req.query || {};
-    const range = parseRange(String(timeRange || '').trim());
+    const repAmountCol = await chooseColumn(repayTable, ['total', 'amount', 'amountPaid']);
+    const balanceCol = await chooseColumn(repayTable, ['balance', 'outstanding', 'remaining']);
 
-    const repaymentWhere = {};
-    if (range.start && range.end) {
-      repaymentWhere[FIELDS.repayCreatedAt] = { [Op.between]: [range.start, range.end] };
-    }
-
-    // We try to include Loan/Borrower only if associations exist
-    const include = [];
-    const haveLoanAssoc = !!Repayment?.associations?.Loan;
-    const haveBorrowerAssoc = !!Loan?.associations?.Borrower;
-
-    if (haveLoanAssoc) {
-      const loanWhere = {};
-      if (branchId && hasAttr(Loan, 'branchId')) loanWhere.branchId = branchId;
-      if (officerId) {
-        const key = ['loanOfficerId', 'officerId', 'assignedOfficerId', 'userId'].find(k => hasAttr(Loan, k));
-        if (key) loanWhere[key] = officerId;
-      }
-      const loanInc = { model: Loan, attributes: ['id', FIELDS.loanAmount], where: Object.keys(loanWhere).length ? loanWhere : undefined };
-      if (haveBorrowerAssoc) {
-        const bw = {};
-        if (branchId && !hasAttr(Loan, 'branchId') && hasAttr(Borrower, 'branchId')) bw.branchId = branchId;
-        loanInc.include = [{ model: Borrower, attributes: ['id', 'name'], where: Object.keys(bw).length ? bw : undefined, required: !!Object.keys(bw).length }];
-      }
-      include.push(loanInc);
-    }
-
-    const attrs = [
-      FIELDS.repayLoanId,
-      FIELDS.repayInstallmentNo,
-      FIELDS.repayDueDate,
-      FIELDS.repayAmount,
-      FIELDS.repayBalance,
-      FIELDS.repayStatus,
-      FIELDS.repayCreatedAt
-    ].filter(Boolean);
-
-    const rows = await Repayment.findAll({
-      where: repaymentWhere,
-      include,
-      order: [[FIELDS.repayDueDate || FIELDS.repayCreatedAt, 'DESC']],
-      attributes: attrs,
-    });
-
-    const data = rows.map(r => ({
-      borrower: r.Loan?.Borrower?.name || '',
-      loanId: r[FIELDS.repayLoanId],
-      installment: FIELDS.repayInstallmentNo ? r[FIELDS.repayInstallmentNo] : '',
-      dueDate: FIELDS.repayDueDate ? r[FIELDS.repayDueDate] : null,
-      total: FIELDS.repayAmount ? toNumber(r[FIELDS.repayAmount]) : 0,
-      balance: FIELDS.repayBalance ? toNumber(r[FIELDS.repayBalance]) : 0,
-      status: FIELDS.repayStatus ? r[FIELDS.repayStatus] : '',
-      createdAt: r[FIELDS.repayCreatedAt],
-    }));
+    const rows = await sequelize.query(
+      `SELECT 
+          b.name AS borrower,
+          r."loanId" AS "loanId",
+          r."installmentNumber" AS "installment",
+          r."dueDate" AS "dueDate",
+          ${repAmountCol ? `r."${repAmountCol}"` : '0'} AS total,
+          ${balanceCol ? `r."${balanceCol}"` : '0'} AS balance,
+          r.status
+        FROM ${repayTable} r
+        JOIN ${loanTable} l ON r."loanId" = l."id"
+        LEFT JOIN ${TABLE_NAME(Borrower, '"Borrowers"')} b ON l."borrowerId" = b.id
+        ORDER BY r."dueDate" DESC NULLS LAST`,
+      { type: sequelize.QueryTypes.SELECT }
+    );
 
     const parser = new Parser();
-    const csv = parser.parse(data);
+    const csv = parser.parse(rows);
 
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename=repayments.csv');
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Report-Generated-At', new Date().toISOString());
+    res.header('Content-Type', 'text/csv');
+    res.attachment('repayments.csv');
     res.send(csv);
   } catch (err) {
     console.error('CSV export error:', err);
@@ -418,94 +522,44 @@ exports.exportCSV = async (req, res) => {
   }
 };
 
-exports.exportPDF = async (req, res) => {
+exports.exportPDF = async (_req, res) => {
   try {
-    if (!Repayment) return res.status(400).json({ error: 'Repayments model not found' });
+    const loanTable = TABLE_NAME(Loan, 'loans');
+    const repayTable = TABLE_NAME(RepaymentModel, 'loan_payments');
 
-    const { branchId, officerId, timeRange } = req.query || {};
-    const range = parseRange(String(timeRange || '').trim());
+    const repAmountCol = await chooseColumn(repayTable, ['total', 'amount', 'amountPaid']);
 
-    const repaymentWhere = {};
-    if (range.start && range.end) {
-      repaymentWhere[FIELDS.repayCreatedAt] = { [Op.between]: [range.start, range.end] };
-    }
-
-    const include = [];
-    const haveLoanAssoc = !!Repayment?.associations?.Loan;
-    const haveBorrowerAssoc = !!Loan?.associations?.Borrower;
-
-    if (haveLoanAssoc) {
-      const loanWhere = {};
-      if (branchId && hasAttr(Loan, 'branchId')) loanWhere.branchId = branchId;
-      if (officerId) {
-        const key = ['loanOfficerId', 'officerId', 'assignedOfficerId', 'userId'].find(k => hasAttr(Loan, k));
-        if (key) loanWhere[key] = officerId;
-      }
-      const loanInc = { model: Loan, attributes: ['id', FIELDS.loanAmount], where: Object.keys(loanWhere).length ? loanWhere : undefined };
-      if (haveBorrowerAssoc) {
-        const bw = {};
-        if (branchId && !hasAttr(Loan, 'branchId') && hasAttr(Borrower, 'branchId')) bw.branchId = branchId;
-        loanInc.include = [{ model: Borrower, attributes: ['id', 'name'], where: Object.keys(bw).length ? bw : undefined, required: !!Object.keys(bw).length }];
-      }
-      include.push(loanInc);
-    }
-
-    const attrs = [
-      FIELDS.repayLoanId,
-      FIELDS.repayInstallmentNo,
-      FIELDS.repayDueDate,
-      FIELDS.repayAmount,
-      FIELDS.repayBalance,
-      FIELDS.repayStatus,
-      FIELDS.repayCreatedAt
-    ].filter(Boolean);
-
-    const rows = await Repayment.findAll({
-      where: repaymentWhere,
-      include,
-      order: [[FIELDS.repayDueDate || FIELDS.repayCreatedAt, 'DESC']],
-      attributes: attrs,
-    });
+    const rows = await sequelize.query(
+      `SELECT 
+          COALESCE(b.name,'') AS borrower,
+          r."loanId" AS "loanId",
+          r."installmentNumber" AS "installment",
+          r."dueDate" AS "dueDate",
+          ${repAmountCol ? `COALESCE(r."${repAmountCol}",0)` : '0'} AS total,
+          COALESCE(r.status,'') AS status
+        FROM ${repayTable} r
+        JOIN ${loanTable} l ON r."loanId" = l."id"
+        LEFT JOIN ${TABLE_NAME(Borrower, '"Borrowers"')} b ON l."borrowerId" = b.id
+        ORDER BY r."dueDate" DESC NULLS LAST`,
+      { type: sequelize.QueryTypes.SELECT }
+    );
 
     const doc = new PDFDocument({ margin: 36 });
     const chunks = [];
-    doc.on('data', d => chunks.push(d));
+    doc.on('data', (d) => chunks.push(d));
     doc.on('end', () => {
       const pdf = Buffer.concat(chunks);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename=repayments.pdf');
-      res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('X-Report-Generated-At', new Date().toISOString());
       res.send(pdf);
     });
 
-    // Header
-    doc.fontSize(18).text('Loan Repayment Report', { align: 'center' }).moveDown(0.5);
-    const scope = [
-      branchId ? `Branch: ${branchId}` : null,
-      officerId ? `Officer: ${officerId}` : null,
-      timeRange ? `Period: ${timeRange}` : 'Period: all'
-    ].filter(Boolean).join('  •  ');
-    if (scope) doc.fontSize(10).fillColor('#555').text(scope, { align: 'center' }).fillColor('#000').moveDown();
-
-    doc.fontSize(11);
-    rows.forEach(r => {
-      const line = [
-        `Borrower: ${r.Loan?.Borrower?.name || 'N/A'}`,
-        `Loan #${r[FIELDS.repayLoanId] ?? '-'}`,
-        ...(FIELDS.repayInstallmentNo ? [`Inst: ${r[FIELDS.repayInstallmentNo] ?? '-'}`] : []),
-        ...(FIELDS.repayDueDate ? [`Due: ${r[FIELDS.repayDueDate] ? new Date(r[FIELDS.repayDueDate]).toISOString().slice(0,10) : '-'}`] : []),
-        ...(FIELDS.repayAmount ? [`Amt: ${toNumber(r[FIELDS.repayAmount])}`] : []),
-        ...(FIELDS.repayBalance ? [`Bal: ${toNumber(r[FIELDS.repayBalance])}`] : []),
-        ...(FIELDS.repayStatus ? [`Status: ${r[FIELDS.repayStatus] ?? ''}`] : []),
-      ].join('  |  ');
-      doc.text(line);
+    doc.fontSize(18).text('Loan Repayment Report', { align: 'center' }).moveDown();
+    rows.forEach((r) => {
+      doc.fontSize(11).text(
+        `Borrower: ${r.borrower || 'N/A'} | Loan #${r.loanId} | Installment: ${r.installment ?? '-'} | Due: ${r.dueDate ? new Date(r.dueDate).toISOString().slice(0,10) : '-'} | Total: ${r.total} | Status: ${r.status}`
+      );
     });
-
-    if (!rows.length) {
-      doc.moveDown().fontSize(12).text('No records for the selected filters.', { align: 'center' });
-    }
-
     doc.end();
   } catch (err) {
     console.error('PDF export error:', err);
