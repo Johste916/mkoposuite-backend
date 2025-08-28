@@ -3,14 +3,18 @@ const router = express.Router();
 const report = require('../controllers/reportController');
 const { authenticateUser } = require('../middleware/authMiddleware');
 
-/** ------- High-level dashboards ------- */
-router.get('/summary', authenticateUser, report.summary);
+/** ---------- Back-compat core endpoints used by Reports.jsx ---------- */
+router.get('/summary', authenticateUser, report.summary);          // aka getSummary
+router.get('/trends', authenticateUser, report.loansTrends);       // aka getTrends
+router.get('/loan-summary', authenticateUser, report.loansSummary);
+router.get('/export/csv', authenticateUser, report.exportCSV);
+router.get('/export/pdf', authenticateUser, report.exportPDF);
 
-/** ------- Trends ------- */
-router.get('/trends', authenticateUser, report.loansTrends);           // alias
-router.get('/loans/trends', authenticateUser, report.loansTrends);
+// also support hyphen variants used by some frontends
+router.get('/export-csv', authenticateUser, report.exportCSV);
+router.get('/export-pdf', authenticateUser, report.exportPDF);
 
-/** ------- Core summaries used by the sidebar items ------- */
+/** ---------- Granular endpoints for each sidebar item ---------- */
 router.get('/borrowers/loan-summary', authenticateUser, report.borrowersLoanSummary);
 router.get('/loans/summary', authenticateUser, report.loansSummary);
 router.get('/arrears-aging', authenticateUser, report.arrearsAging);
@@ -30,9 +34,5 @@ router.get('/outstanding', authenticateUser, report.outstandingReport);
 router.get('/par/summary', authenticateUser, report.parSummary);
 router.get('/at-a-glance', authenticateUser, report.atAGlance);
 router.get('/all-entries', authenticateUser, report.allEntries);
-
-/** ------- Exports ------- */
-router.get('/export/csv', authenticateUser, report.exportCSV);
-router.get('/export/pdf', authenticateUser, report.exportPDF);
 
 module.exports = router;
