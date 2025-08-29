@@ -5,7 +5,6 @@ const { v4: uuidv4 } = require('uuid');
 let Branch, sequelize, Op;
 let Setting;
 try {
-  // Prefer a single import to avoid duplicate instances
   ({ Branch, Setting, sequelize, Sequelize: { Op } } = require('../models'));
 } catch (e) {
   const models = require('../models');
@@ -19,16 +18,36 @@ try {
 const branchesKey = (tenantId) =>
   tenantId ? `tenant_${tenantId}_branches` : 'branches_default';
 
-/* ------------------------------- Helpers --------------------------------- */
+/* -------------------------------- Helpers --------------------------------- */
 const pick = (obj = {}, keys = []) => {
   const out = {};
   for (const k of keys) if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k];
   return out;
 };
 
+const hasAttr = (model, key) =>
+  Boolean(model?.rawAttributes && model.rawAttributes[key]);
+
+/** Keep only fields that are actual model attributes; also accept snake_case field names. */
+function pickModelFields(model, payload = {}) {
+  if (!model?.rawAttributes || !payload) return payload || {};
+  const out = {};
+  for (const [attrKey, def] of Object.entries(model.rawAttributes)) {
+    if (Object.prototype.hasOwnProperty.call(payload, attrKey)) {
+      out[attrKey] = payload[attrKey];
+      continue;
+    }
+    // allow API clients to send the underlying DB field name
+    if (def?.field && Object.prototype.hasOwnProperty.call(payload, def.field)) {
+      out[attrKey] = payload[def.field];
+    }
+  }
+  return out;
+}
+
 function normalizeQuery(q = {}) {
   const page = Math.max(parseInt(q.page || '1', 10), 1);
-  const pageSizeRaw = q.pageSize || q.limit || '25'; // accept both pageSize & limit
+  const pageSizeRaw = q.pageSize || q.limit || '25';
   const pageSize = Math.min(Math.max(parseInt(pageSizeRaw, 10) || 25, 1), 200);
   const search = String(q.q || q.search || '').trim();
   const active =
@@ -43,29 +62,39 @@ function normalizeQuery(q = {}) {
 }
 
 function codeFromName(name = '') {
-  return String(name)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
+  return String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
-/* ------------------------------- DB MODE --------------------------------- */
+/* -------------------------------- DB MODE --------------------------------- */
 async function dbList(req, res, tenantId) {
   const { page, pageSize, search, active } = normalizeQuery(req.query);
   const where = {};
-  if (tenantId && Branch?.rawAttributes?.tenantId) where.tenantId = tenantId;
-  if (active !== null && Branch?.rawAttributes?.isActive) where.isActive = active;
+
+  if (tenantId && hasAttr(Branch, 'tenantId')) where.tenantId = tenantId;
+  if (active !== null && hasAttr(Branch, 'isActive')) where.isActive = active;
+
+  // Search only across attributes that exist
   if (search && Op) {
-    where[Op.or] = [
-      { name: { [Op.iLike || Op.like]: `%${search}%` } },
-      { code: { [Op.iLike || Op.like]: `%${search}%` } },
-      { city: { [Op.iLike || Op.like]: `%${search}%` } },
-    ];
+    const like = Op.iLike || Op.like;
+    const ors = [];
+    if (hasAttr(Branch, 'name'))  ors.push({ name: { [like]: `%${search}%` } });
+    if (hasAttr(Branch, 'code'))  ors.push({ code: { [like]: `%${search}%` } });
+    if (hasAttr(Branch, 'city'))  ors.push({ city: { [like]: `%${search}%` } });
+    if (ors.length) where[Op.or] = ors;
   }
+
+  // Safe ordering
+  const order = hasAttr(Branch, 'name')
+    ? [['name', 'ASC']]
+    : hasAttr(Branch, 'createdAt')
+    ? [['createdAt', 'DESC']]
+    : hasAttr(Branch, 'id')
+    ? [['id', 'ASC']]
+    : undefined;
 
   const { rows, count } = await Branch.findAndCountAll({
     where,
-    order: [['name', 'ASC']],
+    order,
     offset: (page - 1) * pageSize,
     limit: pageSize,
   });
@@ -78,7 +107,7 @@ async function dbList(req, res, tenantId) {
 
 async function dbGet(req, res, tenantId) {
   const where = { id: req.params.id };
-  if (tenantId && Branch?.rawAttributes?.tenantId) where.tenantId = tenantId;
+  if (tenantId && hasAttr(Branch, 'tenantId')) where.tenantId = tenantId;
 
   const row = await Branch.findOne({ where });
   if (!row) return res.status(404).json({ message: 'Branch not found' });
@@ -86,20 +115,19 @@ async function dbGet(req, res, tenantId) {
 }
 
 async function dbCreate(req, res, tenantId) {
-  const body = pick(req.body, [
-    'name',
-    'code',
-    'phone',
-    'email',
-    'address',
-    'city',
-    'country',
-    'isActive',
+  // Accept only known fields, then set safe defaults
+  const incoming = pick(req.body, [
+    'name', 'code', 'phone', 'email', 'address', 'city', 'country', 'isActive',
   ]);
-  if (!body.name) return res.status(400).json({ message: 'name is required' });
-  if (!body.code) body.code = codeFromName(body.name);
-  if (tenantId && Branch?.rawAttributes?.tenantId) body.tenantId = tenantId;
-  if (typeof body.isActive === 'undefined' && Branch?.rawAttributes?.isActive) body.isActive = true;
+
+  if (!incoming.name) return res.status(400).json({ message: 'name is required' });
+  if (!incoming.code) incoming.code = codeFromName(incoming.name);
+
+  // Filter to model attributes only (prevents unknown columns like isActive when absent)
+  let body = pickModelFields(Branch, incoming);
+
+  if (tenantId && hasAttr(Branch, 'tenantId')) body.tenantId = tenantId;
+  if (hasAttr(Branch, 'isActive') && typeof body.isActive === 'undefined') body.isActive = true;
 
   const created = await Branch.create(body);
   return res.status(201).json(created);
@@ -107,30 +135,25 @@ async function dbCreate(req, res, tenantId) {
 
 async function dbUpdate(req, res, tenantId) {
   const where = { id: req.params.id };
-  if (tenantId && Branch?.rawAttributes?.tenantId) where.tenantId = tenantId;
+  if (tenantId && hasAttr(Branch, 'tenantId')) where.tenantId = tenantId;
 
   const row = await Branch.findOne({ where });
   if (!row) return res.status(404).json({ message: 'Branch not found' });
 
-  const body = pick(req.body, [
-    'name',
-    'code',
-    'phone',
-    'email',
-    'address',
-    'city',
-    'country',
-    'isActive',
+  const incoming = pick(req.body, [
+    'name', 'code', 'phone', 'email', 'address', 'city', 'country', 'isActive',
   ]);
-  if (body.name && !body.code) body.code = codeFromName(body.name);
+  if (incoming.name && !incoming.code) incoming.code = codeFromName(incoming.name);
 
-  await row.update(body);
+  const patch = pickModelFields(Branch, incoming);
+
+  await row.update(patch);
   return res.json(row);
 }
 
 async function dbDelete(req, res, tenantId) {
   const where = { id: req.params.id };
-  if (tenantId && Branch?.rawAttributes?.tenantId) where.tenantId = tenantId;
+  if (tenantId && hasAttr(Branch, 'tenantId')) where.tenantId = tenantId;
 
   const row = await Branch.findOne({ where });
   if (!row) return res.status(404).json({ message: 'Branch not found' });
@@ -139,7 +162,7 @@ async function dbDelete(req, res, tenantId) {
   return res.json({ ok: true });
 }
 
-/* --------------------------- SETTINGS (fallback) -------------------------- */
+/* --------------------------- SETTINGS (fallback) --------------------------- */
 async function kvList(req, res, tenantId) {
   const { page, pageSize, search, active } = normalizeQuery(req.query);
   const key = branchesKey(tenantId);
@@ -171,14 +194,7 @@ async function kvGet(req, res, tenantId) {
 
 async function kvCreate(req, res, tenantId, userId) {
   const body = pick(req.body, [
-    'name',
-    'code',
-    'phone',
-    'email',
-    'address',
-    'city',
-    'country',
-    'isActive',
+    'name', 'code', 'phone', 'email', 'address', 'city', 'country', 'isActive',
   ]);
   if (!body.name) return res.status(400).json({ message: 'name is required' });
   if (!body.code) body.code = codeFromName(body.name);
@@ -205,21 +221,14 @@ async function kvUpdate(req, res, tenantId, userId) {
   const idx = all.findIndex((b) => String(b.id) === String(req.params.id));
   if (idx === -1) return res.status(404).json({ message: 'Branch not found' });
 
-  const patch = pick(req.body, [
-    'name',
-    'code',
-    'phone',
-    'email',
-    'address',
-    'city',
-    'country',
-    'isActive',
+  const patch0 = pick(req.body, [
+    'name', 'code', 'phone', 'email', 'address', 'city', 'country', 'isActive',
   ]);
-  if (patch.name && !patch.code) patch.code = codeFromName(patch.name);
+  if (patch0.name && !patch0.code) patch0.code = codeFromName(patch0.name);
 
   const updated = {
     ...all[idx],
-    ...patch,
+    ...patch0,
     updatedAt: new Date().toISOString(),
     updatedBy: userId || null,
   };
@@ -238,7 +247,7 @@ async function kvDelete(req, res, tenantId, userId) {
   return res.json({ ok: true });
 }
 
-/* ------------------------------- Public API ------------------------------- */
+/* -------------------------------- Public API ------------------------------- */
 exports.list = async (req, res) => {
   const tenantId = req.headers['x-tenant-id'] || null;
   if (Branch && typeof Branch.findAndCountAll === 'function') return dbList(req, res, tenantId);

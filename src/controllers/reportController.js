@@ -1,12 +1,10 @@
 /* eslint-disable no-console */
-'use strict';
-
 const { Op, fn, col } = require('sequelize');
 const { Parser } = require('json2csv');
 const PDFDocument = require('pdfkit');
 
 let db = {};
-try { db = require('../models'); } catch { db = {}; }
+try { db = require('../models'); } catch (e) { db = {}; }
 
 // Prefer whichever models exist in your build
 const Loan               = db.Loan || db.Loans;
@@ -17,31 +15,58 @@ const User               = db.User || db.Users;
 const LoanProduct        = db.LoanProduct || db.Product || db.LoanProducts;
 const SavingsTransaction = db.SavingsTransaction || db.SavingsTx;
 
-/* ------------------------------- helpers ---------------------------------- */
+/* ------------------------- cross-schema safe helpers ------------------------ */
 const safeNumber = (v) => Number(v || 0);
-const hasAttr = (Model, name) => !!Model?.rawAttributes?.[name];
 
-const getTenantId = (req) =>
-  req.headers['x-tenant-id'] || req.query.tenantId || req.user?.tenantId || null;
+// Does model have an attribute by attribute key or underlying DB field?
+function hasAttr(model, name) {
+  if (!model?.rawAttributes) return false;
+  for (const [key, def] of Object.entries(model.rawAttributes)) {
+    if (key === name || def?.field === name) return true;
+  }
+  return false;
+}
 
-const withTenant = (req, Model, where = {}) => {
-  const tenantId = getTenantId(req);
-  return tenantId && hasAttr(Model, 'tenantId')
-    ? { ...where, tenantId }
-    : where;
-};
+// Resolve the first attribute that exists; returns { attrKey, fieldName }
+function resolveAttr(model, candidates = []) {
+  if (!model?.rawAttributes) return null;
+  for (const want of candidates) {
+    for (const [key, def] of Object.entries(model.rawAttributes)) {
+      if (key === want || def?.field === want) {
+        return { attrKey: key, fieldName: def?.field || key };
+      }
+    }
+  }
+  return null;
+}
 
-async function sumSafe(Model, columns, where = {}) {
+// Return first *attribute key* that exists from candidates
+function pickAttrKey(model, candidates = []) {
+  const r = resolveAttr(model, candidates);
+  return r ? r.attrKey : null;
+}
+
+// Return first *field/column name* that exists from candidates
+function pickFieldName(model, candidates = []) {
+  const r = resolveAttr(model, candidates);
+  return r ? r.fieldName : null;
+}
+
+// Guarded SUM — tries candidate columns in order
+async function sumSafe(model, columns, where = {}) {
   for (const c of columns) {
+    const key = pickAttrKey(model, [c]);
+    if (!key) continue;
     try {
-      const s = await Model.sum(c, { where });
+      const s = await model.sum(key, { where });
       if (Number.isFinite(Number(s))) return safeNumber(s);
     } catch { /* try next */ }
   }
   return 0;
 }
-async function countSafe(Model, where = {}) {
-  try { return await Model.count({ where }); } catch { return 0; }
+
+async function countSafe(model, where = {}) {
+  try { return await model.count({ where }); } catch { return 0; }
 }
 
 function parseDates(q) {
@@ -51,12 +76,15 @@ function parseDates(q) {
   const asOf      = q.asOf      ? new Date(q.asOf)      : now;
   return { startDate, endDate, asOf };
 }
-function betweenRange(field, startDate, endDate) {
+
+function betweenRange(fieldAttrKey, startDate, endDate) {
+  if (!fieldAttrKey) return {};
   if (!startDate && !endDate) return {};
-  if (startDate && endDate) return { [field]: { [Op.between]: [startDate, endDate] } };
-  if (startDate) return { [field]: { [Op.gte]: startDate } };
-  return { [field]: { [Op.lte]: endDate } };
+  if (startDate && endDate) return { [fieldAttrKey]: { [Op.between]: [startDate, endDate] } };
+  if (startDate) return { [fieldAttrKey]: { [Op.gte]: startDate } };
+  return { [fieldAttrKey]: { [Op.lte]: endDate } };
 }
+
 function scopeText({ branchId, officerId, borrowerId, productId }) {
   const bits = [];
   bits.push(branchId ? `Branch #${branchId}` : 'All branches');
@@ -65,6 +93,7 @@ function scopeText({ branchId, officerId, borrowerId, productId }) {
   bits.push(productId ? `Product #${productId}` : 'All products');
   return bits.join(' · ');
 }
+
 function periodText({ startDate, endDate, asOf, snapshot = false }) {
   if (snapshot) return asOf ? asOf.toISOString().slice(0,10) : '';
   if (!startDate && !endDate) return 'All time';
@@ -72,64 +101,90 @@ function periodText({ startDate, endDate, asOf, snapshot = false }) {
   const e = endDate   ? endDate.toISOString().slice(0,10)   : '…';
   return `${s} → ${e}`;
 }
-function principalOf(loan) {
-  const v = loan?.amount ?? loan?.principal ?? loan?.principalAmount ?? 0;
-  return safeNumber(v);
-}
-const paymentDateField = hasAttr(LoanPayment, 'paymentDate') ? 'paymentDate' : 'createdAt';
 
-/** Sum paid by loan, up to a date, tenant-scoped, resilient to missing columns. */
-async function paidByLoanMap(req, asOf = new Date()) {
-  if (!LoanPayment) return new Map();
-
-  const whereBase = {
-    ...(hasAttr(LoanPayment, 'status') ? { status: 'approved' } : {}),
-    ...(hasAttr(LoanPayment, 'applied') ? { applied: true } : {}),
-    [paymentDateField]: { [Op.lte]: asOf },
-  };
-
-  const where = withTenant(req, LoanPayment, whereBase);
-
-  let rows = [];
-  try {
-    rows = await LoanPayment.findAll({
-      where,
-      attributes: ['loanId', [fn('sum', col(hasAttr(LoanPayment, 'amountPaid') ? 'amountPaid' : 'amount')), 'paid']],
-      group: ['loanId'],
-      raw: true,
-    });
-  } catch {
-    // Retry without status/applied if DB lacks the columns (extreme fallback)
-    rows = await LoanPayment.findAll({
-      where: withTenant(req, LoanPayment, { [paymentDateField]: { [Op.lte]: asOf } }),
-      attributes: ['loanId', [fn('sum', col(hasAttr(LoanPayment, 'amountPaid') ? 'amountPaid' : 'amount')), 'paid']],
-      group: ['loanId'],
-      raw: true,
-    });
-  }
-
-  return new Map(rows.map(r => [String(r.loanId), safeNumber(r.paid)]));
+// Multi-tenant helper — add tenantId if model supports it
+function tenantFilter(model, req) {
+  const tenantId =
+    req?.tenant?.id ||
+    req?.headers?.['x-tenant-id'] ||
+    req?.headers?.['X-Tenant-Id'];
+  const key = pickAttrKey(model, ['tenantId', 'tenant_id']);
+  return tenantId && key ? { [key]: tenantId } : {};
 }
 
-/** Compute outstanding per loan = principal - paid (≥ 0) */
-async function computeOutstandingByLoan(req, asOf = new Date()) {
+/* ----------------------------- business helpers ---------------------------- */
+// Compute outstanding per loan as of a date (defaults to now)
+// Robust to column name differences (amount/principal, paymentDate/createdAt, etc.)
+async function computeOutstandingByLoan(asOf = new Date(), req = null) {
   if (!Loan) return [];
 
-  const paidMap = await paidByLoanMap(req, asOf);
+  // Resolve Loan attributes
+  const idField       = pickFieldName(Loan, ['id']);
+  const idKey         = pickAttrKey(Loan,   ['id']);
 
-  const whereLoans = withTenant(req, Loan, {});
+  const borrowerKey   = pickAttrKey(Loan, ['borrowerId', 'borrower_id']);
+  const productKey    = pickAttrKey(Loan, ['productId', 'product_id']);
+  const amountKey     = pickAttrKey(Loan, ['amount', 'loanAmount', 'principalAmount']);
+  const principalKey  = pickAttrKey(Loan, ['principal', 'principalAmount', 'amount', 'loanAmount']);
+  const createdAtKey  = pickAttrKey(Loan, ['createdAt', 'created_at']);
+
+  // Resolve LoanPayment attributes
+  const lpLoanIdKey   = pickAttrKey(LoanPayment, ['loanId', 'loan_id']);
+  const lpAmountKey   = pickAttrKey(LoanPayment, ['amountPaid', 'amount', 'paidAmount', 'paymentAmount']);
+  const lpStatusKey   = pickAttrKey(LoanPayment, ['status']);
+  const lpAppliedKey  = pickAttrKey(LoanPayment, ['applied']);
+  const lpDateKey     = pickAttrKey(LoanPayment, ['paymentDate', 'date', 'createdAt', 'created_at']);
+
+  // Sum payments per loan up to asOf
+  let paidMap = new Map();
+  if (LoanPayment && lpLoanIdKey && lpAmountKey) {
+    const where = {
+      ...(lpStatusKey ? { [lpStatusKey]: 'approved' } : {}),
+      ...(lpAppliedKey ? { [lpAppliedKey]: true } : {}),
+      ...(lpDateKey ? { [lpDateKey]: { [Op.lte]: asOf } } : {}),
+      ...tenantFilter(LoanPayment, req),
+    };
+
+    // SELECT loanId, SUM(amountPaid) AS paid FROM loan_payments GROUP BY loanId
+    const attrs = [];
+    attrs.push([col(LoanPayment.rawAttributes[lpLoanIdKey].field || lpLoanIdKey), 'loanId']);
+    attrs.push([fn('sum', col(LoanPayment.rawAttributes[lpAmountKey].field || lpAmountKey)), 'paid']);
+
+    const paidByLoan = await LoanPayment.findAll({
+      where,
+      attributes: attrs,
+      group: [col(LoanPayment.rawAttributes[lpLoanIdKey].field || lpLoanIdKey)],
+      raw: true,
+    });
+
+    paidMap = new Map((paidByLoan || []).map(r => [String(r.loanId), safeNumber(r.paid)]));
+  }
+
+  // Fetch loans (only the columns that exist)
+  const loanAttrs = [];
+  if (idField)      loanAttrs.push([col(idField), 'id']);
+  if (borrowerKey)  loanAttrs.push([col(Loan.rawAttributes[borrowerKey].field || borrowerKey), 'borrowerId']);
+  if (productKey)   loanAttrs.push([col(Loan.rawAttributes[productKey].field  || productKey),  'productId']);
+  if (amountKey)    loanAttrs.push([col(Loan.rawAttributes[amountKey].field    || amountKey),   'amount']);
+  if (principalKey) loanAttrs.push([col(Loan.rawAttributes[principalKey].field || principalKey), 'principal']);
+  if (createdAtKey) loanAttrs.push([col(Loan.rawAttributes[createdAtKey].field || createdAtKey), 'createdAt']);
+
   const loans = await Loan.findAll({
-    where: whereLoans,
-    attributes: ['id','borrowerId','productId','amount','principal','createdAt'],
+    attributes: loanAttrs.length ? loanAttrs : undefined,
+    where: { ...tenantFilter(Loan, req) },
     raw: true,
   });
 
-  const rows = loans.map(l => {
-    const principal = principalOf(l);
+  // Compute outstanding (principal or amount minus paid)
+  const rows = (loans || []).map(l => {
+    const principal = safeNumber(
+      l.principal != null ? l.principal :
+      l.amount    != null ? l.amount    : 0
+    );
     const paid = paidMap.get(String(l.id)) || 0;
     const outstanding = Math.max(0, principal - paid);
     return { loanId: l.id, outstanding };
-  }).filter(r => r.outstanding > 0);
+  }).filter(r => r.loanId && r.outstanding > 0);
 
   return rows;
 }
@@ -137,94 +192,122 @@ async function computeOutstandingByLoan(req, asOf = new Date()) {
 /* --------------------------------- FILTERS --------------------------------- */
 exports.getFilters = async (req, res) => {
   try {
-    const whereBranch   = withTenant(req, Branch, {});
-    const whereBorrower = withTenant(req, Borrower, {});
-    const whereUser     = withTenant(req, User,    hasAttr(User, 'role') ? { role: 'loan_officer' } : {});
-    const whereProduct  = withTenant(req, LoanProduct, {});
-
     const [branches, officers, borrowers, products] = await Promise.all([
-      Branch      ? Branch.findAll({ where: whereBranch,   attributes: ['id','name'], order: [['name','ASC']], raw: true }) : [],
-      User        ? User.findAll({   where: whereUser,     attributes: ['id','name','email'], order: [['name','ASC']], raw: true }) : [],
-      Borrower    ? Borrower.findAll({ where: whereBorrower, attributes: ['id','name'], order: [['name','ASC']], raw: true }) : [],
-      LoanProduct ? LoanProduct.findAll({ where: whereProduct, attributes: ['id','name'], order: [['name','ASC']], raw: true }) : [],
+      Branch ? Branch.findAll({
+        attributes: hasAttr(Branch, 'name')
+          ? ['id', 'name']
+          : ['id'],
+        where: { ...tenantFilter(Branch, req) },
+        order: hasAttr(Branch, 'name') ? [['name', 'ASC']] : undefined,
+        raw: true,
+      }) : [],
+      User ? User.findAll({
+        attributes: ['id', ...(hasAttr(User, 'name') ? ['name'] : []), ...(hasAttr(User, 'email') ? ['email'] : [])],
+        where: {
+          ...(hasAttr(User, 'role') ? { role: 'loan_officer' } : {}),
+          ...tenantFilter(User, req),
+        },
+        order: hasAttr(User, 'name') ? [['name', 'ASC']] : undefined,
+        raw: true,
+      }) : [],
+      Borrower ? Borrower.findAll({
+        attributes: ['id', ...(hasAttr(Borrower, 'name') ? ['name'] : [])],
+        where: { ...tenantFilter(Borrower, req) },
+        order: hasAttr(Borrower, 'name') ? [['name', 'ASC']] : undefined,
+        raw: true,
+      }) : [],
+      LoanProduct ? LoanProduct.findAll({
+        attributes: ['id', ...(hasAttr(LoanProduct, 'name') ? ['name'] : [])],
+        where: { ...tenantFilter(LoanProduct, req) },
+        order: hasAttr(LoanProduct, 'name') ? [['name', 'ASC']] : undefined,
+        raw: true,
+      }) : [],
     ]);
-    res.json({ branches, officers, borrowers, products });
+    res.json({ branches, officers, borrowers, products, welcome: 'Welcome! Choose filters and export whenever ready.' });
   } catch (e) {
     console.error('filters error:', e);
-    res.json({ branches: [], officers: [], borrowers: [], products: [] });
+    res.json({ branches: [], officers: [], borrowers: [], products: [], welcome: 'Welcome!' });
   }
 };
 
-/* ---------------------------- BORROWER SUMMARY ----------------------------- */
+/* ------------------------- BORROWERS (loan summary) ------------------------ */
 exports.borrowersLoanSummary = async (req, res) => {
   try {
     const { branchId, officerId, borrowerId } = req.query;
     const { startDate, endDate } = parseDates(req.query);
 
-    const loanWhereBase = {
-      ...(borrowerId ? { borrowerId } : {}),
-      ...(startDate || endDate ? betweenRange('createdAt', startDate, endDate) : {}),
+    // Loan filters
+    const loanDateKey = pickAttrKey(Loan, ['createdAt', 'created_at']);
+    const loanWhere = {
+      ...(borrowerId && hasAttr(Loan, 'borrowerId') ? { borrowerId } : {}),
+      ...(startDate || endDate ? betweenRange(loanDateKey, startDate, endDate) : {}),
+      ...tenantFilter(Loan, req),
     };
-    const loanWhere = withTenant(req, Loan, loanWhereBase);
 
+    // Totals
     const [loanCount, totalDisbursed] = await Promise.all([
       Loan ? countSafe(Loan, loanWhere) : 0,
-      Loan ? sumSafe(Loan, ['amount','principal','principalAmount'], loanWhere) : 0,
+      Loan ? sumSafe(Loan, ['amount', 'principal', 'principalAmount', 'loanAmount'], loanWhere) : 0,
     ]);
 
-    // payments
-    let payWhereBase = {
-      ...(hasAttr(LoanPayment, 'status') ? { status: 'approved' } : {}),
-      ...(hasAttr(LoanPayment, 'applied') ? { applied: true } : {}),
-      ...(startDate || endDate ? betweenRange(paymentDateField, startDate, endDate) : {}),
-      ...(branchId ? { branchId } : {}),
-      ...(officerId ? { officerId } : {}),
-      ...(borrowerId ? { borrowerId } : {}),
-    };
-    payWhereBase = withTenant(req, LoanPayment, payWhereBase);
+    // Collections (schema aware)
+    let totalRepayments = 0;
+    if (LoanPayment) {
+      const lpAmountKey  = pickAttrKey(LoanPayment, ['amountPaid', 'amount', 'paidAmount', 'paymentAmount']);
+      const lpDateKey    = pickAttrKey(LoanPayment, ['paymentDate', 'date', 'createdAt', 'created_at']);
+      const lpStatusKey  = pickAttrKey(LoanPayment, ['status']);
+      const lpAppliedKey = pickAttrKey(LoanPayment, ['applied']);
 
-    const totalRepayments = LoanPayment
-      ? await sumSafe(LoanPayment, [hasAttr(LoanPayment, 'amountPaid') ? 'amountPaid' : 'amount'], payWhereBase)
-      : 0;
+      const payWhere = {
+        ...(lpStatusKey ? { [lpStatusKey]: 'approved' } : {}),
+        ...(lpAppliedKey ? { [lpAppliedKey]: true } : {}),
+        ...(lpDateKey ? betweenRange(lpDateKey, startDate, endDate) : {}),
+        ...(branchId && hasAttr(LoanPayment, 'branchId') ? { branchId } : {}),
+        ...(officerId && hasAttr(LoanPayment, 'officerId') ? { officerId } : {}),
+        ...(borrowerId && hasAttr(LoanPayment, 'borrowerId') ? { borrowerId } : {}),
+        ...tenantFilter(LoanPayment, req),
+      };
+      totalRepayments = lpAmountKey ? await sumSafe(LoanPayment, [lpAmountKey], payWhere) : 0;
+    }
 
-    // Outstanding & arrears (no schedule → arrears=0)
-    const outstandingRows = await computeOutstandingByLoan(req, new Date());
+    const outstandingRows = await computeOutstandingByLoan(new Date(), req);
     const outstandingBalance = outstandingRows.reduce((s, r) => s + safeNumber(r.outstanding), 0);
 
-    const payload = {
-      welcome: 'Hi there! Here’s a friendly snapshot of your borrowers portfolio. 👋',
-      summary: {
-        loanCount,
-        totalRepayments,
-        defaulterCount: 0,
-      },
+    // place-holders pending schedule/due-date table
+    const defaulterCount = 0;
+    const arrearsAmount  = 0;
+
+    res.json({
+      summary: { loanCount, totalRepayments, defaulterCount },
       table: {
-        rows: [
-          { metric: 'Total Loans Count', value: loanCount },
-          { metric: 'Total Disbursed', value: totalDisbursed, currency: true },
-          { metric: 'Total Repayments', value: totalRepayments, currency: true },
-          { metric: 'Outstanding Balance', value: outstandingBalance, currency: true },
-          { metric: 'Arrears Count', value: 0 },
-          { metric: 'Arrears Amount', value: 0, currency: true },
+        columns: [
+          { key: 'metric', label: 'Metric' },
+          { key: 'value',  label: 'Value', currency: true }
         ],
+        rows: [
+          { metric: 'Total Loans Count',   value: loanCount },
+          { metric: 'Total Disbursed',     value: totalDisbursed, currency: true },
+          { metric: 'Total Repayments',    value: totalRepayments, currency: true },
+          { metric: 'Outstanding Balance', value: outstandingBalance, currency: true },
+          { metric: 'Arrears Count',       value: defaulterCount },
+          { metric: 'Arrears Amount',      value: arrearsAmount, currency: true },
+        ],
+        period: periodText({ startDate, endDate }),
+        scope:  scopeText({ branchId, officerId, borrowerId }),
       },
-      period: periodText({ startDate, endDate }),
-      scope: scopeText({ branchId, officerId, borrowerId }),
-    };
-    res.json(payload);
+      welcome: 'Here is a friendly summary for your borrowers. Apply filters to narrow focus and export anytime!',
+    });
   } catch (err) {
     console.error('borrowersLoanSummary error:', err);
     res.json({
-      welcome: 'Hi! We couldn’t fetch everything just now, but here’s what we have.',
       summary: { loanCount: 0, totalRepayments: 0, defaulterCount: 0 },
-      table: { rows: [] },
-      period: periodText({}),
-      scope: scopeText({}),
+      table: { rows: [], period: periodText({}), scope: scopeText({}) },
+      welcome: 'No data yet — try a different filter range.',
     });
   }
 };
 
-/* --------------------------------- TRENDS ---------------------------------- */
+/* ---------------------------------- Trends --------------------------------- */
 exports.loansTrends = async (req, res) => {
   try {
     const year = Number(req.query.year) || new Date().getFullYear();
@@ -232,27 +315,39 @@ exports.loansTrends = async (req, res) => {
     const end   = new Date(`${year}-12-31T23:59:59.999Z`);
     const monthly = Array.from({length:12},(_,i)=>({month:i+1,loans:0,repayments:0}));
 
-    const loanWhere = withTenant(req, Loan, { createdAt: { [Op.between]: [start, end] } });
+    const loanDateKey = pickAttrKey(Loan, ['createdAt', 'created_at']);
+    const loanAmountKey = pickAttrKey(Loan, ['amount', 'principal', 'principalAmount', 'loanAmount']);
+
+    const payDateKey   = pickAttrKey(LoanPayment, ['paymentDate', 'date', 'createdAt', 'created_at']);
+    const payAmtKey    = pickAttrKey(LoanPayment, ['amountPaid', 'amount', 'paidAmount', 'paymentAmount']);
+
     const loans = Loan ? await Loan.findAll({
-      where: loanWhere,
-      attributes: ['amount','principal','createdAt'],
+      where: {
+        ...(loanDateKey ? { [loanDateKey]: { [Op.between]: [start, end] } } : {}),
+        ...tenantFilter(Loan, req),
+      },
+      attributes: [loanAmountKey || 'id', loanDateKey || 'id'],
       raw: true,
     }) : [];
 
-    const payWhere = withTenant(req, LoanPayment, { [paymentDateField]: { [Op.between]: [start, end] } });
-    const pays = LoanPayment ? await LoanPayment.findAll({
-      where: payWhere,
-      attributes: [hasAttr(LoanPayment,'amountPaid')?'amountPaid':'amount', paymentDateField],
+    const pays = (LoanPayment && payAmtKey) ? await LoanPayment.findAll({
+      where: {
+        ...(payDateKey ? { [payDateKey]: { [Op.between]: [start, end] } } : {}),
+        ...tenantFilter(LoanPayment, req),
+      },
+      attributes: [payAmtKey, payDateKey || 'id'],
       raw: true,
     }) : [];
 
     loans.forEach(l => {
-      const m = new Date(l.createdAt).getMonth();
-      monthly[m].loans += safeNumber(l.amount ?? l.principal);
+      const dt = loanDateKey ? l[loanDateKey] : null;
+      const m = dt ? new Date(dt).getMonth() : 0;
+      monthly[m].loans += safeNumber(l[loanAmountKey] || 0);
     });
     pays.forEach(p => {
-      const m = new Date(p[paymentDateField]).getMonth();
-      monthly[m].repayments += safeNumber(p.amountPaid ?? p.amount);
+      const dt = payDateKey ? p[payDateKey] : null;
+      const m = dt ? new Date(dt).getMonth() : 0;
+      monthly[m].repayments += safeNumber(p[payAmtKey] || 0);
     });
 
     res.json(monthly);
@@ -262,66 +357,87 @@ exports.loansTrends = async (req, res) => {
   }
 };
 
-/* ------------------------------ LOANS SUMMARY ------------------------------ */
+/* ------------------------- Loans summary/register -------------------------- */
 exports.loansSummary = async (req, res) => {
   try {
     const { productId } = req.query;
     const { startDate, endDate } = parseDates(req.query);
 
-    const whereBase = {
-      ...(productId ? { productId } : {}),
-      ...(startDate || endDate ? betweenRange('createdAt', startDate, endDate) : {}),
+    const loanDateKey = pickAttrKey(Loan, ['createdAt', 'created_at']);
+    const where = {
+      ...(productId && hasAttr(Loan, 'productId') ? { productId } : {}),
+      ...(startDate || endDate ? betweenRange(loanDateKey, startDate, endDate) : {}),
+      ...tenantFilter(Loan, req),
     };
-    const where = withTenant(req, Loan, whereBase);
 
     const [count, totalDisbursed] = await Promise.all([
       Loan ? countSafe(Loan, where) : 0,
-      Loan ? sumSafe(Loan, ['amount','principal'], where) : 0,
+      Loan ? sumSafe(Loan, ['amount','principal','principalAmount','loanAmount'], where) : 0,
     ]);
 
     let rows = [];
     if (Loan) {
+      const idKey        = pickAttrKey(Loan, ['id']);
+      const borrowerKey  = pickAttrKey(Loan, ['borrowerId','borrower_id']);
+      const productKey   = pickAttrKey(Loan, ['productId','product_id']);
+      const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+      const statusKey    = pickAttrKey(Loan, ['status']);
+      const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at']);
+
+      const attrs = [];
+      if (idKey)        attrs.push(idKey);
+      if (borrowerKey)  attrs.push(borrowerKey);
+      if (productKey)   attrs.push(productKey);
+      if (amountKey)    attrs.push(amountKey);
+      if (statusKey)    attrs.push(statusKey);
+      if (createdAtKey) attrs.push(createdAtKey);
+
       rows = await Loan.findAll({
         where,
-        attributes: ['id','borrowerId','productId','amount','status','createdAt'],
-        order: [['createdAt','DESC']],
+        attributes: attrs.length ? attrs : undefined,
+        order: createdAtKey ? [[createdAtKey, 'DESC']] : undefined,
         limit: 200,
         raw: true,
       });
     }
 
     res.json({
-      welcome: 'Welcome! Below is a tidy register of your loans.',
       summary: { loans: count, disbursed: totalDisbursed },
       rows,
       period: periodText({ startDate, endDate }),
       scope: scopeText(req.query),
+      welcome: 'This is your live loan register — filter, review, and export with confidence.',
     });
   } catch (e) {
     console.error('loansSummary error:', e);
-    res.json({ welcome: 'Hello!', summary:{loans:0,disbursed:0}, rows:[], period: periodText({}), scope: scopeText({}) });
+    res.json({ summary:{loans:0,disbursed:0}, rows:[], period: periodText({}), scope: scopeText({}), welcome: 'No loans in this range.' });
   }
 };
 
 exports.loansExportCSV = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
-    const where = withTenant(req, Loan, (startDate || endDate) ? betweenRange('createdAt', startDate, endDate) : {});
+    const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at']);
+    const where = {
+      ...(startDate || endDate ? betweenRange(createdAtKey, startDate, endDate) : {}),
+      ...tenantFilter(Loan, req),
+    };
+
+    const idKey        = pickAttrKey(Loan, ['id']);
+    const borrowerKey  = pickAttrKey(Loan, ['borrowerId','borrower_id']);
+    const productKey   = pickAttrKey(Loan, ['productId','product_id']);
+    const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+    const statusKey    = pickAttrKey(Loan, ['status']);
+
     const list = Loan ? await Loan.findAll({
       where,
-      attributes: ['id','borrowerId','productId','amount','status','createdAt'],
-      order: [['createdAt','DESC']],
-      raw: true,
+      attributes: [idKey, borrowerKey, productKey, amountKey, statusKey, createdAtKey].filter(Boolean),
+      order: createdAtKey ? [[createdAtKey,'DESC']] : undefined,
+      raw: true
     }) : [];
+
     const parser = new Parser();
-    const csv = parser.parse(list.map(l => ({
-      id: l.id,
-      borrowerId: l.borrowerId,
-      productId: l.productId,
-      amount: safeNumber(l.amount),
-      status: l.status || '',
-      createdAt: l.createdAt,
-    })));
+    const csv = parser.parse(list);
     res.header('Content-Type','text/csv');
     res.attachment('loans.csv');
     res.send(csv);
@@ -334,10 +450,25 @@ exports.loansExportCSV = async (req, res) => {
 exports.loansExportPDF = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
-    const where = withTenant(req, Loan, (startDate || endDate) ? betweenRange('createdAt', startDate, endDate) : {});
+    const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at']);
+    const where = {
+      ...(startDate || endDate ? betweenRange(createdAtKey, startDate, endDate) : {}),
+      ...tenantFilter(Loan, req),
+    };
+
+    const idKey        = pickAttrKey(Loan, ['id']);
+    const borrowerKey  = pickAttrKey(Loan, ['borrowerId','borrower_id']);
+    const productKey   = pickAttrKey(Loan, ['productId','product_id']);
+    const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+    const statusKey    = pickAttrKey(Loan, ['status']);
+
     const list = Loan ? await Loan.findAll({
-      where, attributes:['id','borrowerId','productId','amount','status','createdAt'], order:[['createdAt','DESC']], raw:true,
+      where,
+      attributes: [idKey, borrowerKey, productKey, amountKey, statusKey, createdAtKey].filter(Boolean),
+      order: createdAtKey ? [[createdAtKey,'DESC']] : undefined,
+      raw: true
     }) : [];
+
     const doc = new PDFDocument({ margin: 36 });
     const chunks = [];
     doc.on('data', d => chunks.push(d));
@@ -348,7 +479,11 @@ exports.loansExportPDF = async (req, res) => {
     });
     doc.fontSize(16).text('Loan Report', { align: 'center' }).moveDown();
     list.forEach(l => {
-      doc.fontSize(11).text(`Loan #${l.id} • Borrower ${l.borrowerId} • Product ${l.productId} • Amount ${safeNumber(l.amount).toLocaleString()} • ${l.status || ''} • ${new Date(l.createdAt).toISOString().slice(0,10)}`);
+      const when = createdAtKey && l[createdAtKey] ? String(l[createdAtKey]).slice(0,10) : '';
+      const amt  = amountKey && l[amountKey] != null ? Number(l[amountKey]).toLocaleString() : '0';
+      doc.fontSize(11).text(
+        `Loan #${l[idKey]} • Borrower ${borrowerKey? l[borrowerKey]:''} • Product ${productKey? l[productKey]:''} • Amount ${amt} • ${statusKey? (l[statusKey]||''):''} • ${when}`
+      );
     });
     doc.end();
   } catch (e) {
@@ -357,23 +492,22 @@ exports.loansExportPDF = async (req, res) => {
   }
 };
 
-/* --------------------------- ARREARS AGING (stub) -------------------------- */
+/* ---------------------- Arrears aging (placeholder) ------------------------ */
 exports.arrearsAging = async (req, res) => {
   try {
     const { asOf } = parseDates(req.query);
-    // No schedule table present → return a friendly, explicit stub
     res.json({
-      welcome: 'We’re ready to compute aging the moment a repayment schedule is available.',
       asOf,
       table: {
+        columns: [{ key:'bucket', label:'Bucket' }, { key:'count', label:'Count' }, { key:'amount', label:'Amount', currency:true }],
         rows: [
-          { metric: '1–29 Days',  value: 0, currency: true },
-          { metric: '30–59 Days', value: 0, currency: true },
-          { metric: '60–89 Days', value: 0, currency: true },
-          { metric: '90+ Days',   value: 0, currency: true },
+          { bucket: '1-29',  count: 0, amount: 0 },
+          { bucket: '30-59', count: 0, amount: 0 },
+          { bucket: '60-89', count: 0, amount: 0 },
+          { bucket: '90+',   count: 0, amount: 0 },
         ],
       },
-      scope: scopeText(req.query),
+      welcome: 'Aging buckets will populate once scheduled dues are tracked.',
     });
   } catch (e) {
     console.error('arrearsAging error:', e);
@@ -381,33 +515,35 @@ exports.arrearsAging = async (req, res) => {
   }
 };
 
-/* ------------------------------- COLLECTIONS ------------------------------- */
+/* -------------------------------- Collections ------------------------------ */
 exports.collectionsSummary = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
-    if (!LoanPayment) {
-      return res.json({
-        welcome: 'Collections are ready whenever payments start flowing in.',
-        summary:{ total:0, receipts:0 }, rows:[], period: periodText({startDate,endDate}), scope: scopeText(req.query),
-      });
-    }
+    if (!LoanPayment) return res.json({ summary:{total:0,receipts:0}, rows:[], period: periodText({startDate,endDate}), scope: scopeText(req.query) });
 
-    let whereBase = {
-      ...(hasAttr(LoanPayment, 'status') ? { status: 'approved' } : {}),
-      ...(hasAttr(LoanPayment, 'applied') ? { applied: true } : {}),
-      ...(startDate || endDate ? betweenRange(paymentDateField, startDate, endDate) : {}),
+    const lpAmountKey  = pickAttrKey(LoanPayment, ['amountPaid','amount','paidAmount','paymentAmount']);
+    const lpDateKey    = pickAttrKey(LoanPayment, ['paymentDate','date','createdAt','created_at']);
+    const lpStatusKey  = pickAttrKey(LoanPayment, ['status']);
+    const lpAppliedKey = pickAttrKey(LoanPayment, ['applied']);
+
+    const where = {
+      ...(lpStatusKey ? { [lpStatusKey]: 'approved' } : {}),
+      ...(lpAppliedKey ? { [lpAppliedKey]: true } : {}),
+      ...(lpDateKey ? betweenRange(lpDateKey, startDate, endDate) : {}),
+      ...tenantFilter(LoanPayment, req),
     };
-    const where = withTenant(req, LoanPayment, whereBase);
 
     const [total, receipts] = await Promise.all([
-      sumSafe(LoanPayment, [hasAttr(LoanPayment,'amountPaid')?'amountPaid':'amount'], where),
-      countSafe(LoanPayment, where),
+      lpAmountKey ? sumSafe(LoanPayment, [lpAmountKey], where) : 0,
+      countSafe(LoanPayment, where)
     ]);
 
     res.json({
-      welcome: 'Here’s a warm look at your collection activity. ☕',
-      summary:{ total, receipts }, rows:[],
-      period: periodText({startDate,endDate}), scope: scopeText(req.query),
+      summary:{ total, receipts },
+      rows:[],
+      period: periodText({startDate,endDate}),
+      scope: scopeText(req.query),
+      welcome: 'Collections at a glance — totals and receipts count.',
     });
   } catch (e) {
     console.error('collectionsSummary error:', e);
@@ -415,159 +551,215 @@ exports.collectionsSummary = async (req, res) => {
   }
 };
 
-/* -------------------------------- COLLECTOR -------------------------------- */
 exports.collectorSummary = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
     if (!LoanPayment) return res.json({ summary:{ total:0 }, rows:[], period: periodText({startDate,endDate}), scope: scopeText(req.query) });
 
-    let whereBase = {
-      ...(hasAttr(LoanPayment, 'status') ? { status: 'approved' } : {}),
-      ...(hasAttr(LoanPayment, 'applied') ? { applied: true } : {}),
-      ...(req.query.officerId ? { officerId: req.query.officerId } : {}),
-      ...(startDate || endDate ? betweenRange(paymentDateField, startDate, endDate) : {}),
-    };
-    const where = withTenant(req, LoanPayment, whereBase);
+    const lpAmountKey  = pickAttrKey(LoanPayment, ['amountPaid','amount','paidAmount','paymentAmount']);
+    const lpDateKey    = pickAttrKey(LoanPayment, ['paymentDate','date','createdAt','created_at']);
+    const lpStatusKey  = pickAttrKey(LoanPayment, ['status']);
+    const lpAppliedKey = pickAttrKey(LoanPayment, ['applied']);
 
-    const total = await sumSafe(LoanPayment, [hasAttr(LoanPayment,'amountPaid')?'amountPaid':'amount'], where);
-    res.json({ welcome: 'Collector performance at a glance.', summary:{ total }, rows:[], period: periodText({ startDate, endDate }), scope: scopeText(req.query) });
+    const where = {
+      ...(lpStatusKey ? { [lpStatusKey]: 'approved' } : {}),
+      ...(lpAppliedKey ? { [lpAppliedKey]: true } : {}),
+      ...(lpDateKey ? betweenRange(lpDateKey, startDate, endDate) : {}),
+      ...(req.query.officerId && hasAttr(LoanPayment, 'officerId') ? { officerId: req.query.officerId } : {}),
+      ...tenantFilter(LoanPayment, req),
+    };
+
+    const total = lpAmountKey ? await sumSafe(LoanPayment, [lpAmountKey], where) : 0;
+    res.json({
+      summary:{ total },
+      rows:[],
+      period: periodText({ startDate, endDate }),
+      scope: scopeText(req.query),
+      welcome: 'Collector summary — filter by officer to drill down.',
+    });
   } catch (e) {
     console.error('collectorSummary error:', e);
     res.json({ summary:{ total:0 }, rows:[], period: periodText({}), scope: scopeText({}) });
   }
 };
 
-/* ------------------------------ DEFERRED INCOME ---------------------------- */
+/* ------------------------------ Deferred income ---------------------------- */
 exports.deferredIncome = async (req, res) => {
   res.json({
-    welcome: 'Deferred income will populate once accruals are configured.',
     summary:{ accrued:0, received:0, deferred:0 },
     rows:[],
     period: periodText(parseDates(req.query)),
     scope: scopeText(req.query),
+    welcome: 'Deferred income coming soon (requires fee accrual tracking).'
   });
 };
 exports.deferredIncomeMonthly = async (req, res) => {
   const year = Number(req.query.year) || new Date().getFullYear();
   const rows = Array.from({length:12},(_,i)=>({ month:i+1, opening:0, accrued:0, received:0, closing:0 }));
-  res.json({ welcome: 'Monthly deferral roll-forward.', year, rows });
+  res.json({ year, rows, welcome: 'Monthly deferred income roll-forward (placeholder).' });
 };
 
-/* ---------------------------- PRO-RATA COLLECTIONS ------------------------- */
+/* ---------------------------- Pro-rata collections ------------------------- */
 exports.proRataCollections = async (req, res) => {
   res.json({
-    welcome: 'Once targets are set, we’ll show achievement vs. plan here.',
     summary:{ expected:0, actual:0, variance:0, achievement:0 },
     rows:[],
     period: periodText(parseDates(req.query)),
     scope: scopeText(req.query),
+    welcome: 'Pro-rata view will activate when targets are configured.'
   });
 };
 
-/* ------------------------------- DISBURSEMENTS ----------------------------- */
+/* -------------------------------- Disbursements ---------------------------- */
 exports.disbursementsSummary = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
-    const where = withTenant(req, Loan, (startDate || endDate) ? betweenRange('createdAt', startDate, endDate) : {});
+    const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at']);
+    const where = {
+      ...(startDate || endDate ? betweenRange(createdAtKey, startDate, endDate) : {}),
+      ...tenantFilter(Loan, req),
+    };
     const [count, total] = await Promise.all([
       Loan ? countSafe(Loan, where) : 0,
-      Loan ? sumSafe(Loan, ['amount','principal'], where) : 0,
+      Loan ? sumSafe(Loan, ['amount','principal','principalAmount','loanAmount'], where) : 0,
     ]);
-    res.json({ welcome:'Disbursements overview, ready to grow.', summary:{ count, total }, period: periodText({startDate,endDate}), scope: scopeText(req.query) });
+    res.json({
+      summary:{ count, total },
+      period: periodText({startDate,endDate}),
+      scope: scopeText(req.query),
+      welcome: 'Disbursements in the selected period.',
+    });
   } catch (e) {
     console.error('disbursementsSummary error:', e);
     res.json({ summary:{ count:0, total:0 }, period: periodText({}), scope: scopeText({}) });
   }
 };
 
-/* ----------------------------------- FEES ---------------------------------- */
+/* ------------------------------------ Fees -------------------------------- */
 exports.feesSummary = async (req, res) => {
-  res.json({ welcome:'Fees summary will appear once fee postings are enabled.', summary:{ total:0 }, byType:[], period: periodText(parseDates(req.query)), scope: scopeText(req.query) });
+  res.json({
+    summary:{ total:0 },
+    byType:[],
+    period: periodText(parseDates(req.query)),
+    scope: scopeText(req.query),
+    welcome: 'Fees breakdown will appear when fee postings are tracked.'
+  });
 };
 
-/* ------------------------------- LOAN OFFICERS ----------------------------- */
+/* -------------------------------- Loan officer ----------------------------- */
 exports.loanOfficerSummary = async (req, res) => {
-  res.json({ welcome:'Officer-level KPIs coming right up when enabled.', summary:{ disbursed:0, collections:0, par30:0 }, rows:[], period: periodText(parseDates(req.query)), scope: scopeText(req.query) });
+  res.json({
+    summary:{ disbursed:0, collections:0, par30:0 },
+    rows:[],
+    period: periodText(parseDates(req.query)),
+    scope: scopeText(req.query),
+    welcome: 'Officer performance snapshots coming soon.'
+  });
 };
 
-/* ------------------------------- LOAN PRODUCTS ----------------------------- */
+/* ------------------------------- Loan products ----------------------------- */
 exports.loanProductsSummary = async (req, res) => {
-  res.json({ welcome:'Product mix will populate as you start disbursing.', rows:[], period: periodText(parseDates(req.query)), scope: scopeText(req.query) });
+  res.json({
+    rows:[],
+    period: periodText(parseDates(req.query)),
+    scope: scopeText(req.query),
+    welcome: 'Product mix and yields will populate as data accrues.'
+  });
 };
 
-/* ----------------------------------- MFRS ---------------------------------- */
+/* ------------------------------------ MFRS --------------------------------- */
 exports.mfrsRatios = async (req, res) => {
   res.json({
-    welcome:'Your MFRS dashboard will light up as data matures.',
     asOf: parseDates(req.query).asOf,
     ratios: {
       par30: 0, par60: 0, par90: 0,
       olp: 0, activeBorrowers: 0, avgLoanSize: 0,
       portfolioYield: 0, writeOffRatio: 0, opexRatio: 0, costPerBorrower: 0,
-      collectionEfficiency: 0,
+      collectionEfficiency: 0
     },
+    welcome: 'Key ratios will engage when the required data points exist.'
   });
 };
 
-/* ----------------------------- DAILY / MONTHLY ----------------------------- */
+/* ------------------------------- Daily / Monthly --------------------------- */
 exports.dailyReport = async (req, res) => {
   const { asOf } = parseDates({ asOf: req.query.date });
-  res.json({ welcome:'Here’s your daily check-in. Have a great day! 🌞', date: asOf, disbursed: 0, collected: 0, newBorrowers: 0, exceptions: [] });
-};
-exports.monthlyReport = async (req, res) => {
-  res.json({ welcome:'Month by month, onward and upward. 📈', month: Number(req.query.month)||new Date().getMonth()+1, year: Number(req.query.year)||new Date().getFullYear(), kpis: { disbursed:0, collected:0, par:0 } });
+  res.json({ date: asOf, disbursed: 0, collected: 0, newBorrowers: 0, exceptions: [], welcome: 'Daily spotlight for your ops.' });
 };
 
-/* ------------------------------- OUTSTANDING ------------------------------- */
+exports.monthlyReport = async (req, res) => {
+  res.json({
+    month: Number(req.query.month)||new Date().getMonth()+1,
+    year: Number(req.query.year)||new Date().getFullYear(),
+    kpis: { disbursed:0, collected:0, par:0 },
+    welcome: 'Monthly KPIs at a glance.'
+  });
+};
+
+/* -------------------------------- Outstanding ------------------------------ */
 exports.outstandingReport = async (req, res) => {
   try {
     const { asOf } = parseDates(req.query);
-    const rows = await computeOutstandingByLoan(req, asOf);
+    const rows = await computeOutstandingByLoan(asOf, req);
     const total = rows.reduce((s,r)=>s+safeNumber(r.outstanding),0);
-    res.json({ welcome:'Outstanding snapshot, nice and clear.', rows, totals: { outstanding: total }, asOf, scope: scopeText(req.query) });
+    res.json({
+      rows,
+      totals: { outstanding: total },
+      asOf,
+      scope: scopeText(req.query),
+      welcome: 'Snapshot of outstanding portfolio.'
+    });
   } catch (e) {
     console.error('outstandingReport error:', e);
-    res.json({ welcome:'We hit a snag, but the report is still here.', rows:[], totals:{ outstanding:0 }, asOf: parseDates(req.query).asOf });
+    res.json({ rows:[], totals:{ outstanding:0 }, asOf: parseDates(req.query).asOf, welcome: 'No outstanding data yet.' });
   }
 };
 
-/* ------------------------------------ PAR ---------------------------------- */
+/* ---------------------------------- PAR ------------------------------------ */
+// Flattened to a friendly metric table to avoid [object Object] in the UI
 exports.parSummary = async (req, res) => {
   try {
     const { asOf } = parseDates(req.query);
-    const rows = await computeOutstandingByLoan(req, asOf);
+
+    // Approximate OLP using outstanding (no buckets without due dates)
+    const rows = await computeOutstandingByLoan(asOf, req);
     const olp = rows.reduce((s,r)=>s+safeNumber(r.outstanding),0);
 
     res.json({
-      welcome:'Your PAR will shine once schedules are tracked. For now, here’s OLP.',
       asOf,
       table: {
+        columns: [
+          { key: 'metric', label: 'Metric' },
+          { key: 'value',  label: 'Value' }
+        ],
         rows: [
           { metric: 'Outstanding Loan Portfolio (OLP)', value: olp, currency: true },
           { metric: 'PAR30', value: 0, percent: true },
-          { metric: '1–29 Days', value: 0, currency: true },
-          { metric: '30–59 Days', value: 0, currency: true },
-          { metric: '60–89 Days', value: 0, currency: true },
-          { metric: '90+ Days', value: 0, currency: true },
+          { metric: 'PAR60', value: 0, percent: true },
+          { metric: 'PAR90', value: 0, percent: true },
         ],
       },
-      scope: scopeText(req.query),
+      welcome: 'PAR summary (approximate until schedules are enabled).'
     });
   } catch (e) {
     console.error('parSummary error:', e);
-    res.json({ asOf: parseDates(req.query).asOf, table:{ rows: [] } });
+    res.json({
+      asOf: parseDates(req.query).asOf,
+      table: { rows: [] },
+      welcome: 'PAR unavailable for now.'
+    });
   }
 };
 
-/* -------------------------------- AT A GLANCE ------------------------------ */
+/* ------------------------------- At a glance ------------------------------- */
 exports.atAGlance = async (req, res) => {
   const { startDate, endDate, asOf } = parseDates(req.query);
-  const rows = await computeOutstandingByLoan(req, asOf);
+  const rows = await computeOutstandingByLoan(asOf, req);
   const outstanding = rows.reduce((s,r)=>s+safeNumber(r.outstanding),0);
 
   res.json({
-    welcome:'A quick glance tailored for you.',
-    asOf, period: periodText({startDate,endDate}),
+    asOf,
+    period: periodText({startDate,endDate}),
     cards: [
       { title:'Outstanding Portfolio', value: outstanding, currency:true },
       { title:'PAR30', value: 0.0, percent:true },
@@ -575,10 +767,16 @@ exports.atAGlance = async (req, res) => {
       { title:'Collections (MTD)', value: 0, currency:true },
     ],
     trends: [],
+    welcome: 'A friendly dashboard snapshot.'
   });
 };
 
-/* --------------------------------- ALL ENTRIES ----------------------------- */
+/* -------------------------------- All entries ------------------------------ */
 exports.allEntries = async (req, res) => {
-  res.json({ welcome:'Everything in one place—simple and calm.', rows: [], period: periodText(parseDates(req.query)), scope: scopeText(req.query) });
+  res.json({
+    rows: [],
+    period: periodText(parseDates(req.query)),
+    scope: scopeText(req.query),
+    welcome: 'Unified feed will appear when posting journal lines.'
+  });
 };
