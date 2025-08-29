@@ -1,163 +1,415 @@
 'use strict';
 const { Op, fn, col, literal } = require('sequelize');
-const { sequelize } = require('../models');
 
-const get = (n) => {
-  const m = sequelize?.models?.[n];
-  if (!m) throw Object.assign(new Error(`Model "${n}" not found`), { status: 500, expose: true });
+let db = {};
+try { db = require('../models'); } catch (e) { db = {}; }
+const { sequelize } = db || {};
+
+let Parser;
+try { ({ Parser } = require('json2csv')); } catch { /* fallback to manual CSV */ }
+
+/* ───────────── helpers: schema-safe, tenant-aware, csv ───────────── */
+const safeNumber = (v) => Number(v || 0);
+
+function hasAttr(model, name) {
+  if (!model?.rawAttributes) return false;
+  for (const [key, def] of Object.entries(model.rawAttributes)) {
+    if (key === name || def?.field === name) return true;
+  }
+  return false;
+}
+function resolveAttr(model, candidates = []) {
+  if (!model?.rawAttributes) return null;
+  for (const want of candidates) {
+    for (const [key, def] of Object.entries(model.rawAttributes)) {
+      if (key === want || def?.field === want) return { attrKey: key, fieldName: def?.field || key };
+    }
+  }
+  return null;
+}
+function pickAttrKey(model, candidates = []) { const r = resolveAttr(model, candidates); return r ? r.attrKey : null; }
+function pickFieldName(model, candidates = []) { const r = resolveAttr(model, candidates); return r ? r.fieldName : null; }
+
+function tenantFilter(model, req) {
+  const tenantId =
+    req?.tenant?.id ||
+    req?.headers?.['x-tenant-id'] ||
+    req?.headers?.['X-Tenant-Id'];
+  const key = pickAttrKey(model, ['tenantId', 'tenant_id']);
+  return tenantId && key ? { [key]: tenantId } : {};
+}
+
+function getModel(name) {
+  const m = db?.[name] || sequelize?.models?.[name];
+  if (!m) throw Object.assign(new Error(`Model "${name}" not found`), { status: 500, expose: true });
   return m;
-};
+}
 
+function toCSV(rows) {
+  if (Parser) {
+    const p = new Parser();
+    return p.parse(rows || []);
+  }
+  // manual
+  const esc = (s) => {
+    const v = s == null ? '' : String(s);
+    return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  };
+  const cols = Array.from((rows || []).reduce((set, r) => {
+    Object.keys(r || {}).forEach(k => set.add(k));
+    return set;
+  }, new Set()));
+  const lines = [
+    cols.join(','),
+    ...(rows || []).map(r => cols.map(c => esc(r[c])).join(','))
+  ];
+  return lines.join('\n');
+}
+function sendCSV(res, filename, rows) {
+  const csv = toCSV(rows);
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+}
+
+/* ───────────────────────────── endpoints ──────────────────────────── */
 /** GET /accounting/chart-of-accounts */
-exports.chartOfAccounts = async (_req, res) => {
-  const Account = get('Account');
-  const rows = await Account.findAll({ order: [['code', 'ASC']] });
-  res.json(rows);
+exports.chartOfAccounts = async (req, res, next) => {
+  try {
+    const Account = getModel('Account');
+
+    const idKey    = pickAttrKey(Account, ['id']);
+    const codeKey  = pickAttrKey(Account, ['code', 'accountCode', 'number']);
+    const nameKey  = pickAttrKey(Account, ['name', 'accountName', 'title']);
+    const typeKey  = pickAttrKey(Account, ['type', 'category', 'group']);
+
+    const rows = await Account.findAll({
+      where: tenantFilter(Account, req),
+      attributes: [idKey, codeKey, nameKey, typeKey].filter(Boolean),
+      order: codeKey ? [[codeKey, 'ASC']] : nameKey ? [[nameKey, 'ASC']] : undefined,
+      raw: true
+    });
+
+    res.json(rows);
+  } catch (e) { next(e); }
 };
 
 /** GET /accounting/ledger?accountId=&from=&to= */
-exports.ledger = async (req, res) => {
-  const LedgerEntry = get('LedgerEntry');
-  const where = {};
-  if (req.query.accountId && LedgerEntry.rawAttributes.accountId) where.accountId = req.query.accountId;
-  if ((req.query.from || req.query.to) && LedgerEntry.rawAttributes.date) {
-    where.date = {};
-    if (req.query.from) where.date[Op.gte] = req.query.from;
-    if (req.query.to) where.date[Op.lte] = req.query.to;
-  }
-  const rows = await LedgerEntry.findAll({ where, order: [['date', 'ASC'], ['id', 'ASC']] });
-  res.json(rows);
+exports.ledger = async (req, res, next) => {
+  try {
+    const Ledger = getModel('LedgerEntry');
+
+    const idKey        = pickAttrKey(Ledger, ['id']);
+    const accountIdKey = pickAttrKey(Ledger, ['accountId', 'account_id']);
+    const dateKey      = pickAttrKey(Ledger, ['date', 'entryDate', 'createdAt', 'created_at']);
+    const debitKey     = pickAttrKey(Ledger, ['debit', 'debitAmount', 'dr']);
+    const creditKey    = pickAttrKey(Ledger, ['credit', 'creditAmount', 'cr']);
+    const descKey      = pickAttrKey(Ledger, ['description', 'memo', 'note']);
+    const journalKey   = pickAttrKey(Ledger, ['journalEntryId', 'journal_id', 'entryId']);
+
+    const where = {
+      ...(accountIdKey && req.query.accountId ? { [accountIdKey]: req.query.accountId } : {}),
+      ...(dateKey && (req.query.from || req.query.to) ? {
+        [dateKey]: {
+          ...(req.query.from ? { [Op.gte]: req.query.from } : {}),
+          ...(req.query.to ? { [Op.lte]: req.query.to } : {})
+        }
+      } : {}),
+      ...tenantFilter(Ledger, req)
+    };
+
+    const rows = await Ledger.findAll({
+      where,
+      attributes: [idKey, accountIdKey, dateKey, debitKey, creditKey, descKey, journalKey].filter(Boolean),
+      order: [
+        ...(dateKey ? [[dateKey, 'ASC']] : []),
+        ...(idKey ? [[idKey, 'ASC']] : [])
+      ],
+      raw: true
+    });
+
+    res.json(rows);
+  } catch (e) { next(e); }
 };
 
-/** GET /accounting/trial-balance?asOf=YYYY-MM-DD */
-exports.trialBalance = async (req, res) => {
-  const LedgerEntry = get('LedgerEntry');
-  const Account = get('Account');
+/* ───────────── shared calculators (used by JSON + CSV) ────────────── */
+async function computeTrialBalance(req) {
+  const Ledger = getModel('LedgerEntry');
+  const Account = getModel('Account');
 
-  const where = {};
-  if (req.query.asOf && LedgerEntry.rawAttributes.date) where.date = { [Op.lte]: req.query.asOf };
+  const accountIdKey = pickAttrKey(Ledger, ['accountId', 'account_id']);
+  const dateKey      = pickAttrKey(Ledger, ['date', 'entryDate', 'createdAt', 'created_at']);
+  const debitKey     = pickAttrKey(Ledger, ['debit', 'debitAmount', 'dr']);
+  const creditKey    = pickAttrKey(Ledger, ['credit', 'creditAmount', 'cr']);
+  if (!accountIdKey || !debitKey || !creditKey) return [];
 
-  const sums = await LedgerEntry.findAll({
-    attributes: ['accountId', [fn('SUM', col('debit')), 'debit'], [fn('SUM', col('credit')), 'credit']],
+  const where = {
+    ...(dateKey && req.query.asOf ? { [dateKey]: { [Op.lte]: req.query.asOf } } : {}),
+    ...tenantFilter(Ledger, req)
+  };
+
+  const sums = await Ledger.findAll({
     where,
-    group: ['accountId'],
-    raw: true,
-  });
-
-  const accounts = await Account.findAll({ raw: true });
-  const byId = Object.fromEntries(accounts.map(a => [a.id, a]));
-
-  const result = sums.map(r => ({
-    accountId: r.accountId,
-    accountCode: byId[r.accountId]?.code || null,
-    accountName: byId[r.accountId]?.name || null,
-    debit: Number(r.debit || 0),
-    credit: Number(r.credit || 0),
-    balance: Number(r.debit || 0) - Number(r.credit || 0),
-  }));
-
-  res.json(result);
-};
-
-/** GET /accounting/profit-loss?from=&to= */
-exports.profitLoss = async (req, res) => {
-  const LedgerEntry = get('LedgerEntry');
-  const Account = get('Account');
-
-  const where = {};
-  if ((req.query.from || req.query.to) && LedgerEntry.rawAttributes.date) {
-    where.date = {};
-    if (req.query.from) where.date[Op.gte] = req.query.from;
-    if (req.query.to) where.date[Op.lte] = req.query.to;
-  }
-
-  const accounts = await Account.findAll({ raw: true });
-  const accById = Object.fromEntries(accounts.map(a => [a.id, a]));
-
-  const rows = await LedgerEntry.findAll({
-    attributes: ['accountId', [fn('SUM', col('debit')), 'debit'], [fn('SUM', col('credit')), 'credit']],
-    where, group: ['accountId'], raw: true,
-  });
-
-  let totalIncome = 0, totalExpense = 0;
-  rows.forEach(r => {
-    const acc = accById[r.accountId];
-    const debit = Number(r.debit || 0);
-    const credit = Number(r.credit || 0);
-    if (acc?.type === 'income') totalIncome += (credit - debit); // income increases with credit
-    if (acc?.type === 'expense') totalExpense += (debit - credit); // expense increases with debit
-  });
-
-  res.json({ totalIncome, totalExpense, netProfit: totalIncome - totalExpense });
-};
-
-/** GET /accounting/cashflow-monthly?year=YYYY */
-exports.cashflowMonthly = async (req, res) => {
-  const LedgerEntry = get('LedgerEntry');
-  const Account = get('Account');
-  const year = req.query.year || new Date().getFullYear();
-
-  const accounts = await Account.findAll({ raw: true });
-  const cashIds = accounts.filter(a => a.type === 'cash').map(a => a.id);
-  if (!cashIds.length) return res.json([]);
-
-  const rows = await LedgerEntry.findAll({
     attributes: [
-      [fn('DATE_TRUNC', 'month', col('date')), 'month'],
-      [fn('SUM', col('debit')), 'debit'],
-      [fn('SUM', col('credit')), 'credit'],
+      [col(Ledger.rawAttributes[accountIdKey].field || accountIdKey), 'accountId'],
+      [fn('SUM', col(Ledger.rawAttributes[debitKey].field || debitKey)), 'debit'],
+      [fn('SUM', col(Ledger.rawAttributes[creditKey].field || creditKey)), 'credit'],
     ],
-    where: {
-      accountId: { [Op.in]: cashIds },
-      date: { [Op.gte]: `${year}-01-01`, [Op.lte]: `${year}-12-31` },
-    },
-    group: [literal('1')],
-    order: [literal('1 ASC')],
-    raw: true,
+    group: [col(Ledger.rawAttributes[accountIdKey].field || accountIdKey)],
+    raw: true
   });
 
-  const result = rows.map(r => ({
-    month: new Date(r.month).toISOString().slice(0, 7),
-    inflow: Number(r.debit || 0),
-    outflow: Number(r.credit || 0),
-    net: Number(r.debit || 0) - Number(r.credit || 0),
-  }));
+  const A = getModel('Account');
+  const idKey   = pickAttrKey(A, ['id']);
+  const codeKey = pickAttrKey(A, ['code', 'accountCode', 'number']);
+  const nameKey = pickAttrKey(A, ['name', 'accountName', 'title']);
 
-  res.json(result);
+  const accRows = await A.findAll({
+    attributes: [idKey, codeKey, nameKey].filter(Boolean),
+    where: tenantFilter(A, req),
+    raw: true
+  });
+  const byId = new Map(accRows.map(a => [String(a[idKey || 'id']), a]));
+
+  return (sums || []).map(r => {
+    const acc = byId.get(String(r.accountId)) || {};
+    const debit  = safeNumber(r.debit);
+    const credit = safeNumber(r.credit);
+    return {
+      accountId: r.accountId,
+      accountCode: acc[codeKey] ?? null,
+      accountName: acc[nameKey] ?? null,
+      debit,
+      credit,
+      balance: debit - credit,
+    };
+  });
+}
+
+async function computeProfitLoss(req) {
+  const Ledger = getModel('LedgerEntry');
+  const Account = getModel('Account');
+
+  const accountIdKey = pickAttrKey(Ledger, ['accountId', 'account_id']);
+  const dateKey      = pickAttrKey(Ledger, ['date', 'entryDate', 'createdAt', 'created_at']);
+  const debitKey     = pickAttrKey(Ledger, ['debit', 'debitAmount', 'dr']);
+  const creditKey    = pickAttrKey(Ledger, ['credit', 'creditAmount', 'cr']);
+  if (!accountIdKey || !debitKey || !creditKey) return { totalIncome: 0, totalExpense: 0, netProfit: 0, income: [], expense: [] };
+
+  const where = {
+    ...(dateKey && (req.query.from || req.query.to) ? {
+      [dateKey]: {
+        ...(req.query.from ? { [Op.gte]: req.query.from } : {}),
+        ...(req.query.to ? { [Op.lte]: req.query.to } : {})
+      }
+    } : {}),
+    ...tenantFilter(Ledger, req)
+  };
+
+  const sums = await Ledger.findAll({
+    where,
+    attributes: [
+      [col(Ledger.rawAttributes[accountIdKey].field || accountIdKey), 'accountId'],
+      [fn('SUM', col(Ledger.rawAttributes[debitKey].field || debitKey)), 'debit'],
+      [fn('SUM', col(Ledger.rawAttributes[creditKey].field || creditKey)), 'credit'],
+    ],
+    group: [col(Ledger.rawAttributes[accountIdKey].field || accountIdKey)],
+    raw: true
+  });
+
+  const idKey   = pickAttrKey(Account, ['id']);
+  const codeKey = pickAttrKey(Account, ['code', 'accountCode', 'number']);
+  const nameKey = pickAttrKey(Account, ['name', 'accountName', 'title']);
+  const typeKey = pickAttrKey(Account, ['type', 'category', 'group']);
+
+  const accRows = await Account.findAll({
+    attributes: [idKey, codeKey, nameKey, typeKey].filter(Boolean),
+    where: tenantFilter(Account, req),
+    raw: true
+  });
+  const byId = new Map(accRows.map(a => [String(a[idKey || 'id']), a]));
+
+  const income = [];
+  const expense = [];
+  let totalIncome = 0, totalExpense = 0;
+
+  const isIncomeType  = (t) => /income|revenue/i.test(String(t || ''));
+  const isExpenseType = (t) => /expense|operating|cogs|cost/i.test(String(t || ''));
+
+  (sums || []).forEach(r => {
+    const acc = byId.get(String(r.accountId)) || {};
+    const debit = safeNumber(r.debit);
+    const credit = safeNumber(r.credit);
+    const rec = {
+      accountId: r.accountId,
+      code: acc[codeKey] ?? null,
+      name: acc[nameKey] ?? null,
+      type: acc[typeKey] ?? null,
+    };
+
+    if (isIncomeType(acc[typeKey])) {
+      const amount = credit - debit; // income up with credit
+      income.push({ ...rec, amount });
+      totalIncome += amount;
+    } else if (isExpenseType(acc[typeKey])) {
+      const amount = debit - credit; // expense up with debit
+      expense.push({ ...rec, amount });
+      totalExpense += amount;
+    }
+  });
+
+  return { totalIncome, totalExpense, netProfit: totalIncome - totalExpense, income, expense };
+}
+
+/* ───────────────────── Trial Balance JSON & CSV ────────────────────── */
+exports.trialBalance = async (req, res, next) => {
+  try {
+    const rows = await computeTrialBalance(req);
+    res.json(rows);
+  } catch (e) { next(e); }
+};
+exports.trialBalanceCSV = async (req, res, next) => {
+  try {
+    const rows = await computeTrialBalance(req);
+    const flat = rows.map(r => ({
+      accountCode: r.accountCode, accountName: r.accountName,
+      debit: r.debit, credit: r.credit, balance: r.balance
+    }));
+    sendCSV(res, 'trial_balance.csv', flat);
+  } catch (e) { next(e); }
 };
 
-/** POST /accounting/manual-journal  { date, memo, lines: [{ accountId, debit, credit, description }] } */
-exports.createManualJournal = async (req, res) => {
-  const JournalEntry = get('JournalEntry');
-  const LedgerEntry = get('LedgerEntry');
+/* ───────────────────── P&L JSON & CSV ──────────────────────────────── */
+exports.profitLoss = async (req, res, next) => {
+  try {
+    const data = await computeProfitLoss(req);
+    res.json(data);
+  } catch (e) { next(e); }
+};
+exports.profitLossCSV = async (req, res, next) => {
+  try {
+    const data = await computeProfitLoss(req);
+    const rows = [
+      ...data.income.map(l => ({ section: 'Income', code: l.code, name: l.name, amount: l.amount })),
+      { section: 'Income', code: '', name: 'Total Income', amount: data.totalIncome },
+      ...data.expense.map(l => ({ section: 'Expense', code: l.code, name: l.name, amount: l.amount })),
+      { section: 'Expense', code: '', name: 'Total Expense', amount: data.totalExpense },
+      { section: 'Summary', code: '', name: 'Net Profit', amount: data.netProfit },
+    ];
+    sendCSV(res, 'profit_loss.csv', rows);
+  } catch (e) { next(e); }
+};
 
-  const { date, memo, lines } = req.body || {};
-  if (!Array.isArray(lines) || !lines.length) {
-    return res.status(400).json({ error: 'lines[] is required' });
-  }
-  const totalDebit = lines.reduce((s, l) => s + Number(l.debit || 0), 0);
-  const totalCredit = lines.reduce((s, l) => s + Number(l.credit || 0), 0);
-  if (Number(totalDebit.toFixed(2)) !== Number(totalCredit.toFixed(2))) {
-    return res.status(400).json({ error: 'Debits must equal credits' });
-  }
+/* ───────────────────── Cashflow (monthly) ──────────────────────────── */
+exports.cashflowMonthly = async (req, res, next) => {
+  try {
+    const Ledger = getModel('LedgerEntry');
+    const Account = getModel('Account');
 
+    const year = Number(req.query.year) || new Date().getFullYear();
+
+    const idKey   = pickAttrKey(Account, ['id']);
+    const typeKey = pickAttrKey(Account, ['type', 'category', 'group']);
+
+    const accounts = await Account.findAll({
+      attributes: [idKey, typeKey].filter(Boolean),
+      where: tenantFilter(Account, req),
+      raw: true
+    });
+
+    const cashIds = accounts
+      .filter(a => /cash|bank/i.test(String(a[typeKey] || '')))
+      .map(a => a[idKey]);
+
+    if (!cashIds.length) {
+      return res.json(Array.from({ length: 12 }, (_, i) => ({
+        month: `${year}-${String(i + 1).padStart(2, '0')}`, inflow: 0, outflow: 0, net: 0
+      })));
+    }
+
+    const accountIdKey = pickAttrKey(Ledger, ['accountId', 'account_id']);
+    const dateKey      = pickAttrKey(Ledger, ['date', 'entryDate', 'createdAt', 'created_at']);
+    const debitKey     = pickAttrKey(Ledger, ['debit', 'debitAmount', 'dr']);
+    const creditKey    = pickAttrKey(Ledger, ['credit', 'creditAmount', 'cr']);
+
+    const rows = await Ledger.findAll({
+      attributes: [
+        [fn('DATE_TRUNC', 'month', col(Ledger.rawAttributes[dateKey].field || dateKey)), 'month'],
+        [fn('SUM', col(Ledger.rawAttributes[debitKey].field || debitKey)), 'debit'],
+        [fn('SUM', col(Ledger.rawAttributes[creditKey].field || creditKey)), 'credit'],
+      ],
+      where: {
+        ...(accountIdKey ? { [accountIdKey]: { [Op.in]: cashIds } } : {}),
+        ...(dateKey ? { [dateKey]: { [Op.gte]: `${year}-01-01`, [Op.lte]: `${year}-12-31` } } : {}),
+        ...tenantFilter(Ledger, req)
+      },
+      group: [literal('1')],
+      order: [literal('1 ASC')],
+      raw: true
+    });
+
+    const byMonth = new Map((rows || []).map(r => {
+      const m = new Date(r.month).toISOString().slice(0, 7);
+      return [m, { inflow: safeNumber(r.debit), outflow: safeNumber(r.credit) }];
+    }));
+    const result = Array.from({ length: 12 }, (_, i) => {
+      const label = `${year}-${String(i + 1).padStart(2, '0')}`;
+      const agg = byMonth.get(label) || { inflow: 0, outflow: 0 };
+      return { month: label, inflow: agg.inflow, outflow: agg.outflow, net: agg.inflow - agg.outflow };
+    });
+
+    res.json(result);
+  } catch (e) { next(e); }
+};
+
+/* ───────────────────── Manual Journal ──────────────────────────────── */
+exports.createManualJournal = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const journal = await JournalEntry.create({ date, memo }, { transaction: t });
-    for (const ln of lines) {
-      await LedgerEntry.create({
-        journalEntryId: journal.id,
-        date,
-        accountId: ln.accountId,
-        debit: ln.debit || 0,
-        credit: ln.credit || 0,
-        description: ln.description || null,
-      }, { transaction: t });
+    const Journal = getModel('JournalEntry');
+    const Ledger  = getModel('LedgerEntry');
+
+    const dateKeyJ = pickAttrKey(Journal, ['date', 'postedAt', 'createdAt', 'created_at']);
+    const memoKeyJ = pickAttrKey(Journal, ['memo', 'description', 'note']);
+
+    const accountIdKey = pickAttrKey(Ledger, ['accountId', 'account_id']);
+    const journalKey   = pickAttrKey(Ledger, ['journalEntryId', 'journal_id', 'entryId']);
+    const dateKey      = pickAttrKey(Ledger, ['date', 'entryDate', 'createdAt', 'created_at']);
+    const debitKey     = pickAttrKey(Ledger, ['debit', 'debitAmount', 'dr']);
+    const creditKey    = pickAttrKey(Ledger, ['credit', 'creditAmount', 'cr']);
+    const descKey      = pickAttrKey(Ledger, ['description', 'memo', 'note']);
+
+    const { date, memo, lines } = req.body || {};
+    if (!Array.isArray(lines) || !lines.length) {
+      return res.status(400).json({ error: 'lines[] is required' });
     }
+    const totalDebit = lines.reduce((s, l) => s + safeNumber(l.debit), 0);
+    const totalCredit = lines.reduce((s, l) => s + safeNumber(l.credit), 0);
+    if (Number(totalDebit.toFixed(2)) !== Number(totalCredit.toFixed(2))) {
+      return res.status(400).json({ error: 'Debits must equal credits' });
+    }
+
+    const j = {};
+    if (dateKeyJ) j[dateKeyJ] = date || new Date();
+    if (memoKeyJ) j[memoKeyJ] = memo || null;
+    const journal = await Journal.create(j, { transaction: t });
+
+    for (const ln of lines) {
+      const rec = {};
+      if (journalKey)   rec[journalKey]   = journal.id;
+      if (dateKey)      rec[dateKey]      = date || new Date();
+      if (accountIdKey) rec[accountIdKey] = ln.accountId;
+      if (debitKey)     rec[debitKey]     = safeNumber(ln.debit);
+      if (creditKey)    rec[creditKey]    = safeNumber(ln.credit);
+      if (descKey)      rec[descKey]      = ln.description || null;
+
+      await Ledger.create(rec, { transaction: t });
+    }
+
     await t.commit();
     res.status(201).json({ ok: true, journalId: journal.id });
   } catch (e) {
     await t.rollback();
-    throw e;
+    next(e);
   }
 };
