@@ -76,6 +76,15 @@ db.Expense = tryLoad(() => require('./expense')(sequelize, DataTypes), 'Expense'
 /* Investors */
 db.Investor = tryLoad(() => require('./investor')(sequelize, DataTypes), 'Investor');
 
+/* HR & Payroll (new) */
+db.Employee     = tryLoad(() => require('./employee')(sequelize, DataTypes),     'Employee');
+db.Attendance   = tryLoad(() => require('./attendance')(sequelize, DataTypes),   'Attendance');
+db.PayrollItem  = tryLoad(() => require('./payrollItem')(sequelize, DataTypes),  'PayrollItem');
+db.Payrun       = tryLoad(() => require('./payrun')(sequelize, DataTypes),       'Payrun');
+db.Payslip      = tryLoad(() => require('./payslip')(sequelize, DataTypes),      'Payslip');
+db.LeaveRequest = tryLoad(() => require('./leaveRequest')(sequelize, DataTypes), 'LeaveRequest');
+db.Contract     = tryLoad(() => require('./contract')(sequelize, DataTypes),     'Contract');
+
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
   db.User.belongsTo(db.Branch,   { foreignKey: 'branchId' });
@@ -214,6 +223,42 @@ if (db.Account && db.LedgerEntry) {
 if (db.JournalEntry && db.LedgerEntry) {
   db.JournalEntry.hasMany(db.LedgerEntry, { foreignKey: 'journalEntryId' });
   db.LedgerEntry.belongsTo(db.JournalEntry, { foreignKey: 'journalEntryId' });
+}
+
+/* ---------- HR & Payroll associations ---------- */
+if (db.Employee && db.Branch) {
+  db.Employee.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
+  db.Branch.hasMany(db.Employee,   { foreignKey: 'branchId', as: 'employees' });
+}
+if (db.Attendance && db.Employee) {
+  const fk = hasAttr(db.Attendance, 'employee_id') ? 'employee_id' : 'employeeId';
+  db.Attendance.belongsTo(db.Employee, { foreignKey: fk, as: 'employee' });
+  db.Employee.hasMany(db.Attendance,   { foreignKey: fk, as: 'attendance' });
+}
+if (db.PayrollItem && db.Employee) {
+  const fk = hasAttr(db.PayrollItem, 'employee_id') ? 'employee_id' : 'employeeId';
+  db.PayrollItem.belongsTo(db.Employee, { foreignKey: fk, as: 'employee' });
+  db.Employee.hasMany(db.PayrollItem,   { foreignKey: fk, as: 'payItems' });
+}
+if (db.Payslip && db.Employee) {
+  const fk = hasAttr(db.Payslip, 'employee_id') ? 'employee_id' : 'employeeId';
+  db.Payslip.belongsTo(db.Employee, { foreignKey: fk, as: 'employee' });
+  db.Employee.hasMany(db.Payslip,   { foreignKey: fk, as: 'payslips' });
+}
+if (db.Payslip && db.Payrun) {
+  const fk = hasAttr(db.Payslip, 'payrun_id') ? 'payrun_id' : 'payrunId';
+  db.Payslip.belongsTo(db.Payrun, { foreignKey: fk, as: 'payrun' });
+  db.Payrun.hasMany(db.Payslip,   { foreignKey: fk, as: 'payslips' });
+}
+if (db.LeaveRequest && db.Employee) {
+  const fk = hasAttr(db.LeaveRequest, 'employee_id') ? 'employee_id' : 'employeeId';
+  db.LeaveRequest.belongsTo(db.Employee, { foreignKey: fk, as: 'employee' });
+  db.Employee.hasMany(db.LeaveRequest,   { foreignKey: fk, as: 'leaveRequests' });
+}
+if (db.Contract && db.Employee) {
+  const fk = hasAttr(db.Contract, 'employee_id') ? 'employee_id' : 'employeeId';
+  db.Contract.belongsTo(db.Employee, { foreignKey: fk, as: 'employee' });
+  db.Employee.hasMany(db.Contract,   { foreignKey: fk, as: 'contracts' });
 }
 
 db.sequelize = sequelize;

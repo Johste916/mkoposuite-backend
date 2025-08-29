@@ -5,19 +5,24 @@ const ctrl = require('../controllers/payrollController');
 
 // Base: /api/payroll
 
-// List (supports ?page=&limit=&q=)
-router.get('/', ctrl.list);
+// Configured pay items (allowances/deductions) per employee
+router.get('/items', ctrl.listItems);
+router.post('/items', ctrl.createItem);
+router.put('/items/:id', ctrl.updateItem);
+router.delete('/items/:id', ctrl.deleteItem);
 
-// Get one by ID
-router.get('/:id', ctrl.get);
+// Payruns & payslips
+router.get('/payruns', ctrl.listPayruns);
+router.post('/payruns/generate', ctrl.generatePayrun);        // { period: 'YYYY-MM' }
+router.get('/payslips', ctrl.listPayslips);                   // ?period=&employeeId=
+router.post('/payslips/:id/mark-paid', ctrl.markPaid);
 
-// Create
-router.post('/', ctrl.create);
+// Summary for dashboard/report
+router.get('/summary', ctrl.summary);                         // ?period=YYYY-MM
 
-// Update
-router.put('/:id', ctrl.update);
-
-// Delete
-router.delete('/:id', ctrl.remove);
+// Optional dev seed
+if (process.env.ENABLE_PAYROLL_DEV === 'true') {
+  router.post('/dev/seed-items', ctrl.seedItems);
+}
 
 module.exports = router;

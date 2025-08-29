@@ -36,9 +36,12 @@ const defaultOrigins = [
   'https://strong-fudge-7fc28d.netlify.app',
   'https://mkoposuite.netlify.app',
 ];
-// Support both CORS_ORIGINS and CORS_ALLOW_ORIGINS
-const envOrigins = (process.env.CORS_ALLOW_ORIGINS || process.env.CORS_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
+// Support both CORS_ORIGINS and CORS_ALLOW_ORIGINS and FRONTEND_URL
+const envOrigins = [
+  ...(process.env.CORS_ALLOW_ORIGINS || process.env.CORS_ORIGINS || '')
+    .split(',').map(s => s.trim()).filter(Boolean),
+  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL.trim()] : []),
+];
 const allowedOrigins = new Set([...defaultOrigins, ...envOrigins]);
 
 function isAllowedOrigin(origin) {
@@ -46,6 +49,7 @@ function isAllowedOrigin(origin) {
   if (allowedOrigins.has(origin)) return true;
   try {
     const { hostname, protocol } = new URL(origin);
+    // any Netlify preview/site
     if ((protocol === 'https:' || protocol === 'http:') && hostname.endsWith('.netlify.app')) {
       return true;
     }
@@ -62,6 +66,7 @@ const DEFAULT_ALLOWED_HEADERS = [
   'x-branch-id',
   'x-timezone',
   'x-tz-offset',
+  'x-request-id',
   'Accept',
 ];
 
@@ -82,7 +87,7 @@ app.use((req, res, next) => {
       : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
 
-  // Let browser read filename on downloads
+  // Let browser read filename on downloads + counts for tables
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition,X-Total-Count');
 
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -141,7 +146,7 @@ try {
   throw e;
 }
 
-/** Optional */
+/** Optional core */
 const accountRoutes         = safeLoadRoutes('./routes/accountRoutes', makeDummyRouter({ settings: {} }));
 
 // Borrower search BEFORE /api/borrowers
@@ -194,7 +199,7 @@ const savingsTransactionsRoutes = safeLoadRoutes(
   ])
 );
 
-/* YOUR single investor route file name */
+/* Investors */
 const investorRoutes = safeLoadRoutes(
   './routes/investorRoute',
   makeDummyRouter([
@@ -203,41 +208,28 @@ const investorRoutes = safeLoadRoutes(
   ])
 );
 
-const esignaturesRoutes = safeLoadRoutes(
-  './routes/esignaturesRoutes',
-  makeDummyRouter([
-    { id: 1, name: 'Loan Agreement #1', sent: '2025-08-01', status: 'Signed' },
-    { id: 2, name: 'Loan Agreement #2', sent: '2025-08-03', status: 'Pending' },
-  ])
-);
-const payrollRoutes = safeLoadRoutes(
-  './routes/payrollRoutes',
-  makeDummyRouter([
-    { id: 1, period: '2025-07', staffCount: 8, total: 4200000 },
-    { id: 2, period: '2025-08', staffCount: 9, total: 4450000 },
-  ])
-);
-const expensesRoutes = safeLoadRoutes(
-  './routes/expensesRoutes',
-  makeDummyRouter([
-    { id: 1, type: 'Office Rent', amount: 900000, date: '2025-08-01' },
-    { id: 2, type: 'Fuel', amount: 120000, date: '2025-08-04' },
-  ])
-);
-const otherIncomeRoutes = safeLoadRoutes(
-  './routes/otherIncomeRoutes',
-  makeDummyRouter([
-    { id: 1, source: 'Training Fees', amount: 250000, date: '2025-08-02' },
-    { id: 2, source: 'Sale of Scrap', amount: 60000, date: '2025-08-05' },
-  ])
-);
-const assetManagementRoutes = safeLoadRoutes(
-  './routes/assetManagementRoutes',
-  makeDummyRouter([
-    { id: 1, name: 'Branch Laptop 01', category: 'Electronics', status: 'In Use' },
-    { id: 2, name: 'Motorcycle 02', category: 'Vehicle', status: 'Maintenance' },
-  ])
-);
+/* E-signatures / Payroll / HR / Expenses / Other Income / Assets */
+const esignaturesRoutes = safeLoadRoutes('./routes/esignaturesRoutes', makeDummyRouter([
+  { id: 1, name: 'Loan Agreement #1', sent: '2025-08-01', status: 'Signed' },
+  { id: 2, name: 'Loan Agreement #2', sent: '2025-08-03', status: 'Pending' },
+]));
+const payrollRoutes = safeLoadRoutes('./routes/payrollRoutes', makeDummyRouter([
+  { id: 1, period: '2025-07', staffCount: 8, total: 4200000 },
+  { id: 2, period: '2025-08', staffCount: 9, total: 4450000 },
+]));
+const hrRoutes = safeLoadRoutes('./routes/hrRoutes', makeDummyRouter({ employees: [] }));
+const expensesRoutes = safeLoadRoutes('./routes/expensesRoutes', makeDummyRouter([
+  { id: 1, type: 'Office Rent', amount: 900000, date: '2025-08-01' },
+  { id: 2, type: 'Fuel', amount: 120000, date: '2025-08-04' },
+]));
+const otherIncomeRoutes = safeLoadRoutes('./routes/otherIncomeRoutes', makeDummyRouter([
+  { id: 1, source: 'Training Fees', amount: 250000, date: '2025-08-02' },
+  { id: 2, source: 'Sale of Scrap', amount: 60000, date: '2025-08-05' },
+]));
+const assetManagementRoutes = safeLoadRoutes('./routes/assetManagementRoutes', makeDummyRouter([
+  { id: 1, name: 'Branch Laptop 01', category: 'Electronics', status: 'In Use' },
+  { id: 2, name: 'Motorcycle 02', category: 'Vehicle', status: 'Maintenance' },
+]));
 
 // Prefer real accounting routes; fallback remains available for local dev.
 const accountingRoutes = safeLoadRoutes(
@@ -339,6 +331,7 @@ app.use('/api/collections',          collectionSheetsRoutes);
 app.use('/api/savings-transactions', savingsTransactionsRoutes);
 app.use('/api/investors',            investorRoutes);
 app.use('/api/esignatures',          esignaturesRoutes);
+app.use('/api/hr',                   hrRoutes);
 app.use('/api/payroll',              payrollRoutes);
 app.use('/api/expenses',             expensesRoutes);
 app.use('/api/other-income',         otherIncomeRoutes);
@@ -383,7 +376,7 @@ app.use((req, res) => {
 /* ------------------------------- Error handler ----------------------------- */
 app.use((err, _req, res, _next) => {
   // Postgres codes we want to surface as friendly messages:
-  // 42P01: undefined_table, 42703: undefined_column
+  // 42P01: undefined_table, 42703: undefined_column, 23505: unique_violation, 23503: foreign_key_violation
   const pgCode = err?.original?.code || err?.parent?.code;
 
   let status = err.status || 500;
@@ -393,6 +386,12 @@ app.use((err, _req, res, _next) => {
     message = 'Required table is missing. Run DB migrations on this environment (e.g. `npx sequelize-cli db:migrate`).';
   } else if (pgCode === '42703') {
     message = 'A required column is missing. Ensure migrations are up to date.';
+  } else if (pgCode === '23505') {
+    message = 'Unique constraint failed — a record with the same unique field already exists.';
+    status = 409;
+  } else if (pgCode === '23503') {
+    message = 'Foreign key constraint failed — related record missing or in use.';
+    status = 422;
   } else {
     message = err.expose ? err.message : (status === 500 ? 'Internal server error' : err.message);
   }
