@@ -1,4 +1,3 @@
-// server/src/app.js
 'use strict';
 const express = require('express');
 const path = require('path');
@@ -16,7 +15,6 @@ app.set('trust proxy', true);
 
 /* -------------------------- Security & performance ------------------------- */
 if (helmet) {
-  // Allow serving uploaded files cross-origin (for Netlify/Vite dev)
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 }
 if (compression) app.use(compression());
@@ -54,7 +52,6 @@ const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
   'X-Requested-With',
   'X-User-Id',
-  // custom headers used by your frontend
   'x-tenant-id',
   'x-branch-id',
   'x-timezone',
@@ -117,7 +114,6 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
   for (const p of tryPaths) {
     try {
       const mod = require(p);
-      // Allow both ESM default export and CommonJS export
       return mod && mod.default ? mod.default : mod;
     } catch (e) {
       if (e.code !== 'MODULE_NOT_FOUND') {
@@ -125,25 +121,24 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
       }
     }
   }
-  const pretty = relPathFromSrc.replace(__dirname, '…');
-  console.warn(`⚠️  Using dummy routes for ${pretty} — create this file to enable real API.`);
+  console.warn(`⚠️  Using dummy routes for ${relPathFromSrc} — create this file to enable real API.`);
   return dummyRouter;
 }
 
 /* --------------------------------- Routes ---------------------------------- */
-/** 🚫 DO NOT use safeLoadRoutes for auth — fail fast if broken */
+/** Auth must exist */
 let authRoutes;
 try {
   authRoutes = require('./routes/authRoutes');
 } catch (e) {
-  console.error('FATAL: Failed to load ./routes/authRoutes. Login will not work.', e);
+  console.error('FATAL: Failed to load ./routes/authRoutes.', e);
   throw e;
 }
 
-/** Account can remain optional */
+/** Optional */
 const accountRoutes         = safeLoadRoutes('./routes/accountRoutes', makeDummyRouter({ settings: {} }));
 
-// IMPORTANT: dedicate a small router for borrower search and mount it BEFORE /api/borrowers
+// Borrower search BEFORE /api/borrowers
 const borrowerSearchRoutes  = safeLoadRoutes('./routes/borrowerSearchRoutes', makeDummyRouter([]));
 const borrowerRoutes        = safeLoadRoutes('./routes/borrowerRoutes', makeDummyRouter([]));
 
@@ -152,7 +147,33 @@ const dashboardRoutes       = safeLoadRoutes('./routes/dashboardRoutes', makeDum
 const savingsRoutes         = safeLoadRoutes('./routes/savingsRoutes', makeDummyRouter([]));
 const disbursementRoutes    = safeLoadRoutes('./routes/loanDisbursementRoutes', makeDummyRouter([]));
 const repaymentRoutes       = safeLoadRoutes('./routes/repaymentRoutes', makeDummyRouter([]));
+
+/** ✅ Reports router: must include all endpoints:
+ *  /filters
+ *  /borrowers/loan-summary
+ *  /loans/summary
+ *  /loans/trends
+ *  /loans/export/csv
+ *  /loans/export/pdf
+ *  /arrears-aging
+ *  /outstanding
+ *  /par/summary
+ *  /collections/summary
+ *  /collectors/summary
+ *  /disbursements/summary
+ *  /fees/summary
+ *  /loan-officers/summary
+ *  /loan-products/summary
+ *  /deferred-income
+ *  /deferred-income/monthly
+ *  /mfrs
+ *  /daily
+ *  /monthly
+ *  /at-a-glance
+ *  /all-entries
+ */
 const reportRoutes          = safeLoadRoutes('./routes/reportRoutes', makeDummyRouter({}));
+
 const settingRoutes         = safeLoadRoutes('./routes/settingRoutes', makeDummyRouter({}));
 const userRoutes            = safeLoadRoutes('./routes/userRoutes', makeDummyRouter([]));
 const roleRoutes            = safeLoadRoutes('./routes/roleRoutes', makeDummyRouter([]));
@@ -167,7 +188,7 @@ const permissionRoutes      = safeLoadRoutes('./routes/permissionRoutes', makeDu
 const adminAuditRoutes      = safeLoadRoutes('./routes/admin/auditRoutes', makeDummyRouter([]));
 const adminReportSubRoutes  = safeLoadRoutes('./routes/admin/reportSubscriptionRoutes', makeDummyRouter([]));
 
-/* New modules — try to load real files, else mount dummy */
+/* New modules — optional/dummy-friendly */
 const collateralRoutes = safeLoadRoutes(
   './routes/collateralRoutes',
   makeDummyRouter([
@@ -190,7 +211,7 @@ const savingsTransactionsRoutes = safeLoadRoutes(
   ])
 );
 
-/* 🔧 Load YOUR singular investor route file */
+/* YOUR single investor route file name */
 const investorRoutes = safeLoadRoutes(
   './routes/investorRoute',
   makeDummyRouter([
@@ -279,7 +300,6 @@ app.use((req, res, next) => {
 });
 
 /* ----------------------------- Branch fallback ----------------------------- */
-/** ✅ Branch list fallback: avoids "deletedAt" errors from paranoid models. */
 let sequelize;
 try { ({ sequelize } = require('./models')); } catch { try { ({ sequelize } = require('../models')); } catch {} }
 if (sequelize) {
@@ -288,17 +308,16 @@ if (sequelize) {
       const [rows] = await sequelize.query('SELECT id, name, code FROM "public"."branches" ORDER BY name ASC;');
       return res.json(rows);
     } catch (e) {
-      // If raw SQL fails, let the original router handle it.
       return next();
     }
   });
 }
 
 /* --------------------------------- Mounting -------------------------------- */
-// borrower search must come BEFORE /api/borrowers to avoid /:id catching "search"
+// borrower search must come BEFORE /api/borrowers
 app.use('/api/borrowers/search', borrowerSearchRoutes);
 
-// ✅ Auth FIRST
+// Auth FIRST
 app.use('/api/auth',   authRoutes);
 app.use('/api/login',  authRoutes);
 
@@ -324,15 +343,15 @@ app.use('/api/admin/report-subscriptions', adminReportSubRoutes);
 /* Other core mounts */
 app.use('/api/users',          userRoutes);
 app.use('/api/roles',          roleRoutes);
-app.use('/api/branches',       branchRoutes); // original router still mounted
+app.use('/api/branches',       branchRoutes);
 app.use('/api/user-roles',     userRoleRoutes);
 app.use('/api/user-branches',  userBranchRoutes);
 app.use('/api/loan-products',  loanProductRoutes);
 
-/* New modules (real routes OR dummy routers) */
+/* New modules */
 app.use('/api/collateral',           collateralRoutes);
 app.use('/api/collections',          collectionSheetsRoutes);
-app.use('/api/savings-transactions', savingsTransactionsRoutes); // legacy path kept for back-compat
+app.use('/api/savings-transactions', savingsTransactionsRoutes);
 app.use('/api/investors',            investorRoutes);
 app.use('/api/esignatures',          esignaturesRoutes);
 app.use('/api/payroll',              payrollRoutes);
@@ -341,7 +360,7 @@ app.use('/api/other-income',         otherIncomeRoutes);
 app.use('/api/assets',               assetManagementRoutes);
 app.use('/api/accounting',           accountingRoutes);
 
-/* ---------- Temporary stub to silence 404s on entitlements (optional) ------ */
+/* ---------- Stub to silence 404s on entitlements (optional) ------ */
 app.get('/api/tenants/me/entitlements', (_req, res) => {
   res.json({ modules: {}, status: 'ok' });
 });
@@ -364,7 +383,7 @@ try {
       }
     });
   }
-} catch { /* ignore */ }
+} catch {}
 
 /* ----------------------------------- 404 ----------------------------------- */
 app.use((req, res) => {
