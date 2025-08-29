@@ -2,7 +2,7 @@
 const { Sequelize, DataTypes } = require('sequelize');
 require('dotenv').config();
 
-/* Force `public` schema so prod finds public.loan_payments */
+/* Force `public` schema so prod finds public tables */
 const common = {
   dialect: 'postgres',
   logging: false,
@@ -27,8 +27,9 @@ const tryLoad = (loader, nameForLog) => {
   try { return loader(); }
   catch (e) { console.warn(`⚠️  Model not loaded: ${nameForLog} (${e.message})`); return null; }
 };
+const hasAttr = (model, attr) => !!(model && model.rawAttributes && (model.rawAttributes[attr] || Object.values(model.rawAttributes).some(a => a.field === attr)));
 
-/* Core models */
+/* ---------- Core models ---------- */
 db.User          = require('./user')(sequelize, DataTypes);
 db.Branch        = require('./branch')(sequelize, DataTypes);
 db.Borrower      = require('./borrower')(sequelize, DataTypes);
@@ -43,7 +44,7 @@ db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes),       'Ro
 db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes),   'UserRole');
 db.Permission = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
 
-/* SavingsTransaction (required) */
+/* Savings */
 db.SavingsTransaction = require('./savingstransaction')(sequelize, DataTypes);
 
 /* Optional modules */
@@ -57,7 +58,7 @@ db.ActivityLog        = tryLoad(() => require('./ActivityLog')(sequelize, DataTy
 db.ActivityComment    = tryLoad(() => require('./ActivityComment')(sequelize, DataTypes), 'ActivityComment');
 db.ActivityAssignment = tryLoad(() => require('./ActivityAssignment')(sequelize, DataTypes), 'ActivityAssignment');
 
-/* Accounting (optional) */
+/* Accounting (required for accounting module) */
 db.Account      = tryLoad(() => require('./account')(sequelize, DataTypes),      'Account');
 db.JournalEntry = tryLoad(() => require('./journalEntry')(sequelize, DataTypes), 'JournalEntry');
 db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes),  'LedgerEntry');
@@ -71,7 +72,7 @@ db.Collateral = tryLoad(() => require('./collateral')(sequelize, DataTypes), 'Co
 /* Expense */
 db.Expense = tryLoad(() => require('./expense')(sequelize, DataTypes), 'Expense');
 
-/* NEW: Investor (optional — controllers fallback to Setting if absent) */
+/* Investors */
 db.Investor = tryLoad(() => require('./investor')(sequelize, DataTypes), 'Investor');
 
 /* ---------------- Associations (core) ---------------- */
@@ -117,29 +118,22 @@ if (db.Loan && db.LoanProduct) {
   db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId' });
 }
 
-/* Loan ↔ User workflow (soft) */
-const hasAttr = (model, attr) => !!(model && model.rawAttributes && model.rawAttributes[attr]);
-
+/* Loan ↔ User workflow (soft / attribute-guarded) */
 if (db.Loan && db.User) {
-  const hasApproved   = hasAttr(db.Loan, 'approvedBy');
-  const hasDisbursed  = hasAttr(db.Loan, 'disbursedBy');
-  const hasInitiated  = hasAttr(db.Loan, 'initiatedBy');
-  const hasRejected   = hasAttr(db.Loan, 'rejectedBy');
-
-  if (hasApproved) {
+  if (hasAttr(db.Loan, 'approvedBy')) {
     db.Loan.belongsTo(db.User, { foreignKey: 'approvedBy' });
     db.Loan.belongsTo(db.User, { foreignKey: 'approvedBy', as: 'approver' });
     db.User.hasMany(db.Loan,   { foreignKey: 'approvedBy', as: 'approvedLoans' });
   }
-  if (hasDisbursed) {
+  if (hasAttr(db.Loan, 'disbursedBy')) {
     db.Loan.belongsTo(db.User, { foreignKey: 'disbursedBy', as: 'disburser' });
     db.User.hasMany(db.Loan,   { foreignKey: 'disbursedBy', as: 'disbursedLoans' });
   }
-  if (hasInitiated) {
+  if (hasAttr(db.Loan, 'initiatedBy')) {
     db.Loan.belongsTo(db.User, { foreignKey: 'initiatedBy', as: 'initiator' });
     db.User.hasMany(db.Loan,   { foreignKey: 'initiatedBy', as: 'initiatedLoans' });
   }
-  if (hasRejected) {
+  if (hasAttr(db.Loan, 'rejectedBy')) {
     db.Loan.belongsTo(db.User, { foreignKey: 'rejectedBy',  as: 'rejector' });
     db.User.hasMany(db.Loan,   { foreignKey: 'rejectedBy',  as: 'rejectedLoans' });
   }
@@ -168,15 +162,19 @@ if (db.Expense && db.Branch) {
   db.Expense.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
 }
 
-/* Optional modules (unchanged) */
+/* Savings ↔ Borrower */
 if (db.SavingsTransaction && db.Borrower) {
   db.SavingsTransaction.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
   db.Borrower.hasMany(db.SavingsTransaction,   { foreignKey: 'borrowerId', as: 'savingsTransactions' });
 }
+
+/* Communications */
 if (db.Communication && db.CommunicationAttachment) {
   db.Communication.hasMany(db.CommunicationAttachment, { foreignKey: 'communicationId', as: 'attachments', onDelete: 'CASCADE' });
   db.CommunicationAttachment.belongsTo(db.Communication, { foreignKey: 'communicationId', as: 'communication' });
 }
+
+/* Audit logs */
 if (db.AuditLog && db.User) {
   db.AuditLog.belongsTo(db.User,   { foreignKey: 'userId',  as: 'user' });
   db.User.hasMany(db.AuditLog,     { foreignKey: 'userId',  as: 'auditLogs' });
@@ -185,6 +183,8 @@ if (db.AuditLog && db.Branch) {
   db.AuditLog.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
   db.Branch.hasMany(db.AuditLog,   { foreignKey: 'branchId', as: 'auditLogs' });
 }
+
+/* Activity */
 if (db.ActivityLog && db.User) {
   db.ActivityLog.belongsTo(db.User, { foreignKey: 'userId', as: 'User' });
   db.User.hasMany(db.ActivityLog,   { foreignKey: 'userId' });
@@ -205,7 +205,15 @@ if (db.ActivityAssignment && db.User) {
   db.ActivityAssignment.belongsTo(db.User, { foreignKey: 'assignerId', as: 'assigner' });
 }
 
-db.Investor = tryLoad(() => require('./investor')(sequelize, DataTypes), 'Investor');
+/* ---------- Accounting associations ---------- */
+if (db.Account && db.LedgerEntry) {
+  db.Account.hasMany(db.LedgerEntry, { foreignKey: 'accountId' });
+  db.LedgerEntry.belongsTo(db.Account, { foreignKey: 'accountId' });
+}
+if (db.JournalEntry && db.LedgerEntry) {
+  db.JournalEntry.hasMany(db.LedgerEntry, { foreignKey: 'journalEntryId' });
+  db.LedgerEntry.belongsTo(db.JournalEntry, { foreignKey: 'journalEntryId' });
+}
 
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;

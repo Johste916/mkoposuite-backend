@@ -4,8 +4,6 @@
  * JournalEntry
  *  - date: accounting date (YYYY-MM-DD)
  *  - memo: optional description
- *
- * Has many LedgerEntry (see associations in models/index.js)
  */
 module.exports = (sequelize, DataTypes) => {
   const { Model } = require('sequelize');
@@ -14,14 +12,8 @@ module.exports = (sequelize, DataTypes) => {
 
   JournalEntry.init(
     {
-      date: {
-        type: DataTypes.DATEONLY,
-        allowNull: false,
-      },
-      memo: {
-        type: DataTypes.STRING(255),
-        allowNull: true,
-      },
+      date: { type: DataTypes.DATEONLY, allowNull: false },
+      memo: { type: DataTypes.STRING(255), allowNull: true },
     },
     {
       sequelize,
@@ -29,9 +21,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'JournalEntries',
       timestamps: true,
       underscored: false,
-      indexes: [
-        { fields: ['date'] },
-      ],
+      indexes: [{ fields: ['date'] }],
     }
   );
 
