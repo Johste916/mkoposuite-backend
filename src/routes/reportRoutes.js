@@ -1,37 +1,43 @@
 // server/src/routes/reportRoutes.js
+'use strict';
+
 const express = require('express');
 const ctl = require('../controllers/reportController');
 
 const r = express.Router();
 
-// shared filters
+/** Shared filters (tenanted) */
 r.get('/filters', ctl.getFilters);
 
-// borrowers summary
+/** Borrowers */
 r.get('/borrowers/loan-summary', ctl.borrowersLoanSummary);
 
-// loans
+/** Loans */
 r.get('/loans/summary', ctl.loansSummary);
 r.get('/loans/export/csv', ctl.loansExportCSV);
 r.get('/loans/export/pdf', ctl.loansExportPDF);
 r.get('/loans/trends', ctl.loansTrends);
 
-// arrears aging / par / outstanding
+/** Aging / PAR / Outstanding */
 r.get('/arrears-aging', ctl.arrearsAging);
 r.get('/outstanding', ctl.outstandingReport);
 r.get('/par/summary', ctl.parSummary);
 
-// collections
+/** Collections */
 r.get('/collections/summary', ctl.collectionsSummary);
 r.get('/collectors/summary', ctl.collectorSummary);
 
-// disbursements / fees / officer / products
+/** Disbursements / Fees / Officer / Products */
 r.get('/disbursements/summary', ctl.disbursementsSummary);
 r.get('/fees/summary', ctl.feesSummary);
 r.get('/loan-officers/summary', ctl.loanOfficerSummary);
 r.get('/loan-products/summary', ctl.loanProductsSummary);
 
-// mfrs + daily/monthly + glance + all
+/** Pro-rata (aliases for convenience) */
+r.get('/pro-rata', ctl.proRataCollections);
+r.get('/pro-rata-collections', ctl.proRataCollections);
+
+/** MFRS + Daily/Monthly + Glance + All */
 r.get('/mfrs', ctl.mfrsRatios);
 r.get('/daily', ctl.dailyReport);
 r.get('/monthly', ctl.monthlyReport);
