@@ -1,18 +1,20 @@
 // server/src/controllers/reportController.js
 /* eslint-disable no-console */
 const { Op, fn, col, literal } = require('sequelize');
+const { Parser } = require('json2csv');
+const PDFDocument = require('pdfkit');
 
 let db = {};
 try { db = require('../models'); } catch (e) { db = {}; }
 
 // Prefer whichever models exist in your build
-const Loan              = db.Loan || db.Loans;
-const LoanPayment       = db.LoanPayment || db.LoanRepayment || db.Repayment;
-const Borrower          = db.Borrower || db.Borrowers;
-const Branch            = db.Branch || db.branches || db.Branches;
-const User              = db.User || db.Users;
-const LoanProduct       = db.LoanProduct || db.Product || db.LoanProducts;
-const SavingsTransaction= db.SavingsTransaction || db.SavingsTx;
+const Loan               = db.Loan || db.Loans;
+const LoanPayment        = db.LoanPayment || db.LoanRepayment || db.Repayment;
+const Borrower           = db.Borrower || db.Borrowers;
+const Branch             = db.Branch || db.branches || db.Branches;
+const User               = db.User || db.Users;
+const LoanProduct        = db.LoanProduct || db.Product || db.LoanProducts;
+const SavingsTransaction = db.SavingsTransaction || db.SavingsTx;
 
 // ---------- helpers ----------
 const safeNumber = (v) => Number(v || 0);
@@ -27,13 +29,11 @@ async function sumSafe(model, columns, where = {}) {
   return 0;
 }
 
-// countSafe never references unknown columns
 async function countSafe(model, where = {}) {
   try { return await model.count({ where }); } catch { return 0; }
 }
 
 function parseDates(q) {
-  // activity reports
   const now = new Date();
   const startDate = q.startDate ? new Date(q.startDate) : null;
   const endDate   = q.endDate   ? new Date(q.endDate)   : null;
@@ -48,11 +48,12 @@ function betweenRange(field, startDate, endDate) {
   return { [field]: { [Op.lte]: endDate } };
 }
 
-function scopeText({ branchId, officerId, borrowerId }) {
+function scopeText({ branchId, officerId, borrowerId, productId }) {
   const bits = [];
   bits.push(branchId ? `Branch #${branchId}` : 'All branches');
   bits.push(officerId ? `Officer #${officerId}` : 'All officers');
   bits.push(borrowerId ? `Borrower #${borrowerId}` : 'All borrowers');
+  bits.push(productId ? `Product #${productId}` : 'All products');
   return bits.join(' · ');
 }
 
@@ -64,14 +65,58 @@ function periodText({ startDate, endDate, asOf, snapshot = false }) {
   return `${s} → ${e}`;
 }
 
+// Helper to get principal for a loan row
+function principalOf(loan) {
+  const v = loan?.amount ?? loan?.principal ?? loan?.principalAmount ?? 0;
+  return safeNumber(v);
+}
+
+// Compute outstanding per loan as of a date (defaults to now)
+async function computeOutstandingByLoan(asOf = new Date()) {
+  if (!Loan) return [];
+  // Sum payments per loan (approved + applied) up to asOf
+  const paidByLoan = LoanPayment ? await LoanPayment.findAll({
+    where: {
+      status: 'approved',
+      applied: true,
+      ...(LoanPayment.rawAttributes?.paymentDate
+        ? { paymentDate: { [Op.lte]: asOf } }
+        : { createdAt: { [Op.lte]: asOf } })
+    },
+    attributes: [
+      'loanId',
+      [fn('sum', col('amountPaid')), 'paid']
+    ],
+    group: ['loanId'],
+    raw: true
+  }) : [];
+
+  const paidMap = new Map(paidByLoan.map(r => [String(r.loanId), safeNumber(r.paid)]));
+
+  // Get loans (limit reasonably; expand if needed)
+  const loans = await Loan.findAll({
+    attributes: ['id','borrowerId','productId','amount','principal','createdAt'],
+    raw: true
+  });
+
+  const rows = loans.map(l => {
+    const principal = principalOf(l);
+    const paid = paidMap.get(String(l.id)) || 0;
+    const outstanding = Math.max(0, principal - paid);
+    return { loanId: l.id, outstanding };
+  }).filter(r => r.outstanding > 0);
+
+  return rows;
+}
+
 // ---------- FILTERS ----------
 exports.getFilters = async (req, res) => {
   try {
     const [branches, officers, borrowers, products] = await Promise.all([
-      Branch ? Branch.findAll({ attributes: ['id','name'], order: [['name','ASC']], paranoid: false, raw: true }) : [],
-      User   ? User.findAll({ where: { role: 'loan_officer' }, attributes: ['id','name','email'], order: [['name','ASC']], paranoid: false, raw: true }) : [],
-      Borrower ? Borrower.findAll({ attributes: ['id','name'], order: [['name','ASC']], paranoid: false, raw: true }) : [],
-      LoanProduct ? LoanProduct.findAll({ attributes: ['id','name'], order: [['name','ASC']], paranoid: false, raw: true }) : [],
+      Branch ? Branch.findAll({ attributes: ['id','name'], order: [['name','ASC']], raw: true }) : [],
+      User   ? User.findAll({ where: { role: 'loan_officer' }, attributes: ['id','name','email'], order: [['name','ASC']], raw: true }) : [],
+      Borrower ? Borrower.findAll({ attributes: ['id','name'], order: [['name','ASC']], raw: true }) : [],
+      LoanProduct ? LoanProduct.findAll({ attributes: ['id','name'], order: [['name','ASC']], raw: true }) : [],
     ]);
     res.json({ branches, officers, borrowers, products });
   } catch (e) {
@@ -86,7 +131,6 @@ exports.borrowersLoanSummary = async (req, res) => {
     const { branchId, officerId, borrowerId } = req.query;
     const { startDate, endDate } = parseDates(req.query);
 
-    // Filters you can extend once your schema links are clear
     const loanWhere = {
       ...(borrowerId ? { borrowerId } : {}),
       ...(startDate || endDate ? betweenRange('createdAt', startDate, endDate) : {})
@@ -95,34 +139,32 @@ exports.borrowersLoanSummary = async (req, res) => {
     const [loanCount, totalDisbursed, totalRepayments] = await Promise.all([
       Loan ? countSafe(Loan, loanWhere) : 0,
       Loan ? sumSafe(Loan, ['amount','principal','principalAmount'], loanWhere) : 0,
-      LoanPayment ? sumSafe(LoanPayment, ['amount','paidAmount','total'], {
-        ...(startDate || endDate ? betweenRange('createdAt', startDate, endDate) : {}),
-        ...(branchId ? { branchId } : {}),
-        ...(officerId ? { officerId } : {})
-      }) : 0,
+      LoanPayment ? sumSafe(
+        LoanPayment,
+        ['amountPaid'], // ⬅️ your schema
+        {
+          status: 'approved',
+          applied: true,
+          ...(startDate || endDate
+            ? (LoanPayment.rawAttributes?.paymentDate
+                ? betweenRange('paymentDate', startDate, endDate)
+                : betweenRange('createdAt', startDate, endDate))
+            : {}),
+          ...(branchId ? { branchId } : {}),
+          ...(officerId ? { officerId } : {}),
+          ...(borrowerId ? { borrowerId } : {}),
+        }
+      ) : 0,
     ]);
 
-    // Overdues (installments not paid and past due)
-    const defaulterCount = LoanPayment ? await countSafe(LoanPayment, {
-      status: { [Op.ne]: 'paid' },
-      dueDate: { [Op.lt]: new Date() },
-      ...(branchId ? { branchId } : {}),
-      ...(officerId ? { officerId } : {}),
-      ...(borrowerId ? { borrowerId } : {}),
-    }) : 0;
+    // We cannot reliably compute "defaulters" without a due-date schedule table.
+    const defaulterCount = 0;
 
-    const outstandingBalance = LoanPayment
-      ? await sumSafe(LoanPayment, ['balance','remaining','amountDueRemaining','principalOutstanding'], {
-          status: { [Op.ne]: 'paid' },
-        })
-      : 0;
+    // Outstanding as of now
+    const outstandingRows = await computeOutstandingByLoan(new Date());
+    const outstandingBalance = outstandingRows.reduce((s, r) => s + safeNumber(r.outstanding), 0);
 
-    const arrearsAmount = LoanPayment
-      ? await sumSafe(LoanPayment, ['balance','remaining','amountDueRemaining','principalOutstanding'], {
-          status: { [Op.ne]: 'paid' },
-          dueDate: { [Op.lt]: new Date() }
-        })
-      : 0;
+    const arrearsAmount = 0; // requires due dates / schedule
 
     const payload = {
       summary: {
@@ -153,7 +195,7 @@ exports.borrowersLoanSummary = async (req, res) => {
   }
 };
 
-// ---------- Trends (kept for back-compat) ----------
+// ---------- Trends ----------
 exports.loansTrends = async (req, res) => {
   try {
     const year = Number(req.query.year) || new Date().getFullYear();
@@ -163,21 +205,26 @@ exports.loansTrends = async (req, res) => {
 
     const loans = Loan ? await Loan.findAll({
       where: { createdAt: { [Op.between]: [start, end] } },
-      attributes: ['amount','createdAt']
+      attributes: ['amount','principal','createdAt'],
+      raw: true
     }) : [];
 
     const pays = LoanPayment ? await LoanPayment.findAll({
-      where: { createdAt: { [Op.between]: [start, end] } },
-      attributes: ['amount','paidAmount','createdAt']
+      where: (LoanPayment.rawAttributes?.paymentDate
+                ? { paymentDate: { [Op.between]: [start, end] } }
+                : { createdAt:  { [Op.between]: [start, end] } }),
+      attributes: ['amountPaid', (LoanPayment.rawAttributes?.paymentDate ? 'paymentDate' : 'createdAt')],
+      raw: true
     }) : [];
 
     loans.forEach(l => {
       const m = new Date(l.createdAt).getMonth();
-      monthly[m].loans += safeNumber(l.amount);
+      monthly[m].loans += safeNumber(l.amount ?? l.principal);
     });
     pays.forEach(p => {
-      const m = new Date(p.createdAt).getMonth();
-      monthly[m].repayments += safeNumber(p.amount || p.paidAmount);
+      const dt = p.paymentDate || p.createdAt;
+      const m = new Date(dt).getMonth();
+      monthly[m].repayments += safeNumber(p.amountPaid);
     });
 
     res.json(monthly);
@@ -203,14 +250,14 @@ exports.loansSummary = async (req, res) => {
       Loan ? sumSafe(Loan, ['amount','principal'], where) : 0,
     ]);
 
-    // Optionally return a smaller list to display
     let rows = [];
     if (Loan) {
       rows = await Loan.findAll({
         where,
         attributes: ['id','borrowerId','productId','amount','status','createdAt'],
         order: [['createdAt','DESC']],
-        limit: 200
+        limit: 200,
+        raw: true
       });
     }
 
@@ -226,7 +273,6 @@ exports.loansSummary = async (req, res) => {
   }
 };
 
-const { Parser } = require('json2csv');
 exports.loansExportCSV = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
@@ -234,7 +280,8 @@ exports.loansExportCSV = async (req, res) => {
     const list = Loan ? await Loan.findAll({
       where,
       attributes: ['id','borrowerId','productId','amount','status','createdAt'],
-      order: [['createdAt','DESC']]
+      order: [['createdAt','DESC']],
+      raw: true
     }) : [];
     const parser = new Parser();
     const csv = parser.parse(list.map(l => ({
@@ -254,13 +301,12 @@ exports.loansExportCSV = async (req, res) => {
   }
 };
 
-const PDFDocument = require('pdfkit');
 exports.loansExportPDF = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
     const where = (startDate || endDate) ? betweenRange('createdAt', startDate, endDate) : {};
     const list = Loan ? await Loan.findAll({
-      where, attributes:['id','borrowerId','productId','amount','status','createdAt'], order:[['createdAt','DESC']]
+      where, attributes:['id','borrowerId','productId','amount','status','createdAt'], order:[['createdAt','DESC']], raw:true
     }) : [];
     const doc = new PDFDocument({ margin: 36 });
     const chunks = [];
@@ -281,29 +327,15 @@ exports.loansExportPDF = async (req, res) => {
   }
 };
 
-// ---------- Arrears aging ----------
+// ---------- Arrears aging (requires schedule/due dates) ----------
 exports.arrearsAging = async (req, res) => {
   try {
     const { asOf } = parseDates(req.query);
-    const base = { status: { [Op.ne]:'paid' }, dueDate: { [Op.lt]: asOf } };
-    if (!LoanPayment) return res.json({ buckets: [], asOf });
-
-    // Pull minimal fields to compute days late
-    const items = await LoanPayment.findAll({ where: base, attributes:['id','loanId','dueDate','amount','balance','remaining'] });
-    const buckets = { '1-29':{count:0,amount:0}, '30-59':{count:0,amount:0}, '60-89':{count:0,amount:0}, '90+':{count:0,amount:0} };
-
-    items.forEach(r => {
-      const days = Math.floor((asOf - new Date(r.dueDate)) / (1000*60*60*24));
-      const amt = safeNumber(r.balance || r.remaining || r.amount);
-      const key = days>=90 ? '90+' : days>=60 ? '60-89' : days>=30 ? '30-59' : '1-29';
-      buckets[key].count += 1;
-      buckets[key].amount += amt;
-    });
-
-    res.json({ asOf, buckets });
+    // Your LoanPayment model has no dueDate/balance — return empty buckets until a schedule table exists.
+    res.json({ asOf, buckets: { '1-29':{count:0,amount:0}, '30-59':{count:0,amount:0}, '60-89':{count:0,amount:0}, '90+':{count:0,amount:0} } });
   } catch (e) {
     console.error('arrearsAging error:', e);
-    res.json({ asOf: new Date(), buckets: {} });
+    res.json({ asOf: new Date(), buckets: { } });
   }
 };
 
@@ -313,9 +345,18 @@ exports.collectionsSummary = async (req, res) => {
     const { startDate, endDate } = parseDates(req.query);
     if (!LoanPayment) return res.json({ summary:{total:0,receipts:0}, rows:[], period: periodText({startDate,endDate}), scope: scopeText(req.query) });
 
-    const where = betweenRange('createdAt', startDate, endDate);
+    const dateWhere = (LoanPayment.rawAttributes?.paymentDate
+      ? betweenRange('paymentDate', startDate, endDate)
+      : betweenRange('createdAt', startDate, endDate));
+
+    const where = {
+      status: 'approved',
+      applied: true,
+      ...dateWhere
+    };
+
     const [total, receipts] = await Promise.all([
-      sumSafe(LoanPayment, ['amount','paidAmount','total'], where),
+      sumSafe(LoanPayment, ['amountPaid'], where),
       countSafe(LoanPayment, where)
     ]);
 
@@ -329,23 +370,30 @@ exports.collectionsSummary = async (req, res) => {
 // ---------- Collector ----------
 exports.collectorSummary = async (req, res) => {
   try {
-    const { startDate, endDate, officerId } = parseDates(req.query) && req.query;
-    if (!LoanPayment) return res.json({ summary:{total:0}, rows:[] });
+    const { startDate, endDate } = parseDates(req.query);
+    if (!LoanPayment) return res.json({ summary:{ total:0 }, rows:[], period: periodText({startDate,endDate}), scope: scopeText(req.query) });
+
+    const dateWhere = (LoanPayment.rawAttributes?.paymentDate
+      ? betweenRange('paymentDate', startDate, endDate)
+      : betweenRange('createdAt', startDate, endDate));
+
     const where = {
+      status: 'approved',
+      applied: true,
       ...(req.query.officerId ? { officerId: req.query.officerId } : {}),
-      ...(startDate || endDate ? betweenRange('createdAt', new Date(req.query.startDate), new Date(req.query.endDate)) : {})
+      ...dateWhere
     };
-    const total = await sumSafe(LoanPayment, ['amount','paidAmount','total'], where);
-    res.json({ summary:{ total }, rows:[], period: periodText({ startDate: req.query.startDate ? new Date(req.query.startDate):null, endDate: req.query.endDate ? new Date(req.query.endDate):null }), scope: scopeText(req.query) });
+
+    const total = await sumSafe(LoanPayment, ['amountPaid'], where);
+    res.json({ summary:{ total }, rows:[], period: periodText({ startDate, endDate }), scope: scopeText(req.query) });
   } catch (e) {
     console.error('collectorSummary error:', e);
-    res.json({ summary:{ total:0 }, rows:[] });
+    res.json({ summary:{ total:0 }, rows:[], period: periodText({}), scope: scopeText({}) });
   }
 };
 
 // ---------- Deferred income ----------
 exports.deferredIncome = async (req, res) => {
-  // Requires interest accrual data; return safe zeroes if not present
   res.json({ summary:{ accrued:0, received:0, deferred:0 }, rows:[], period: periodText(parseDates(req.query)), scope: scopeText(req.query) });
 };
 exports.deferredIncomeMonthly = async (req, res) => {
@@ -377,7 +425,6 @@ exports.disbursementsSummary = async (req, res) => {
 
 // ---------- Fees ----------
 exports.feesSummary = async (req, res) => {
-  // If fees tracked via payments component, wire here; safe zeros for now
   res.json({ summary:{ total:0 }, byType:[], period: periodText(parseDates(req.query)), scope: scopeText(req.query) });
 };
 
@@ -417,49 +464,25 @@ exports.monthlyReport = async (req, res) => {
 // ---------- Outstanding ----------
 exports.outstandingReport = async (req, res) => {
   try {
-    if (!LoanPayment) return res.json({ rows:[], totals:{ outstanding:0 }, asOf: parseDates(req.query).asOf });
-    const all = await LoanPayment.findAll({
-      where: { status: { [Op.ne]:'paid' } },
-      attributes:['loanId','balance','remaining','amount']
-    });
-    const rows = {};
-    all.forEach(x => {
-      const amt = safeNumber(x.balance || x.remaining || x.amount);
-      rows[x.loanId] = (rows[x.loanId] || 0) + amt;
-    });
-    const list = Object.entries(rows).map(([loanId, outstanding]) => ({ loanId, outstanding }));
-    const total = list.reduce((s,r)=>s+safeNumber(r.outstanding),0);
-    res.json({ rows: list, totals: { outstanding: total }, asOf: parseDates(req.query).asOf, scope: scopeText(req.query) });
+    const { asOf } = parseDates(req.query);
+    const rows = await computeOutstandingByLoan(asOf);
+    const total = rows.reduce((s,r)=>s+safeNumber(r.outstanding),0);
+    res.json({ rows, totals: { outstanding: total }, asOf, scope: scopeText(req.query) });
   } catch (e) {
     console.error('outstandingReport error:', e);
     res.json({ rows:[], totals:{ outstanding:0 }, asOf: parseDates(req.query).asOf });
   }
 };
 
-// ---------- PAR summary ----------
+// ---------- PAR summary (needs schedule for true PAR) ----------
 exports.parSummary = async (req, res) => {
   try {
     const { asOf } = parseDates(req.query);
-    if (!LoanPayment) return res.json({ asOf, par:{ olp:0, buckets:{'1-29':0,'30-59':0,'60-89':0,'90+':0}, par30:0 } });
+    // Approximate OLP using outstanding (no buckets without due dates)
+    const rows = await computeOutstandingByLoan(asOf);
+    const olp = rows.reduce((s,r)=>s+safeNumber(r.outstanding),0);
 
-    const items = await LoanPayment.findAll({
-      attributes:['loanId','dueDate','balance','remaining','amount','status']
-    });
-
-    let olp = 0;
-    const buckets = { '1-29':0, '30-59':0, '60-89':0, '90+':0 };
-    items.forEach(r => {
-      const outstanding = safeNumber(r.balance || r.remaining || r.amount);
-      olp += outstanding;
-      if (r.status === 'paid' || !r.dueDate || new Date(r.dueDate) >= asOf) return;
-      const days = Math.floor((asOf - new Date(r.dueDate)) / (1000*60*60*24));
-      const key = days>=90 ? '90+' : days>=60 ? '60-89' : days>=30 ? '30-59' : '1-29';
-      buckets[key] += outstanding;
-    });
-
-    const par30 = olp ? ((buckets['30-59'] + buckets['60-89'] + buckets['90+']) / olp) : 0;
-
-    res.json({ asOf, par: { olp, buckets, par30 } });
+    res.json({ asOf, par: { olp, buckets: { '1-29':0, '30-59':0, '60-89':0, '90+':0 }, par30: 0 } });
   } catch (e) {
     console.error('parSummary error:', e);
     res.json({ asOf: parseDates(req.query).asOf, par:{ olp:0, buckets:{}, par30:0 } });
@@ -469,13 +492,17 @@ exports.parSummary = async (req, res) => {
 // ---------- At a glance ----------
 exports.atAGlance = async (req, res) => {
   const { startDate, endDate, asOf } = parseDates(req.query);
+  // Outstanding snapshot
+  const rows = await computeOutstandingByLoan(asOf);
+  const outstanding = rows.reduce((s,r)=>s+safeNumber(r.outstanding),0);
+
   res.json({
     asOf, period: periodText({startDate,endDate}),
     cards: [
-      { title:'Outstanding Portfolio', value:0, currency:true },
-      { title:'PAR30', value:0.0, percent:true },
-      { title:'Disbursed (MTD)', value:0, currency:true },
-      { title:'Collections (MTD)', value:0, currency:true },
+      { title:'Outstanding Portfolio', value: outstanding, currency:true },
+      { title:'PAR30', value: 0.0, percent:true },
+      { title:'Disbursed (MTD)', value: 0, currency:true },
+      { title:'Collections (MTD)', value: 0, currency:true },
     ],
     trends: []
   });
