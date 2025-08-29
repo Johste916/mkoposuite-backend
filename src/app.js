@@ -13,6 +13,11 @@ try { morgan = require('morgan'); } catch {}
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 
+/* -------------------------- Attach models for controllers ------------------ */
+let models;
+try { models = require('./models'); } catch { try { models = require('../models'); } catch {} }
+if (models) app.set('models', models);
+
 /* -------------------------- Security & performance ------------------------- */
 if (helmet) {
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
@@ -31,9 +36,10 @@ const defaultOrigins = [
   'https://strong-fudge-7fc28d.netlify.app',
   'https://mkoposuite.netlify.app',
 ];
-const extraOrigins = (process.env.CORS_ORIGINS || '')
+// Support both CORS_ORIGINS and CORS_ALLOW_ORIGINS
+const envOrigins = (process.env.CORS_ALLOW_ORIGINS || process.env.CORS_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
-const allowedOrigins = new Set([...defaultOrigins, ...extraOrigins]);
+const allowedOrigins = new Set([...defaultOrigins, ...envOrigins]);
 
 function isAllowedOrigin(origin) {
   if (!origin) return false;
@@ -77,7 +83,7 @@ app.use((req, res, next) => {
   );
 
   // Let browser read filename on downloads
-  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition,X-Total-Count');
 
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -232,6 +238,8 @@ const assetManagementRoutes = safeLoadRoutes(
     { id: 2, name: 'Motorcycle 02', category: 'Vehicle', status: 'Maintenance' },
   ])
 );
+
+// Prefer real accounting routes; fallback remains available for local dev.
 const accountingRoutes = safeLoadRoutes(
   './routes/accountingRoutes',
   makeDummyRouter({
@@ -335,6 +343,8 @@ app.use('/api/payroll',              payrollRoutes);
 app.use('/api/expenses',             expensesRoutes);
 app.use('/api/other-income',         otherIncomeRoutes);
 app.use('/api/assets',               assetManagementRoutes);
+
+/* --- REAL accounting endpoints (controllers) --- */
 app.use('/api/accounting',           accountingRoutes);
 
 /* ---------- Stub to silence 404s on entitlements (optional) ------ */
@@ -372,10 +382,26 @@ app.use((req, res) => {
 
 /* ------------------------------- Error handler ----------------------------- */
 app.use((err, _req, res, _next) => {
-  const status = err.status || 500;
-  const message = err.expose ? err.message : (status === 500 ? 'Internal server error' : err.message);
-  if (process.env.NODE_ENV !== 'production') console.error('❌ Error:', err);
-  res.status(status).json({ error: message || 'Unexpected error' });
+  // Postgres codes we want to surface as friendly messages:
+  // 42P01: undefined_table, 42703: undefined_column
+  const pgCode = err?.original?.code || err?.parent?.code;
+
+  let status = err.status || 500;
+  let message;
+
+  if (pgCode === '42P01') {
+    message = 'Required table is missing. Run DB migrations on this environment (e.g. `npx sequelize-cli db:migrate`).';
+  } else if (pgCode === '42703') {
+    message = 'A required column is missing. Ensure migrations are up to date.';
+  } else {
+    message = err.expose ? err.message : (status === 500 ? 'Internal server error' : err.message);
+  }
+
+  if (process.env.NODE_ENV !== 'production') {
+    console.error('❌ Error:', err);
+  }
+
+  res.status(status).json({ error: message, code: pgCode || undefined });
 });
 
 module.exports = app;

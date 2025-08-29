@@ -27,7 +27,8 @@ const tryLoad = (loader, nameForLog) => {
   try { return loader(); }
   catch (e) { console.warn(`⚠️  Model not loaded: ${nameForLog} (${e.message})`); return null; }
 };
-const hasAttr = (model, attr) => !!(model && model.rawAttributes && (model.rawAttributes[attr] || Object.values(model.rawAttributes).some(a => a.field === attr)));
+const hasAttr = (model, attr) =>
+  !!(model && model.rawAttributes && (model.rawAttributes[attr] || Object.values(model.rawAttributes).some(a => a.field === attr)));
 
 /* ---------- Core models ---------- */
 db.User          = require('./user')(sequelize, DataTypes);
