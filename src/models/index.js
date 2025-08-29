@@ -44,7 +44,7 @@ db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes),       'Ro
 db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes),   'UserRole');
 db.Permission = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
 
-/* Savings */
+/* Savings (required) */
 db.SavingsTransaction = require('./savingstransaction')(sequelize, DataTypes);
 
 /* Optional modules */
@@ -118,7 +118,7 @@ if (db.Loan && db.LoanProduct) {
   db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId' });
 }
 
-/* Loan ↔ User workflow (soft / attribute-guarded) */
+/* Loan ↔ User workflow (guarded) */
 if (db.Loan && db.User) {
   if (hasAttr(db.Loan, 'approvedBy')) {
     db.Loan.belongsTo(db.User, { foreignKey: 'approvedBy' });

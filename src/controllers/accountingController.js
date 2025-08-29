@@ -34,7 +34,11 @@ function tenantFilter(model, req) {
 
 function getModel(name) {
   const m = db?.[name] || sequelize?.models?.[name];
-  if (!m) throw Object.assign(new Error(`Model "${name}" not found`), { status: 500, expose: true });
+  if (!m) {
+    const err = new Error(`Model "${name}" not found — are the files exported in models/index.js?`);
+    err.status = 500; err.expose = true;
+    throw err;
+  }
   return m;
 }
 
@@ -64,6 +68,65 @@ function sendCSV(res, filename, rows) {
   res.send(csv);
 }
 
+/* Convert low-level pg/Sequelize table-missing to a friendly message */
+function rethrowIfMissingTable(e, tableHint) {
+  const msg = String(e?.message || '');
+  const code = e?.original?.code || e?.parent?.code || '';
+  const isMissing =
+    code === '42P01' ||                   // Postgres undefined_table
+    /relation .* does not exist/i.test(msg) ||
+    /SQLITE_ERROR: no such table/i.test(msg);
+  if (isMissing) {
+    const err = new Error(
+      `Required table is missing (${tableHint}). Run migrations on this environment:\n` +
+      `- npx sequelize-cli db:migrate\n` +
+      `Or enable seeding endpoint by setting ENABLE_ACCOUNTING_DEV=true and call /api/accounting/dev/seed-basic`
+    );
+    err.status = 500; err.expose = true;
+    throw err;
+  }
+  throw e;
+}
+
+/* ───────── diagnostics ───────── */
+/** GET /accounting/diagnostics */
+exports.diagnostics = async (req, res, next) => {
+  try {
+    const out = { dbConnected: false, modelsLoaded: {}, tables: {}, counts: {} };
+    // DB connectivity
+    try { await sequelize.authenticate(); out.dbConnected = true; } catch { out.dbConnected = false; }
+
+    // Models present?
+    const names = ['Account', 'JournalEntry', 'LedgerEntry'];
+    for (const n of names) out.modelsLoaded[n] = !!(db?.[n] || sequelize?.models?.[n]);
+
+    // Tables present?
+    const checks = [
+      { key: 'Accounts',       sql: `SELECT to_regclass('public."Accounts"') as ok;` },
+      { key: 'JournalEntries', sql: `SELECT to_regclass('public."JournalEntries"') as ok;` },
+      { key: 'LedgerEntries',  sql: `SELECT to_regclass('public."LedgerEntries"') as ok;` },
+    ];
+    for (const c of checks) {
+      try {
+        const [r] = await sequelize.query(c.sql);
+        out.tables[c.key] = !!(Array.isArray(r) ? r[0]?.ok : r?.ok);
+      } catch {
+        out.tables[c.key] = false;
+      }
+    }
+
+    // Row counts (if tables exist)
+    async function tryCount(name) {
+      try { const m = getModel(name); return await m.count(); } catch { return null; }
+    }
+    out.counts.Accounts       = out.tables.Accounts       ? await tryCount('Account')      : null;
+    out.counts.JournalEntries = out.tables.JournalEntries ? await tryCount('JournalEntry') : null;
+    out.counts.LedgerEntries  = out.tables.LedgerEntries  ? await tryCount('LedgerEntry')  : null;
+
+    res.json(out);
+  } catch (e) { next(e); }
+};
+
 /* ───────── endpoints ───────── */
 /** GET /accounting/chart-of-accounts */
 exports.chartOfAccounts = async (req, res, next) => {
@@ -83,7 +146,7 @@ exports.chartOfAccounts = async (req, res, next) => {
     });
 
     res.json(rows);
-  } catch (e) { next(e); }
+  } catch (e) { try { rethrowIfMissingTable(e, 'Accounts'); } catch (err) { next(err); } }
 };
 
 /** GET /accounting/ledger?accountId=&from=&to= */
@@ -121,7 +184,7 @@ exports.ledger = async (req, res, next) => {
     });
 
     res.json(rows);
-  } catch (e) { next(e); }
+  } catch (e) { try { rethrowIfMissingTable(e, 'LedgerEntries'); } catch (err) { next(err); } }
 };
 
 /* ---- calculators ---- */
@@ -251,7 +314,7 @@ async function computeProfitLoss(req) {
 /* ---- Trial Balance ---- */
 exports.trialBalance = async (req, res, next) => {
   try { res.json(await computeTrialBalance(req)); }
-  catch (e) { next(e); }
+  catch (e) { try { rethrowIfMissingTable(e, 'LedgerEntries / Accounts'); } catch (err) { next(err); } }
 };
 exports.trialBalanceCSV = async (req, res, next) => {
   try {
@@ -261,13 +324,13 @@ exports.trialBalanceCSV = async (req, res, next) => {
       debit: r.debit, credit: r.credit, balance: r.balance,
     }));
     sendCSV(res, 'trial_balance.csv', flat);
-  } catch (e) { next(e); }
+  } catch (e) { try { rethrowIfMissingTable(e, 'LedgerEntries / Accounts'); } catch (err) { next(err); } }
 };
 
 /* ---- Profit & Loss ---- */
 exports.profitLoss = async (req, res, next) => {
   try { res.json(await computeProfitLoss(req)); }
-  catch (e) { next(e); }
+  catch (e) { try { rethrowIfMissingTable(e, 'LedgerEntries / Accounts'); } catch (err) { next(err); } }
 };
 exports.profitLossCSV = async (req, res, next) => {
   try {
@@ -280,7 +343,7 @@ exports.profitLossCSV = async (req, res, next) => {
       { section: 'Summary', code: '', name: 'Net Profit',    amount: data.netProfit },
     ];
     sendCSV(res, 'profit_loss.csv', rows);
-  } catch (e) { next(e); }
+  } catch (e) { try { rethrowIfMissingTable(e, 'LedgerEntries / Accounts'); } catch (err) { next(err); } }
 };
 
 /* ---- Cashflow (monthly) ---- */
@@ -343,7 +406,7 @@ exports.cashflowMonthly = async (req, res, next) => {
     });
 
     res.json(result);
-  } catch (e) { next(e); }
+  } catch (e) { try { rethrowIfMissingTable(e, 'LedgerEntries / Accounts'); } catch (err) { next(err); } }
 };
 
 /* ---- Manual Journal ---- */
@@ -397,6 +460,6 @@ exports.createManualJournal = async (req, res, next) => {
     res.status(201).json({ ok: true, journalId: journal.id });
   } catch (e) {
     await t.rollback();
-    next(e);
+    try { rethrowIfMissingTable(e, 'JournalEntries / LedgerEntries'); } catch (err) { next(err); }
   }
 };
