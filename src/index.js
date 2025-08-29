@@ -1,8 +1,15 @@
+// server/src/index.js
+require('dotenv').config();
+
 const app = require('./app');
 const db = require('./models');
 const { sequelize } = db;
 
 const cron = require('node-cron');
+
+// Optional auto-sync (creates/updates tables in Supabase when AUTO_SYNC=1)
+let autoSync;
+try { autoSync = require('./bootstrap/autoSync'); } catch { /* optional */ }
 
 /* ------------------------------ Optional cron ------------------------------ */
 let penaltiesTask;
@@ -25,13 +32,23 @@ const PORT = process.env.PORT || 10000;
 let server;
 
 /* ------------------------------ One-off helpers ------------------------------ */
+/** Only the `settings` table (rare; for first boot of config) */
 async function ensureSettingsOnly() {
+  if (!db.Setting) {
+    console.log("ℹ️ Setting model not present; skipping.");
+    return;
+  }
   console.log("🔧 Syncing ONLY 'settings' table…");
-  await db.Setting.sync();
+  await db.Setting.sync({ alter: true });
   console.log('✅ Setting model sync completed');
 }
 
+/** ACL tables + seed (roles/permissions/admin assignment) */
 async function ensureAclTablesAndSeed() {
+  if (!db.Role || !db.Permission || !db.UserRole) {
+    console.log('ℹ️ ACL models missing; skipping ACL sync.');
+    return;
+  }
   console.log('🔧 Syncing ACL tables and seeding defaults (Roles, Permissions, UserRoles)…');
   await db.Role.sync({ alter: true });
   await db.Permission.sync({ alter: true });
@@ -77,32 +94,67 @@ async function ensureExpensesTables() {
   console.log('✅ Expense ready');
 }
 
+/** Core portfolio/accounting tables commonly needed by reports */
+async function ensureCoreTables() {
+  console.log('🔧 Syncing CORE tables (create/alter as needed)…');
+
+  // Branch had "paranoid: true" — this adds deletedAt; sync will create it if missing.
+  if (db.Branch) await db.Branch.sync({ alter: true });
+
+  // Borrowers, Loans, Payments, Products, Users are typical report dependencies
+  if (db.Borrower)      await db.Borrower.sync({ alter: true });
+  if (db.LoanProduct)   await db.LoanProduct.sync({ alter: true });
+  if (db.Loan)          await db.Loan.sync({ alter: true });
+
+  // Important: LoanPayment needs "applied", "amountPaid", "paymentDate" for our queries.
+  if (db.LoanPayment)   await db.LoanPayment.sync({ alter: true });
+
+  if (db.User)          await db.User.sync({ alter: true });
+  if (db.Setting)       await db.Setting.sync({ alter: true });
+
+  // Optional auxiliary tables if present:
+  if (db.LoanSchedule)  await db.LoanSchedule.sync({ alter: true });
+  if (db.LoanFee)       await db.LoanFee.sync({ alter: true });
+
+  console.log('✅ CORE tables ready');
+}
+
 /* --------------------------------- Startup --------------------------------- */
 (async () => {
   try {
     await sequelize.authenticate();
     console.log('✅ Connected to the database');
 
-    const syncSettingsOnly = process.env.SYNC_SETTINGS_ONLY === 'true';
-    const syncACL          = process.env.SYNC_ACL === 'true';
-    const syncAudit        = process.env.SYNC_AUDIT === 'true';
-    const syncSavings      = process.env.SYNC_SAVINGS === 'true';
-    const syncExpenses     = process.env.SYNC_EXPENSES === 'true';
+    // One-switch bootstrap (creates/updates ALL models automatically)
+    if (process.env.AUTO_SYNC === '1' && typeof autoSync === 'function') {
+      await autoSync(); // contains sequelize.sync({ alter: true })
+    } else {
+      // Granular toggles
+      const syncSettingsOnly = process.env.SYNC_SETTINGS_ONLY === 'true';
+      const syncACL          = process.env.SYNC_ACL === 'true';
+      const syncAudit        = process.env.SYNC_AUDIT === 'true';
+      const syncSavings      = process.env.SYNC_SAVINGS === 'true';
+      const syncExpenses     = process.env.SYNC_EXPENSES === 'true';
+      const syncCore         = process.env.SYNC_CORE === 'true'; // 👈 new toggle for core tables
 
-    if (syncSettingsOnly) await ensureSettingsOnly();
-    else console.log('⏭  Skipping settings sync (set SYNC_SETTINGS_ONLY=true for one-off)');
+      if (syncSettingsOnly) await ensureSettingsOnly();
+      else console.log('⏭  Skipping settings sync (set SYNC_SETTINGS_ONLY=true for one-off)');
 
-    if (syncACL) await ensureAclTablesAndSeed();
-    else console.log('⏭  Skipping ACL sync (set SYNC_ACL=true for first boot)');
+      if (syncACL) await ensureAclTablesAndSeed();
+      else console.log('⏭  Skipping ACL sync (set SYNC_ACL=true for first boot)');
 
-    if (syncAudit) await ensureAuditTables();
-    else console.log('⏭  Skipping Audit sync (set SYNC_AUDIT=true to create/alter audit_logs)');
+      if (syncAudit) await ensureAuditTables();
+      else console.log('⏭  Skipping Audit sync (set SYNC_AUDIT=true to create/alter audit_logs)');
 
-    if (syncSavings) await ensureSavingsTables();
-    else console.log('⏭  Skipping Savings sync (set SYNC_SAVINGS=true for one-off)');
+      if (syncSavings) await ensureSavingsTables();
+      else console.log('⏭  Skipping Savings sync (set SYNC_SAVINGS=true for one-off)');
 
-    if (syncExpenses) await ensureExpensesTables();
-    else console.log('⏭  Skipping Expense sync (set SYNC_EXPENSES=true for one-off)');
+      if (syncExpenses) await ensureExpensesTables();
+      else console.log('⏭  Skipping Expense sync (set SYNC_EXPENSES=true for one-off)');
+
+      if (syncCore) await ensureCoreTables();
+      else console.log('⏭  Skipping CORE sync (set SYNC_CORE=true to create/alter core tables)');
+    }
 
     server = app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);

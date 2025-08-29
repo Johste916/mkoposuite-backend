@@ -1,3 +1,4 @@
+// server/src/app.js
 'use strict';
 const express = require('express');
 const path = require('path');
@@ -116,6 +117,7 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
   for (const p of tryPaths) {
     try {
       const mod = require(p);
+      // Allow both ESM default export and CommonJS export
       return mod && mod.default ? mod.default : mod;
     } catch (e) {
       if (e.code !== 'MODULE_NOT_FOUND') {
