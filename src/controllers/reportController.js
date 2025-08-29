@@ -114,7 +114,6 @@ function tenantFilter(model, req) {
 
 /* ----------------------------- business helpers ---------------------------- */
 // Compute outstanding per loan as of a date (defaults to now)
-// Robust to column name differences (amount/principal, paymentDate/createdAt, etc.)
 async function computeOutstandingByLoan(asOf = new Date(), req = null) {
   if (!Loan) return [];
 
@@ -145,7 +144,6 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
       ...tenantFilter(LoanPayment, req),
     };
 
-    // SELECT loanId, SUM(amountPaid) AS paid FROM loan_payments GROUP BY loanId
     const attrs = [];
     attrs.push([col(LoanPayment.rawAttributes[lpLoanIdKey].field || lpLoanIdKey), 'loanId']);
     attrs.push([fn('sum', col(LoanPayment.rawAttributes[lpAmountKey].field || lpAmountKey)), 'paid']);
@@ -244,13 +242,12 @@ exports.borrowersLoanSummary = async (req, res) => {
       ...tenantFilter(Loan, req),
     };
 
-    // Totals
     const [loanCount, totalDisbursed] = await Promise.all([
       Loan ? countSafe(Loan, loanWhere) : 0,
       Loan ? sumSafe(Loan, ['amount', 'principal', 'principalAmount', 'loanAmount'], loanWhere) : 0,
     ]);
 
-    // Collections (schema aware)
+    // Collections
     let totalRepayments = 0;
     if (LoanPayment) {
       const lpAmountKey  = pickAttrKey(LoanPayment, ['amountPaid', 'amount', 'paidAmount', 'paymentAmount']);
@@ -273,7 +270,6 @@ exports.borrowersLoanSummary = async (req, res) => {
     const outstandingRows = await computeOutstandingByLoan(new Date(), req);
     const outstandingBalance = outstandingRows.reduce((s, r) => s + safeNumber(r.outstanding), 0);
 
-    // place-holders pending schedule/due-date table
     const defaulterCount = 0;
     const arrearsAmount  = 0;
 
@@ -282,7 +278,7 @@ exports.borrowersLoanSummary = async (req, res) => {
       table: {
         columns: [
           { key: 'metric', label: 'Metric' },
-          { key: 'value',  label: 'Value', currency: true }
+          { key: 'value',  label: 'Value' }
         ],
         rows: [
           { metric: 'Total Loans Count',   value: loanCount },
@@ -292,16 +288,18 @@ exports.borrowersLoanSummary = async (req, res) => {
           { metric: 'Arrears Count',       value: defaulterCount },
           { metric: 'Arrears Amount',      value: arrearsAmount, currency: true },
         ],
-        period: periodText({ startDate, endDate }),
-        scope:  scopeText({ branchId, officerId, borrowerId }),
       },
+      period: periodText({ startDate, endDate }),
+      scope:  scopeText({ branchId, officerId, borrowerId }),
       welcome: 'Here is a friendly summary for your borrowers. Apply filters to narrow focus and export anytime!',
     });
   } catch (err) {
     console.error('borrowersLoanSummary error:', err);
     res.json({
       summary: { loanCount: 0, totalRepayments: 0, defaulterCount: 0 },
-      table: { rows: [], period: periodText({}), scope: scopeText({}) },
+      table: { rows: [] },
+      period: periodText({}),
+      scope: scopeText({}),
       welcome: 'No data yet — try a different filter range.',
     });
   }
@@ -507,11 +505,13 @@ exports.arrearsAging = async (req, res) => {
           { bucket: '90+',   count: 0, amount: 0 },
         ],
       },
+      period: '',
+      scope: scopeText(req.query),
       welcome: 'Aging buckets will populate once scheduled dues are tracked.',
     });
   } catch (e) {
     console.error('arrearsAging error:', e);
-    res.json({ asOf: new Date(), table: { rows: [] } });
+    res.json({ asOf: new Date(), table: { rows: [] }, period: '', scope: scopeText({}) });
   }
 };
 
@@ -519,7 +519,18 @@ exports.arrearsAging = async (req, res) => {
 exports.collectionsSummary = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
-    if (!LoanPayment) return res.json({ summary:{total:0,receipts:0}, rows:[], period: periodText({startDate,endDate}), scope: scopeText(req.query) });
+    if (!LoanPayment) {
+      return res.json({
+        summary:{ total:0, receipts:0 },
+        table: { columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}], rows:[
+          { metric:'Total Collections', value:0, currency:true },
+          { metric:'Receipts Count', value:0 }
+        ]},
+        period: periodText({startDate,endDate}),
+        scope: scopeText(req.query),
+        welcome: 'Collections at a glance — totals and receipts count.',
+      });
+    }
 
     const lpAmountKey  = pickAttrKey(LoanPayment, ['amountPaid','amount','paidAmount','paymentAmount']);
     const lpDateKey    = pickAttrKey(LoanPayment, ['paymentDate','date','createdAt','created_at']);
@@ -540,21 +551,31 @@ exports.collectionsSummary = async (req, res) => {
 
     res.json({
       summary:{ total, receipts },
-      rows:[],
+      table: { columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}], rows:[
+        { metric:'Total Collections', value: total, currency:true },
+        { metric:'Receipts Count', value: receipts }
+      ]},
       period: periodText({startDate,endDate}),
       scope: scopeText(req.query),
       welcome: 'Collections at a glance — totals and receipts count.',
     });
   } catch (e) {
     console.error('collectionsSummary error:', e);
-    res.json({ summary:{total:0,receipts:0}, rows:[], period: periodText({}), scope: scopeText({}) });
+    res.json({ summary:{total:0,receipts:0}, table:{ rows:[] }, period: periodText({}), scope: scopeText({}) });
   }
 };
 
 exports.collectorSummary = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
-    if (!LoanPayment) return res.json({ summary:{ total:0 }, rows:[], period: periodText({startDate,endDate}), scope: scopeText(req.query) });
+    if (!LoanPayment) {
+      return res.json({
+        summary:{ total:0 },
+        table:{ columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}], rows:[{ metric:'Total Collected', value:0, currency:true }]},
+        period: periodText({startDate,endDate}),
+        scope: scopeText(req.query),
+      });
+    }
 
     const lpAmountKey  = pickAttrKey(LoanPayment, ['amountPaid','amount','paidAmount','paymentAmount']);
     const lpDateKey    = pickAttrKey(LoanPayment, ['paymentDate','date','createdAt','created_at']);
@@ -572,39 +593,74 @@ exports.collectorSummary = async (req, res) => {
     const total = lpAmountKey ? await sumSafe(LoanPayment, [lpAmountKey], where) : 0;
     res.json({
       summary:{ total },
-      rows:[],
+      table:{ columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}], rows:[{ metric:'Total Collected', value: total, currency:true }]},
       period: periodText({ startDate, endDate }),
       scope: scopeText(req.query),
       welcome: 'Collector summary — filter by officer to drill down.',
     });
   } catch (e) {
     console.error('collectorSummary error:', e);
-    res.json({ summary:{ total:0 }, rows:[], period: periodText({}), scope: scopeText({}) });
+    res.json({ summary:{ total:0 }, table:{ rows:[] }, period: periodText({}), scope: scopeText({}) });
   }
 };
 
 /* ------------------------------ Deferred income ---------------------------- */
 exports.deferredIncome = async (req, res) => {
+  const period = periodText(parseDates(req.query));
+  const scope = scopeText(req.query);
   res.json({
     summary:{ accrued:0, received:0, deferred:0 },
-    rows:[],
-    period: periodText(parseDates(req.query)),
-    scope: scopeText(req.query),
+    table: {
+      columns: [{ key:'metric', label:'Metric' }, { key:'value', label:'Value' }],
+      rows: [
+        { metric:'Accrued',  value:0, currency:true },
+        { metric:'Received', value:0, currency:true },
+        { metric:'Deferred', value:0, currency:true },
+      ],
+    },
+    period,
+    scope,
     welcome: 'Deferred income coming soon (requires fee accrual tracking).'
   });
 };
+
 exports.deferredIncomeMonthly = async (req, res) => {
   const year = Number(req.query.year) || new Date().getFullYear();
   const rows = Array.from({length:12},(_,i)=>({ month:i+1, opening:0, accrued:0, received:0, closing:0 }));
-  res.json({ year, rows, welcome: 'Monthly deferred income roll-forward (placeholder).' });
+  res.json({
+    year,
+    rows, // raw (for APIs)
+    table: {
+      columns: [
+        { key:'month',    label:'Month' },
+        { key:'opening',  label:'Opening',  currency:true },
+        { key:'accrued',  label:'Accrued',  currency:true },
+        { key:'received', label:'Received', currency:true },
+        { key:'closing',  label:'Closing',  currency:true },
+      ],
+      rows: rows.map(r => ({ ...r, month: r.month })), // UI table
+    },
+    period: `${year}-01-01 → ${year}-12-31`,
+    scope: scopeText(req.query),
+    welcome: 'Monthly deferred income roll-forward (placeholder).'
+  });
 };
 
 /* ---------------------------- Pro-rata collections ------------------------- */
 exports.proRataCollections = async (req, res) => {
+  const p = periodText(parseDates(req.query));
   res.json({
     summary:{ expected:0, actual:0, variance:0, achievement:0 },
-    rows:[],
-    period: periodText(parseDates(req.query)),
+    table: {
+      columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}],
+      rows:[
+        { metric:'Expected',   value:0, currency:true },
+        { metric:'Actual',     value:0, currency:true },
+        { metric:'Variance',   value:0, currency:true },
+        { metric:'Achievement',value:0, percent:true },
+      ],
+    },
+    period: p,
     scope: scopeText(req.query),
     welcome: 'Pro-rata view will activate when targets are configured.'
   });
@@ -625,22 +681,34 @@ exports.disbursementsSummary = async (req, res) => {
     ]);
     res.json({
       summary:{ count, total },
+      table: {
+        columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}],
+        rows:[
+          { metric:'Total Disbursements Count', value: count },
+          { metric:'Total Disbursed Amount',    value: total, currency:true },
+        ],
+      },
       period: periodText({startDate,endDate}),
       scope: scopeText(req.query),
       welcome: 'Disbursements in the selected period.',
     });
   } catch (e) {
     console.error('disbursementsSummary error:', e);
-    res.json({ summary:{ count:0, total:0 }, period: periodText({}), scope: scopeText({}) });
+    res.json({ summary:{ count:0, total:0 }, table:{ rows:[] }, period: periodText({}), scope: scopeText({}) });
   }
 };
 
 /* ------------------------------------ Fees -------------------------------- */
 exports.feesSummary = async (req, res) => {
+  const p = periodText(parseDates(req.query));
   res.json({
     summary:{ total:0 },
     byType:[],
-    period: periodText(parseDates(req.query)),
+    table:{
+      columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}],
+      rows:[{ metric:'Total Fees', value:0, currency:true }],
+    },
+    period: p,
     scope: scopeText(req.query),
     welcome: 'Fees breakdown will appear when fee postings are tracked.'
   });
@@ -648,10 +716,19 @@ exports.feesSummary = async (req, res) => {
 
 /* -------------------------------- Loan officer ----------------------------- */
 exports.loanOfficerSummary = async (req, res) => {
+  const p = periodText(parseDates(req.query));
   res.json({
     summary:{ disbursed:0, collections:0, par30:0 },
     rows:[],
-    period: periodText(parseDates(req.query)),
+    table:{
+      columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}],
+      rows:[
+        { metric:'Disbursed',  value:0, currency:true },
+        { metric:'Collections',value:0, currency:true },
+        { metric:'PAR30',      value:0, percent:true },
+      ],
+    },
+    period: p,
     scope: scopeText(req.query),
     welcome: 'Officer performance snapshots coming soon.'
   });
@@ -659,9 +736,14 @@ exports.loanOfficerSummary = async (req, res) => {
 
 /* ------------------------------- Loan products ----------------------------- */
 exports.loanProductsSummary = async (req, res) => {
+  const p = periodText(parseDates(req.query));
   res.json({
     rows:[],
-    period: periodText(parseDates(req.query)),
+    table: {
+      columns:[{key:'product',label:'Product'},{key:'loans',label:'Loans'},{key:'amount',label:'Amount',currency:true}],
+      rows:[],
+    },
+    period: p,
     scope: scopeText(req.query),
     welcome: 'Product mix and yields will populate as data accrues.'
   });
@@ -669,13 +751,31 @@ exports.loanProductsSummary = async (req, res) => {
 
 /* ------------------------------------ MFRS --------------------------------- */
 exports.mfrsRatios = async (req, res) => {
+  const { asOf } = parseDates(req.query);
+  const ratios = {
+    par30: 0, par60: 0, par90: 0,
+    olp: 0, activeBorrowers: 0, avgLoanSize: 0,
+    portfolioYield: 0, writeOffRatio: 0, opexRatio: 0, costPerBorrower: 0,
+    collectionEfficiency: 0
+  };
   res.json({
-    asOf: parseDates(req.query).asOf,
-    ratios: {
-      par30: 0, par60: 0, par90: 0,
-      olp: 0, activeBorrowers: 0, avgLoanSize: 0,
-      portfolioYield: 0, writeOffRatio: 0, opexRatio: 0, costPerBorrower: 0,
-      collectionEfficiency: 0
+    asOf,
+    ratios,
+    table: {
+      columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}],
+      rows: [
+        { metric:'Outstanding Loan Portfolio (OLP)', value: ratios.olp, currency:true },
+        { metric:'Active Borrowers', value: ratios.activeBorrowers },
+        { metric:'Average Loan Size', value: ratios.avgLoanSize, currency:true },
+        { metric:'Portfolio Yield', value: ratios.portfolioYield, percent:true },
+        { metric:'Write-off Ratio', value: ratios.writeOffRatio, percent:true },
+        { metric:'Opex Ratio', value: ratios.opexRatio, percent:true },
+        { metric:'Cost per Borrower', value: ratios.costPerBorrower, currency:true },
+        { metric:'Collection Efficiency', value: ratios.collectionEfficiency, percent:true },
+        { metric:'PAR30', value: ratios.par30, percent:true },
+        { metric:'PAR60', value: ratios.par60, percent:true },
+        { metric:'PAR90', value: ratios.par90, percent:true },
+      ],
     },
     welcome: 'Key ratios will engage when the required data points exist.'
   });
@@ -684,14 +784,35 @@ exports.mfrsRatios = async (req, res) => {
 /* ------------------------------- Daily / Monthly --------------------------- */
 exports.dailyReport = async (req, res) => {
   const { asOf } = parseDates({ asOf: req.query.date });
-  res.json({ date: asOf, disbursed: 0, collected: 0, newBorrowers: 0, exceptions: [], welcome: 'Daily spotlight for your ops.' });
+  res.json({
+    date: asOf,
+    disbursed: 0, collected: 0, newBorrowers: 0, exceptions: [],
+    table: {
+      columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}],
+      rows:[
+        { metric:'Disbursed', value:0, currency:true },
+        { metric:'Collected', value:0, currency:true },
+        { metric:'New Borrowers', value:0 },
+      ]
+    },
+    welcome: 'Daily spotlight for your ops.'
+  });
 };
 
 exports.monthlyReport = async (req, res) => {
+  const month = Number(req.query.month)||new Date().getMonth()+1;
+  const year  = Number(req.query.year)||new Date().getFullYear();
   res.json({
-    month: Number(req.query.month)||new Date().getMonth()+1,
-    year: Number(req.query.year)||new Date().getFullYear(),
+    month, year,
     kpis: { disbursed:0, collected:0, par:0 },
+    table:{
+      columns:[{key:'metric',label:'Metric'},{key:'value',label:'Value'}],
+      rows:[
+        { metric:'Disbursed', value:0, currency:true },
+        { metric:'Collected', value:0, currency:true },
+        { metric:'PAR',       value:0, percent:true },
+      ]
+    },
     welcome: 'Monthly KPIs at a glance.'
   });
 };
@@ -703,7 +824,7 @@ exports.outstandingReport = async (req, res) => {
     const rows = await computeOutstandingByLoan(asOf, req);
     const total = rows.reduce((s,r)=>s+safeNumber(r.outstanding),0);
     res.json({
-      rows,
+      rows, // detailed rows per loan (kept as-is for this report)
       totals: { outstanding: total },
       asOf,
       scope: scopeText(req.query),
@@ -716,12 +837,9 @@ exports.outstandingReport = async (req, res) => {
 };
 
 /* ---------------------------------- PAR ------------------------------------ */
-// Flattened to a friendly metric table to avoid [object Object] in the UI
 exports.parSummary = async (req, res) => {
   try {
     const { asOf } = parseDates(req.query);
-
-    // Approximate OLP using outstanding (no buckets without due dates)
     const rows = await computeOutstandingByLoan(asOf, req);
     const olp = rows.reduce((s,r)=>s+safeNumber(r.outstanding),0);
 
@@ -775,6 +893,7 @@ exports.atAGlance = async (req, res) => {
 exports.allEntries = async (req, res) => {
   res.json({
     rows: [],
+    table: { columns:[{key:'date',label:'Date'},{key:'type',label:'Type'},{key:'amount',label:'Amount',currency:true}], rows:[] },
     period: periodText(parseDates(req.query)),
     scope: scopeText(req.query),
     welcome: 'Unified feed will appear when posting journal lines.'

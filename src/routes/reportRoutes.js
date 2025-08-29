@@ -31,7 +31,7 @@ r.get("/fees/summary", ctl.feesSummary);
 r.get("/loan-officers/summary", ctl.loanOfficerSummary);
 r.get("/loan-products/summary", ctl.loanProductsSummary);
 
-/* ✅ Deferred Income (these were missing) */
+/* Deferred Income */
 r.get("/deferred-income", ctl.deferredIncome);
 r.get("/deferred-income/monthly", ctl.deferredIncomeMonthly);
 

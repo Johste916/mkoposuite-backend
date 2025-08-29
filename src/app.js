@@ -126,7 +126,7 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
 }
 
 /* --------------------------------- Routes ---------------------------------- */
-/** Auth must exist */
+// Auth must exist
 let authRoutes;
 try {
   authRoutes = require('./routes/authRoutes');
@@ -148,30 +148,7 @@ const savingsRoutes         = safeLoadRoutes('./routes/savingsRoutes', makeDummy
 const disbursementRoutes    = safeLoadRoutes('./routes/loanDisbursementRoutes', makeDummyRouter([]));
 const repaymentRoutes       = safeLoadRoutes('./routes/repaymentRoutes', makeDummyRouter([]));
 
-/** ✅ Reports router: must include all endpoints:
- *  /filters
- *  /borrowers/loan-summary
- *  /loans/summary
- *  /loans/trends
- *  /loans/export/csv
- *  /loans/export/pdf
- *  /arrears-aging
- *  /outstanding
- *  /par/summary
- *  /collections/summary
- *  /collectors/summary
- *  /disbursements/summary
- *  /fees/summary
- *  /loan-officers/summary
- *  /loan-products/summary
- *  /deferred-income
- *  /deferred-income/monthly
- *  /mfrs
- *  /daily
- *  /monthly
- *  /at-a-glance
- *  /all-entries
- */
+/** Reports router (complete set) */
 const reportRoutes          = safeLoadRoutes('./routes/reportRoutes', makeDummyRouter({}));
 
 const settingRoutes         = safeLoadRoutes('./routes/settingRoutes', makeDummyRouter({}));
