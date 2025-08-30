@@ -208,7 +208,7 @@ const investorRoutes = safeLoadRoutes(
   ])
 );
 
-/* E-signatures / Payroll / HR / Expenses / Other Income / Assets */
+/* E-signatures / Payroll / HR / Expenses / Other Income / Assets / Billing */
 const esignaturesRoutes = safeLoadRoutes('./routes/esignaturesRoutes', makeDummyRouter([
   { id: 1, name: 'Loan Agreement #1', sent: '2025-08-01', status: 'Signed' },
   { id: 2, name: 'Loan Agreement #2', sent: '2025-08-03', status: 'Pending' },
@@ -230,6 +230,9 @@ const assetManagementRoutes = safeLoadRoutes('./routes/assetManagementRoutes', m
   { id: 1, name: 'Branch Laptop 01', category: 'Electronics', status: 'In Use' },
   { id: 2, name: 'Motorcycle 02', category: 'Vehicle', status: 'Maintenance' },
 ]));
+const billingRoutes = safeLoadRoutes('./routes/billingRoutes', makeDummyRouter({
+  plan: 'free', status: 'active', invoices: []
+}));
 
 // Prefer real accounting routes; fallback remains available for local dev.
 const accountingRoutes = safeLoadRoutes(
@@ -336,6 +339,7 @@ app.use('/api/payroll',              payrollRoutes);
 app.use('/api/expenses',             expensesRoutes);
 app.use('/api/other-income',         otherIncomeRoutes);
 app.use('/api/assets',               assetManagementRoutes);
+app.use('/api/billing',              billingRoutes);
 
 /* --- REAL accounting endpoints (controllers) --- */
 app.use('/api/accounting',           accountingRoutes);
