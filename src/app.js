@@ -1,13 +1,15 @@
 'use strict';
 const express = require('express');
 const path = require('path');
+const crypto = require('crypto');
 const app = express();
 
 /* ------------------------------ Optional deps ------------------------------ */
-let helmet, compression, morgan;
+let helmet, compression, morgan, rateLimit;
 try { helmet = require('helmet'); } catch {}
 try { compression = require('compression'); } catch {}
 try { morgan = require('morgan'); } catch {}
+try { rateLimit = require('express-rate-limit'); } catch {}
 
 /* ---------------------------- App base settings ---------------------------- */
 app.disable('x-powered-by');
@@ -18,23 +20,44 @@ let models;
 try { models = require('./models'); } catch { try { models = require('../models'); } catch {} }
 if (models) app.set('models', models);
 
+/* ------------------------------- App context ------------------------------- */
+/** Basic request context so controllers can read consistent metadata */
+app.use((req, res, next) => {
+  const reqId = req.headers['x-request-id'] || crypto.randomUUID?.() || String(Date.now());
+  req.id = reqId;
+  res.setHeader('X-Request-Id', reqId);
+
+  // multi-tenant helpers (soft)
+  req.context = {
+    tenantId: req.headers['x-tenant-id'] || null,
+    branchId: req.headers['x-branch-id'] || null,
+    tz: req.headers['x-timezone'] || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    tzOffset: req.headers['x-tz-offset'] || null,
+  };
+  next();
+});
+
 /* -------------------------- Security & performance ------------------------- */
-if (helmet) {
-  app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-}
+if (helmet) app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 if (compression) app.use(compression());
 if (process.env.NODE_ENV !== 'production' && morgan) app.use(morgan('dev'));
 
+// Optional basic rate-limiting for public APIs (safe defaults)
+if (rateLimit) {
+  app.use('/api/', rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.RATE_LIMIT_MAX || 120),
+    standardHeaders: true,
+    legacyHeaders: false,
+  }));
+}
+
 /* ----------------------------------- CORS ---------------------------------- */
 const defaultOrigins = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'http://localhost:4173',
-  'http://127.0.0.1:4173',
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'https://strong-fudge-7fc28d.netlify.app',
-  'https://mkoposuite.netlify.app',
+  'http://localhost:5173','http://127.0.0.1:5173',
+  'http://localhost:4173','http://127.0.0.1:4173',
+  'http://localhost:3000','http://127.0.0.1:3000',
+  'https://strong-fudge-7fc28d.netlify.app','https://mkoposuite.netlify.app',
 ];
 // Support both CORS_ORIGINS and CORS_ALLOW_ORIGINS and FRONTEND_URL
 const envOrigins = [
@@ -50,24 +73,14 @@ function isAllowedOrigin(origin) {
   try {
     const { hostname, protocol } = new URL(origin);
     // any Netlify preview/site
-    if ((protocol === 'https:' || protocol === 'http:') && hostname.endsWith('.netlify.app')) {
-      return true;
-    }
+    if ((protocol === 'https:' || protocol === 'http:') && hostname.endsWith('.netlify.app')) return true;
   } catch {}
   return false;
 }
 
 const DEFAULT_ALLOWED_HEADERS = [
-  'Content-Type',
-  'Authorization',
-  'X-Requested-With',
-  'X-User-Id',
-  'x-tenant-id',
-  'x-branch-id',
-  'x-timezone',
-  'x-tz-offset',
-  'x-request-id',
-  'Accept',
+  'Content-Type','Authorization','X-Requested-With','X-User-Id',
+  'x-tenant-id','x-branch-id','x-timezone','x-tz-offset','x-request-id','Accept',
 ];
 
 app.use((req, res, next) => {
@@ -82,9 +95,7 @@ app.use((req, res, next) => {
   const requested = req.headers['access-control-request-headers'];
   res.setHeader(
     'Access-Control-Allow-Headers',
-    requested && String(requested).trim().length
-      ? requested
-      : DEFAULT_ALLOWED_HEADERS.join(', ')
+    requested && String(requested).trim().length ? requested : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
 
   // Let browser read filename on downloads + counts for tables
@@ -95,8 +106,8 @@ app.use((req, res, next) => {
 });
 
 /* --------------------------------- Parsers --------------------------------- */
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '20mb' })); // bump a bit for payroll imports
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 /* ----------------------------- Static /uploads ----------------------------- */
 const uploadsDir = path.resolve(__dirname, '../uploads');
@@ -105,18 +116,47 @@ app.use('/uploads', express.static(uploadsDir, {
   setHeaders: (res) => res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin'),
 }));
 
+/* -------------------------- Small response helpers ------------------------- */
+app.use((req, res, next) => {
+  res.ok = (data, extra = {}) => {
+    if (typeof extra.total === 'number') res.setHeader('X-Total-Count', String(extra.total));
+    if (extra.filename) {
+      res.setHeader('Content-Disposition', `attachment; filename="${extra.filename}"`);
+    }
+    return res.json(data);
+  };
+  res.fail = (status, message, extra = {}) => res.status(status).json({ error: message, ...extra });
+  next();
+});
+
 /* ------------------------ Helpers: safe route loading ----------------------- */
 function makeDummyRouter(sample) {
   const r = express.Router();
-  r.get('/', (_req, res) => res.json(sample));
-  r.get('/:id', (req, res) => {
-    const id = Number(req.params.id) || req.params.id;
+
+  // list (with total count)
+  r.get('/', (_req, res) => {
     if (Array.isArray(sample)) {
-      const found = sample.find(x => String(x.id) === String(id)) || sample[0] || null;
+      res.setHeader('X-Total-Count', String(sample.length));
+      return res.json(sample);
+    }
+    return res.json(sample);
+  });
+
+  // basic show
+  r.get('/:id', (req, res) => {
+    const id = String(req.params.id);
+    if (Array.isArray(sample)) {
+      const found = sample.find(x => String(x.id) === id) || null;
       return res.json(found);
     }
     return res.json(sample);
   });
+
+  // write ops are no-ops on dummy routers (helps frontends proceed)
+  r.post('/', (req, res) => res.status(201).json({ ...req.body, id: Date.now() }));
+  r.put('/:id', (req, res) => res.json({ id: req.params.id, ...req.body }));
+  r.delete('/:id', (_req, res) => res.status(204).end());
+
   return r;
 }
 
@@ -230,9 +270,7 @@ const assetManagementRoutes = safeLoadRoutes('./routes/assetManagementRoutes', m
   { id: 1, name: 'Branch Laptop 01', category: 'Electronics', status: 'In Use' },
   { id: 2, name: 'Motorcycle 02', category: 'Vehicle', status: 'Maintenance' },
 ]));
-const billingRoutes = safeLoadRoutes('./routes/billingRoutes', makeDummyRouter({
-  plan: 'free', status: 'active', invoices: []
-}));
+const billingRoutes = safeLoadRoutes('./routes/billingRoutes', makeDummyRouter({ plan: 'free', status: 'active', invoices: [] }));
 
 // Prefer real accounting routes; fallback remains available for local dev.
 const accountingRoutes = safeLoadRoutes(
@@ -248,9 +286,7 @@ const accountingRoutes = safeLoadRoutes(
 
 /* -------------------------- Automatic audit hooks -------------------------- */
 let AuditLog;
-try { ({ AuditLog } = require('./models')); } catch {
-  try { ({ AuditLog } = require('../models')); } catch {}
-}
+try { ({ AuditLog } = require('./models')); } catch { try { ({ AuditLog } = require('../models')); } catch {} }
 
 app.use((req, res, next) => {
   res.on('finish', () => {
@@ -283,13 +319,11 @@ app.use((req, res, next) => {
 let sequelize;
 try { ({ sequelize } = require('./models')); } catch { try { ({ sequelize } = require('../models')); } catch {} }
 if (sequelize) {
-  app.get('/api/branches', async (req, res, next) => {
+  app.get('/api/branches', async (_req, res, next) => {
     try {
       const [rows] = await sequelize.query('SELECT id, name, code FROM "public"."branches" ORDER BY name ASC;');
       return res.json(rows);
-    } catch (e) {
-      return next();
-    }
+    } catch (e) { return next(); }
   });
 }
 
@@ -334,8 +368,12 @@ app.use('/api/collections',          collectionSheetsRoutes);
 app.use('/api/savings-transactions', savingsTransactionsRoutes);
 app.use('/api/investors',            investorRoutes);
 app.use('/api/esignatures',          esignaturesRoutes);
-app.use('/api/hr',                   hrRoutes);
-app.use('/api/payroll',              payrollRoutes);
+
+/* HR & Payroll: mount BOTH styles for compatibility with frontend */
+app.use('/api/hr',                   hrRoutes);        // e.g. /api/hr/employees, /api/hr/leave, /api/hr/contracts
+app.use('/api/hr/payroll',           payrollRoutes);   // new, namespaced under HR
+app.use('/api/payroll',              payrollRoutes);   // legacy path still supported
+
 app.use('/api/expenses',             expensesRoutes);
 app.use('/api/other-income',         otherIncomeRoutes);
 app.use('/api/assets',               assetManagementRoutes);
@@ -344,7 +382,15 @@ app.use('/api/billing',              billingRoutes);
 /* --- REAL accounting endpoints (controllers) --- */
 app.use('/api/accounting',           accountingRoutes);
 
-/* ---------- Stub to silence 404s on entitlements (optional) ------ */
+/* ---------- Misc: metadata & entitlements stubs ---------------------------- */
+app.get('/api/meta', (_req, res) => {
+  res.json({
+    name: 'MkopoSuite API',
+    version: process.env.APP_VERSION || 'dev',
+    commit: process.env.GIT_COMMIT || undefined,
+    time: new Date().toISOString(),
+  });
+});
 app.get('/api/tenants/me/entitlements', (_req, res) => {
   res.json({ modules: {}, status: 'ok' });
 });
@@ -353,6 +399,7 @@ app.get('/api/tenants/me/entitlements', (_req, res) => {
 app.get('/api/test',   (_req, res) => res.send('✅ API is working!'));
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
+// DB health + missing tables check (helps with “Required table is missing”)
 try {
   let sequelize2;
   try { ({ sequelize: sequelize2 } = require('./models')); } catch { ({ sequelize: sequelize2 } = require('../models')); }
@@ -366,14 +413,41 @@ try {
         res.status(500).json({ db: 'down', error: e.message });
       }
     });
+
+    // Opinionated list of HR/Payroll tables you likely need
+    app.get('/api/health/db/hr-tables', async (_req, res) => {
+      const expected = [
+        // Employees core
+        'employees','employee_roles','employee_contracts',
+        // Leave
+        'leave_types','leave_requests',
+        // Attendance (optional)
+        'attendances',
+        // Payroll
+        'payroll_runs','payroll_items','payroll_components',
+        // Attachments (optional)
+        'employee_documents',
+      ];
+      try {
+        const [rows] = await sequelize2.query(`
+          SELECT table_name
+          FROM information_schema.tables
+          WHERE table_schema = 'public'
+        `);
+        const present = new Set(rows.map(r => r.table_name));
+        const missing = expected.filter(t => !present.has(t));
+        res.json({ ok: missing.length === 0, missing, present: expected.filter(t => present.has(t)) });
+      } catch (e) {
+        console.error('DB table check error:', e);
+        res.status(500).json({ error: e.message });
+      }
+    });
   }
 } catch {}
 
 /* ----------------------------------- 404 ----------------------------------- */
 app.use((req, res) => {
-  if (req.path.startsWith('/api/')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
+  if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Not found' });
   res.status(404).send('Not found');
 });
 
@@ -404,7 +478,7 @@ app.use((err, _req, res, _next) => {
     console.error('❌ Error:', err);
   }
 
-  res.status(status).json({ error: message, code: pgCode || undefined });
+  res.status(status).json({ error: message, code: pgCode || undefined, requestId: res.getHeader('X-Request-Id') });
 });
 
 module.exports = app;
