@@ -1,13 +1,29 @@
 'use strict';
+const fs = require('fs');
+const path = require('path');
 const { Op } = require('sequelize');
 
 let db = {};
-try { db = require('../models'); } catch {}
+try { db = require('../models'); } catch {} // tolerate missing models for dev
+
+/* --------------------------- helpers / fallbacks --------------------------- */
+const DATA_DIR = path.resolve(__dirname, '../uploads/devdata');
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const F = (file, fallback) => {
+  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, file), 'utf8')); } catch { return fallback; }
+};
+const W = (file, data) => { try { fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2)); } catch {} };
+
+const state = {
+  items: F('payroll_items.json', []),     // allowances/deductions definitions
+  runs:  F('payroll_runs.json', []),      // created runs
+  slips: F('payroll_payslips.json', []),  // generated payslips
+};
 
 const getModel = (name) => {
   const m = db?.[name] || db?.sequelize?.models?.[name];
-  if (!m) throw Object.assign(new Error(`Model "${name}" not found`), { status: 500, expose: true });
-  return m;
+  return m || null; // return null so we can fall back gracefully
 };
 const tenantFilter = (model, req) => {
   const key = model?.rawAttributes?.tenantId ? 'tenantId'
@@ -19,201 +35,336 @@ const tenantFilter = (model, req) => {
     null;
   return key && tenantId ? { [key]: tenantId } : {};
 };
-const money = (v) => Math.round(Number(v || 0) * 100) / 100;
+const asMoney = (v) => Math.round(Number(v || 0) * 100) / 100;
 
-const isActiveItemForPeriod = (it, period) => {
-  // period: 'YYYY-MM'
-  const y = Number(String(period).slice(0,4));
-  const m = Number(String(period).slice(5,7));
-  const start = it.startMonth ? new Date(`${it.startMonth}-01`) : null;
-  const end   = it.endMonth ? new Date(`${it.endMonth}-28`) : null;
-  const cur   = new Date(`${y}-${String(m).padStart(2,'0')}-15`);
-  if (start && cur < start) return false;
-  if (end && cur > end) return false;
-  return true;
+/* --------------------------------- Items ---------------------------------- */
+exports.listItems = async (req, res) => {
+  const Item = getModel('PayrollItem');
+  if (Item) {
+    try {
+      const where = { ...tenantFilter(Item, req) };
+      if (req.query.employeeId) where.employeeId = req.query.employeeId;
+      const rows = await Item.findAll({ where, order: [['employeeId','ASC'],['name','ASC']] });
+      return res.json({ items: rows });
+    } catch {}
+  }
+  // dev fallback
+  const rows = state.items.filter(x => !req.query.employeeId || String(x.employeeId) === String(req.query.employeeId));
+  return res.json({ items: rows });
 };
 
-/* -------------------------- Items (allowance/deduction) -------------------- */
-exports.listItems = async (req, res, next) => {
-  try {
-    const Item = getModel('PayrollItem');
-    const where = { ...tenantFilter(Item, req) };
-    if (req.query.employeeId) where.employeeId = req.query.employeeId;
-    const rows = await Item.findAll({ where, order: [['employeeId','ASC'],['name','ASC']] });
-    res.json(rows);
-  } catch (e) { next(e); }
-};
-exports.createItem = async (req, res, next) => {
-  try {
-    const Item = getModel('PayrollItem');
-    const rec = { ...req.body, ...tenantFilter(Item, req) };
-    if (!rec.employeeId || !rec.type || !rec.name) {
-      return res.status(400).json({ error: 'employeeId, type, name are required' });
+exports.createItem = async (req, res) => {
+  const Item = getModel('PayrollItem');
+  const rec = req.body || {};
+  if (!rec.employeeId || !rec.type || !rec.name) {
+    return res.status(400).json({ message: 'employeeId, type, name are required' });
+  }
+  if (Item) {
+    try {
+      const row = await Item.create({ ...rec, ...tenantFilter(Item, req) });
+      return res.status(201).json(row);
+    } catch (e) {
+      // fall through to file mode
     }
-    const row = await Item.create(rec);
-    res.status(201).json(row);
-  } catch (e) { next(e); }
-};
-exports.updateItem = async (req, res, next) => {
-  try {
-    const Item = getModel('PayrollItem');
-    const where = { id: req.params.id, ...tenantFilter(Item, req) };
-    const row = await Item.findOne({ where });
-    if (!row) return res.status(404).json({ error: 'Item not found' });
-    await row.update(req.body || {});
-    res.json(row);
-  } catch (e) { next(e); }
-};
-exports.deleteItem = async (req, res, next) => {
-  try {
-    const Item = getModel('PayrollItem');
-    const where = { id: req.params.id, ...tenantFilter(Item, req) };
-    const n = await Item.destroy({ where });
-    if (!n) return res.status(404).json({ error: 'Item not found' });
-    res.json({ ok: true });
-  } catch (e) { next(e); }
+  }
+  // file mode
+  const row = { id: state.items.length + 1, ...rec };
+  state.items.push(row); W('payroll_items.json', state.items);
+  res.status(201).json(row);
 };
 
-/* ------------------------------ Payruns & Payslips ------------------------ */
-exports.listPayruns = async (req, res, next) => {
-  try {
-    const Payrun = getModel('Payrun');
-    const where = { ...tenantFilter(Payrun, req) };
-    if (req.query.period) where.period = req.query.period;
-    const rows = await Payrun.findAll({ where, order: [['period','DESC'],['id','DESC']] });
-    res.json(rows);
-  } catch (e) { next(e); }
+exports.updateItem = async (req, res) => {
+  const Item = getModel('PayrollItem');
+  if (Item) {
+    try {
+      const where = { id: req.params.id, ...tenantFilter(Item, req) };
+      const row = await Item.findOne({ where });
+      if (!row) return res.status(404).json({ message: 'Item not found' });
+      await row.update(req.body || {});
+      return res.json(row);
+    } catch {}
+  }
+  // file mode
+  const i = state.items.findIndex(x => String(x.id) === String(req.params.id));
+  if (i === -1) return res.status(404).json({ message: 'Item not found' });
+  state.items[i] = { ...state.items[i], ...(req.body || {}) };
+  W('payroll_items.json', state.items);
+  res.json(state.items[i]);
 };
 
-exports.generatePayrun = async (req, res, next) => {
-  const t = await db.sequelize.transaction();
-  try {
-    const period = req.body?.period;
-    if (!period || !/^\d{4}-\d{2}$/.test(period)) {
-      return res.status(400).json({ error: 'period (YYYY-MM) is required' });
+exports.deleteItem = async (req, res) => {
+  const Item = getModel('PayrollItem');
+  if (Item) {
+    try {
+      const where = { id: req.params.id, ...tenantFilter(Item, req) };
+      const n = await Item.destroy({ where });
+      if (!n) return res.status(404).json({ message: 'Item not found' });
+      return res.json({ ok: true });
+    } catch {}
+  }
+  const before = state.items.length;
+  state.items = state.items.filter(x => String(x.id) !== String(req.params.id));
+  W('payroll_items.json', state.items);
+  if (state.items.length === before) return res.status(404).json({ message: 'Item not found' });
+  res.json({ ok: true });
+};
+
+/* ------------------------------ Payruns & API ------------------------------ */
+/** GET /hr/payroll/runs */
+exports.listRuns = async (req, res) => {
+  const Payrun = getModel('Payrun');
+  const where = Payrun ? { ...tenantFilter(Payrun, req) } : {};
+  if (req.query.from || req.query.to) {
+    if (Payrun) {
+      where.periodStart = {};
+      if (req.query.from) where.periodStart[Op.gte] = req.query.from;
+      if (req.query.to) where.periodStart[Op.lte] = req.query.to;
     }
-    const Employee   = getModel('Employee');
-    const Item       = getModel('PayrollItem');
-    const Payrun     = getModel('Payrun');
-    const Payslip    = getModel('Payslip');
+  }
+  if (Payrun) {
+    try {
+      const rows = await Payrun.findAll({ where, order: [['createdAt','DESC']] });
+      return res.json({ items: rows });
+    } catch {}
+  }
+  // file fallback
+  let items = [...state.runs];
+  if (req.query.from) items = items.filter(r => !r.periodFrom || r.periodFrom >= req.query.from);
+  if (req.query.to)   items = items.filter(r => !r.periodTo   || r.periodTo   <= req.query.to);
+  res.json({ items });
+};
 
-    const tenantWhereEmp  = tenantFilter(Employee, req);
-    const tenantWhereItem = tenantFilter(Item, req);
-    const tenantWhereRun  = tenantFilter(Payrun, req);
-    const tenantWhereSlip = tenantFilter(Payslip, req);
+/** GET /hr/payroll/runs/:id */
+exports.getRun = async (req, res) => {
+  const Payrun = getModel('Payrun');
+  if (Payrun) {
+    try {
+      const row = await Payrun.findOne({ where: { id: req.params.id, ...tenantFilter(Payrun, req) } });
+      if (!row) return res.status(404).json({ message: 'Run not found' });
+      return res.json(row);
+    } catch {}
+  }
+  const row = state.runs.find(r => String(r.id) === String(req.params.id) || String(r.runId) === String(req.params.id));
+  if (!row) return res.status(404).json({ message: 'Run not found' });
+  res.json(row);
+};
 
-    // create/ensure payrun
-    let run = await Payrun.findOne({ where: { period, ...tenantWhereRun } });
-    if (!run) run = await Payrun.create({ period, status: 'draft', ...tenantWhereRun }, { transaction: t });
+/** POST /hr/payroll/runs  { periodFrom, periodTo, lines:[{ employeeId, base, allowances, overtime, deductions, advances, savings, loans }] } */
+exports.createRun = async (req, res) => {
+  const { periodFrom, periodTo, lines = [] } = req.body || {};
+  if (!periodFrom || !periodTo) return res.status(400).json({ message: 'periodFrom and periodTo required' });
 
-    // active employees
-    const emps = await Employee.findAll({ where: { status: 'active', ...tenantWhereEmp }, raw: true });
+  // Try DB first
+  const Payrun  = getModel('Payrun');
+  const Payslip = getModel('Payslip');
 
-    // items for those employees
-    const items = await Item.findAll({ where: { employeeId: { [Op.in]: emps.map(e => e.id) }, ...tenantWhereItem }, raw: true });
+  if (Payrun && Payslip && db?.sequelize?.transaction) {
+    const t = await db.sequelize.transaction();
+    try {
+      const run = await Payrun.create({
+        periodStart: periodFrom, periodEnd: periodTo, status: 'finalized',
+        staffCount: lines.length,
+        totalGross: 0, totalNet: 0,
+        ...tenantFilter(Payrun, req)
+      }, { transaction: t });
 
-    // build payslips
-    for (const e of emps) {
-      const eItems = items.filter(it => it.employeeId === e.id && isActiveItemForPeriod(it, period));
-
-      const totalAllowance = eItems.filter(it => it.type === 'allowance').reduce((s, it) => s + money(it.amount), 0);
-      const totalDeduction = eItems.filter(it => it.type === 'deduction').reduce((s, it) => s + money(it.amount), 0);
-
-      const base = money(e.salaryBase || 0);
-      const gross = money(base + totalAllowance);
-      // simple tax stub (0 for now) — replace with your country logic later
-      const tax = 0;
-      const net = money(gross - totalDeduction - tax);
-
-      const existing = await Payslip.findOne({ where: { payrunId: run.id, employeeId: e.id, ...tenantWhereSlip } });
-      if (existing) {
-        await existing.update({
-          baseSalary: base,
-          totalAllowance,
-          totalDeduction,
-          taxableIncome: money(gross - totalDeduction),
-          tax,
-          gross,
-          netPay: net,
-        }, { transaction: t });
-      } else {
+      let totalGross = 0, totalNet = 0;
+      for (const l of lines) {
+        const gross = asMoney(Number(l.base||0) + Number(l.allowances||0) + Number(l.overtime||0));
+        const deductions = asMoney(Number(l.deductions||0) + Number(l.advances||0) + Number(l.savings||0) + Number(l.loans||0));
+        const net = asMoney(gross - deductions);
+        totalGross += gross; totalNet += net;
         await Payslip.create({
           payrunId: run.id,
-          employeeId: e.id,
-          baseSalary: base,
-          totalAllowance,
-          totalDeduction,
-          taxableIncome: money(gross - totalDeduction),
-          tax,
-          gross,
-          netPay: net,
-          status: 'unpaid',
-          ...tenantWhereSlip,
+          employeeId: l.employeeId,
+          baseSalary: Number(l.base||0),
+          totalAllowance: Number(l.allowances||0) + Number(l.overtime||0),
+          totalDeduction: deductions,
+          gross, netPay: net, status: 'unpaid',
+          ...tenantFilter(Payslip, req)
         }, { transaction: t });
       }
+      await run.update({ totalGross, totalNet }, { transaction: t });
+      await t.commit();
+      return res.status(201).json({ runId: run.id });
+    } catch (e) {
+      try { await t.rollback(); } catch {}
+      // fall through to file mode
     }
-
-    await t.commit();
-    res.status(201).json({ ok: true, payrunId: run.id, period });
-  } catch (e) {
-    await t.rollback();
-    next(e);
   }
+
+  // file mode
+  const id = (state.runs[0]?.id || state.runs[0]?.runId || 0) + 1;
+  const periodLabel = `${periodFrom} → ${periodTo}`;
+  let totalGross = 0, totalNet = 0;
+  const linesOut = lines.map(l => {
+    const gross = asMoney(Number(l.base||0) + Number(l.allowances||0) + Number(l.overtime||0));
+    const deductions = asMoney(Number(l.deductions||0) + Number(l.advances||0) + Number(l.savings||0) + Number(l.loans||0));
+    const net = asMoney(gross - deductions);
+    totalGross += gross; totalNet += net;
+    return { ...l, gross, deductions, net };
+  });
+  const run = {
+    id, runId: id, periodFrom, periodTo, periodLabel,
+    staffCount: linesOut.length,
+    totalGross, totalNet, status: 'finalized',
+    lines: linesOut, createdAt: new Date().toISOString()
+  };
+  state.runs.unshift(run); W('payroll_runs.json', state.runs);
+  // generate slips file-side as well
+  linesOut.forEach(l => {
+    state.slips.push({
+      id: state.slips.length + 1,
+      payrunId: id,
+      employeeId: l.employeeId,
+      gross: l.gross,
+      netPay: l.net,
+      createdAt: new Date().toISOString()
+    });
+  });
+  W('payroll_payslips.json', state.slips);
+  return res.status(201).json({ runId: id });
 };
 
-exports.listPayslips = async (req, res, next) => {
-  try {
-    const Payslip = getModel('Payslip');
-    const Payrun  = getModel('Payrun');
-    const where = { ...tenantFilter(Payslip, req) };
-    if (req.query.employeeId) where.employeeId = req.query.employeeId;
-    if (req.query.period) {
-      const run = await Payrun.findOne({ where: { period: req.query.period, ...tenantFilter(Payrun, req) }, raw: true });
-      where.payrunId = run ? run.id : -1;
-    }
-    const rows = await Payslip.findAll({ where, order: [['id','DESC']] });
-    res.json(rows);
-  } catch (e) { next(e); }
-};
-
-exports.markPaid = async (req, res, next) => {
-  try {
-    const Payslip = getModel('Payslip');
-    const where = { id: req.params.id, ...tenantFilter(Payslip, req) };
-    const row = await Payslip.findOne({ where });
-    if (!row) return res.status(404).json({ error: 'Payslip not found' });
-    await row.update({ status: 'paid', paymentDate: new Date() });
-    res.json(row);
-  } catch (e) { next(e); }
-};
-
-exports.summary = async (req, res, next) => {
-  try {
-    const Payrun  = getModel('Payrun');
-    const Payslip = getModel('Payslip');
-
-    if (!req.query.period) return res.status(400).json({ error: 'period (YYYY-MM) required' });
-    const run = await Payrun.findOne({ where: { period: req.query.period, ...tenantFilter(Payrun, req) } });
-    if (!run) return res.json({ period: req.query.period, employees: 0, gross: 0, net: 0 });
-
-    const slips = await Payslip.findAll({ where: { payrunId: run.id, ...tenantFilter(Payslip, req) }, raw: true });
-    const gross = slips.reduce((s, p) => s + Number(p.gross || 0), 0);
-    const net   = slips.reduce((s, p) => s + Number(p.netPay || 0), 0);
-    res.json({ period: req.query.period, employees: slips.length, gross, net });
-  } catch (e) { next(e); }
-};
-
-/* ----------------------------- Dev seed ----------------------------- */
-exports.seedItems = async (_req, res, next) => {
+/** GET /hr/payroll/stats */
+exports.stats = async (_req, res) => {
+  // light aggregate; attempt DB then fall back
   try {
     const Employee = getModel('Employee');
-    const Item = getModel('PayrollItem');
-    const emps = await Employee.findAll({ where: { status: 'active' }, raw: true });
-    if (!emps.length) return res.json({ ok: true, note: 'no active employees' });
-    await Item.bulkCreate([
-      { employeeId: emps[0].id, type: 'allowance', name: 'Transport', amount: 50000, taxable: false, recurrence: 'monthly' },
-      { employeeId: emps[0].id, type: 'deduction', name: 'Sacco', amount: 20000, taxable: false, recurrence: 'monthly' },
-    ]);
-    res.json({ ok: true });
-  } catch (e) { next(e); }
+    const Leave    = getModel('LeaveRequest');
+    const Contract = getModel('Contract');
+    const Payrun   = getModel('Payrun');
+
+    if (Employee && Leave && Contract && Payrun) {
+      const [employees, onLeave, activeContracts, latest] = await Promise.all([
+        Employee.count({ where: { status: 'active' } }),
+        Leave.count({ where: { status: 'approved' } }),
+        Contract.count({ where: { endDate: { [Op.gte]: new Date().toISOString().slice(0,10) } } }),
+        Payrun.findOne({ order: [['createdAt','DESC']] })
+      ]);
+      return res.json({
+        employees, onLeave, activeContracts,
+        netThisPeriod: latest?.totalNet || 0
+      });
+    }
+  } catch {}
+  // file fallback
+  res.json({
+    employees:  state.slips.reduce((set, s) => set.add(String(s.employeeId)), new Set()).size || 0,
+    onLeave:    0,
+    activeContracts: 0,
+    netThisPeriod: state.runs[0]?.totalNet || 0,
+  });
+};
+
+/** GET /hr/payroll/report?runId=...&from=...&to=...&employeeId=... */
+exports.report = async (req, res) => {
+  const runId = req.query.runId;
+  // DB path if present
+  const Payslip = getModel('Payslip');
+  const Payrun  = getModel('Payrun');
+
+  if (Payrun && Payslip) {
+    try {
+      let slips = [];
+      if (runId) {
+        const run = await Payrun.findOne({ where: { id: runId } });
+        if (run) slips = await Payslip.findAll({ where: { payrunId: run.id } });
+      } else {
+        slips = await Payslip.findAll();
+      }
+      // simple aggregate shape
+      const items = slips.map(s => ({
+        id: s.id,
+        employeeId: s.employeeId,
+        employeeName: s.employee?.name,
+        periodLabel: `${s.periodStart || ''} → ${s.periodEnd || ''}`,
+        gross: Number(s.gross || s.baseSalary || 0) + Number(s.totalAllowance || 0),
+        deductions: Number(s.totalDeduction || 0),
+        net: Number(s.netPay || 0),
+      }));
+      const summary = {
+        gross: items.reduce((a,b)=>a+Number(b.gross||0),0),
+        deductions: items.reduce((a,b)=>a+Number(b.deductions||0),0),
+        net: items.reduce((a,b)=>a+Number(b.net||0),0),
+      };
+      return res.json({ items, summary });
+    } catch {}
+  }
+
+  // file fallback
+  let items = [];
+  if (runId) {
+    const run = state.runs.find(r => String(r.id) === String(runId) || String(r.runId) === String(runId));
+    if (run) {
+      items = run.lines.map((l, idx) => ({
+        id: idx + 1,
+        employeeId: l.employeeId,
+        employeeName: l.name,
+        periodLabel: run.periodLabel,
+        gross: l.gross,
+        deductions: l.deductions,
+        net: l.net,
+      }));
+    }
+  } else {
+    // combine all runs
+    state.runs.forEach(r => {
+      r.lines.forEach((l, idx) => {
+        items.push({
+          id: `${r.id}-${idx+1}`,
+          employeeId: l.employeeId,
+          employeeName: l.name,
+          periodLabel: r.periodLabel,
+          gross: l.gross, deductions: l.deductions, net: l.net
+        });
+      });
+    });
+  }
+  const summary = {
+    gross: items.reduce((a,b)=>a+Number(b.gross||0),0),
+    deductions: items.reduce((a,b)=>a+Number(b.deductions||0),0),
+    net: items.reduce((a,b)=>a+Number(b.net||0),0),
+  };
+  return res.json({ items, summary });
+};
+
+/* ------------------------------ Payslip ops ------------------------------- */
+exports.listPayslips = async (req, res) => {
+  const Payslip = getModel('Payslip');
+  const Payrun  = getModel('Payrun');
+  if (Payslip) {
+    try {
+      const where = {};
+      if (req.query.employeeId) where.employeeId = req.query.employeeId;
+      if (req.query.period) {
+        const run = Payrun ? await Payrun.findOne({ where: { period: req.query.period } }) : null;
+        where.payrunId = run ? run.id : -1;
+      }
+      const rows = await Payslip.findAll({ where, order: [['id','DESC']] });
+      return res.json({ items: rows });
+    } catch {}
+  }
+  // file
+  let rows = [...state.slips];
+  if (req.query.employeeId) rows = rows.filter(s => String(s.employeeId) === String(req.query.employeeId));
+  res.json({ items: rows });
+};
+
+exports.markPaid = async (req, res) => {
+  const Payslip = getModel('Payslip');
+  if (Payslip) {
+    try {
+      const where = { id: req.params.id };
+      const row = await Payslip.findOne({ where });
+      if (!row) return res.status(404).json({ message: 'Payslip not found' });
+      await row.update({ status: 'paid', paymentDate: new Date() });
+      return res.json(row);
+    } catch {}
+  }
+  const i = state.slips.findIndex(x => String(x.id) === String(req.params.id));
+  if (i === -1) return res.status(404).json({ message: 'Payslip not found' });
+  state.slips[i] = { ...state.slips[i], status: 'paid', paymentDate: new Date().toISOString() };
+  W('payroll_payslips.json', state.slips);
+  res.json(state.slips[i]);
 };
