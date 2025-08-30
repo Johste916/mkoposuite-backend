@@ -1,29 +1,23 @@
-// server/src/models/branch.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
   const Branch = sequelize.define('Branch', {
-    id:        { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
-    tenantId:  { type: DataTypes.UUID, allowNull: true, index: true },
-    name:      { type: DataTypes.STRING(150), allowNull: false },
-    code:      { type: DataTypes.STRING(50), allowNull: false },
-    phone:     { type: DataTypes.STRING(40), allowNull: true },
-    email:     { type: DataTypes.STRING(120), allowNull: true, validate: { isEmail: true } },
-    address:   { type: DataTypes.STRING(250), allowNull: true },
-    city:      { type: DataTypes.STRING(100), allowNull: true },
-    country:   { type: DataTypes.STRING(100), allowNull: true },
-    isActive:  { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
-    // If/when you add a migration, you can re-enable paranoid and add this:
-    // deletedAt: { type: DataTypes.DATE, allowNull: true },
+    id:        { type: DataTypes.BIGINT, primaryKey: true, autoIncrement: true },
+    tenantId:  { type: DataTypes.BIGINT, field: 'tenant_id' },  // 👈 maps to tenant_id
+    name:      { type: DataTypes.TEXT, allowNull: false },
+    code:      { type: DataTypes.TEXT, allowNull: false, unique: true },
+    email:     { type: DataTypes.TEXT },
+    phone:     { type: DataTypes.TEXT },
+    address:   { type: DataTypes.TEXT },
+    status:    { type: DataTypes.TEXT, defaultValue: 'active' },
+    createdAt: { type: DataTypes.DATE, defaultValue: DataTypes.NOW, field: 'created_at' },
+    updatedAt: { type: DataTypes.DATE, defaultValue: DataTypes.NOW, field: 'updated_at' },
+    deletedAt: { type: DataTypes.DATE, field: 'deleted_at' },
   }, {
     tableName: 'branches',
-    paranoid: false,          // ⬅️ disable until you add the column
     timestamps: true,
-    indexes: [
-      { fields: ['tenantId'] },
-      { unique: false, fields: ['code', 'tenantId'] },
-      { fields: ['name'] },
-    ],
+    paranoid: true, // uses deleted_at if present
+    underscored: true, // tells Sequelize to prefer snake_case in DB
   });
 
   return Branch;
