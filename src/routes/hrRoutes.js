@@ -1,125 +1,133 @@
+// backend/src/routes/hrRoutes.js
 'use strict';
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const router = express.Router();
 
-let ctrl;
-try {
-  // Prefer real controller if present
-  ctrl = require('../controllers/hrController');
-} catch {
-  // Safe, in-memory fallback so HR works in dev without controller/models
-  const mem = {
-    employees: [],
-    attendance: [],
-    leave: [],
-    contracts: [],
-  };
-  let idSeq = 1;
+let models = null;
+try { models = require('../models'); } catch { try { models = require('../../models'); } catch {} }
 
-  ctrl = {
-    // Employees
-    listEmployees: (_req, res) => res.json(mem.employees),
-    getEmployee: (req, res) => {
-      const e = mem.employees.find(x => String(x.id) === String(req.params.id));
-      return e ? res.json(e) : res.status(404).json({ error: 'Not found' });
-    },
-    createEmployee: (req, res) => {
-      const e = { id: idSeq++, status: 'active', ...req.body };
-      mem.employees.push(e);
-      res.status(201).json(e);
-    },
-    updateEmployee: (req, res) => {
-      const i = mem.employees.findIndex(x => String(x.id) === String(req.params.id));
-      if (i === -1) return res.status(404).json({ error: 'Not found' });
-      mem.employees[i] = { ...mem.employees[i], ...req.body };
-      res.json(mem.employees[i]);
-    },
-    deleteEmployee: (req, res) => {
-      const i = mem.employees.findIndex(x => String(x.id) === String(req.params.id));
-      if (i === -1) return res.status(404).json({ error: 'Not found' });
-      const [removed] = mem.employees.splice(i, 1);
-      res.json(removed);
-    },
+const DATA_DIR = path.resolve(__dirname, '../../uploads/devdata');
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const EMP_FILE = path.join(DATA_DIR, 'employees.json');
+const LEAVE_FILE = path.join(DATA_DIR, 'leaves.json');
+const CONTRACTS_FILE = path.join(DATA_DIR, 'contracts.json');
 
-    // Attendance
-    listAttendance: (_req, res) => res.json(mem.attendance),
-    clockIn: (req, res) => {
-      const row = { id: idSeq++, employeeId: req.body.employeeId, inAt: new Date().toISOString(), outAt: null };
-      mem.attendance.push(row);
-      res.status(201).json(row);
-    },
-    clockOut: (req, res) => {
-      const row = mem.attendance.find(r => r.employeeId === req.body.employeeId && !r.outAt);
-      if (!row) return res.status(404).json({ error: 'No active clock-in' });
-      row.outAt = new Date().toISOString();
-      res.json(row);
-    },
+// simple JSON persistence for dev (so refreshes keep data)
+function readJSON(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+function writeJSON(file, data) {
+  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8'); } catch {}
+}
 
-    // Leave
-    listLeave: (_req, res) => res.json(mem.leave),
-    createLeave: (req, res) => {
-      const row = { id: idSeq++, status: 'PENDING', ...req.body };
-      mem.leave.push(row);
-      res.status(201).json(row);
-    },
-    updateLeaveStatus: (req, res) => {
-      const row = mem.leave.find(x => String(x.id) === String(req.params.id));
-      if (!row) return res.status(404).json({ error: 'Not found' });
-      row.status = req.body.status || row.status;
-      res.json(row);
-    },
+const up = {
+  employees: readJSON(EMP_FILE, []),
+  leaves: readJSON(LEAVE_FILE, []),
+  contracts: readJSON(CONTRACTS_FILE, []),
+};
 
-    // Contracts
-    listContracts: (_req, res) => res.json(mem.contracts),
-    createContract: (req, res) => {
-      const row = { id: idSeq++, ...req.body };
-      mem.contracts.push(row);
-      res.status(201).json(row);
-    },
-    updateContract: (req, res) => {
-      const row = mem.contracts.find(x => String(x.id) === String(req.params.id));
-      if (!row) return res.status(404).json({ error: 'Not found' });
-      Object.assign(row, req.body);
-      res.json(row);
-    },
+function nextId(list) {
+  return (list.length ? Math.max(...list.map(x => Number(x.id) || 0)) : 0) + 1;
+}
 
-    // Dev seed
-    seedBasic: (_req, res) => {
-      mem.employees = [
-        { id: idSeq++, name: 'Jane Employee', email: 'jane@example.com', role: 'Officer', status: 'active' },
-        { id: idSeq++, name: 'John Staff', email: 'john@example.com', role: 'Accountant', status: 'active' },
-      ];
-      res.json({ ok: true, employees: mem.employees });
+/* --------------------------- EMPLOYEES --------------------------- */
+router.get('/employees', async (_req, res) => {
+  if (models?.Employee?.findAll) {
+    try {
+      const rows = await models.Employee.findAll({ order: [['createdAt', 'DESC']] });
+      return res.json(rows);
+    } catch (e) {
+      // table missing -> fall back
     }
-  };
-}
+  }
+  return res.json(up.employees);
+});
 
-// Base: /api/hr
-// Employees
-router.get('/employees', ctrl.listEmployees);
-router.get('/employees/:id', ctrl.getEmployee);
-router.post('/employees', ctrl.createEmployee);
-router.put('/employees/:id', ctrl.updateEmployee);
-router.delete('/employees/:id', ctrl.deleteEmployee);
+router.post('/employees', async (req, res) => {
+  const { firstName = '', lastName = '', email = '', role = 'staff', baseSalary = 0 } = req.body || {};
+  if (models?.Employee?.create) {
+    try {
+      const row = await models.Employee.create({ firstName, lastName, email, role, baseSalary });
+      return res.status(201).json(row);
+    } catch (e) {
+      // fall through to memory if table missing
+    }
+  }
+  const row = { id: nextId(up.employees), firstName, lastName, email, role, baseSalary: Number(baseSalary)||0, createdAt: new Date().toISOString() };
+  up.employees.unshift(row);
+  writeJSON(EMP_FILE, up.employees);
+  res.status(201).json(row);
+});
 
-// Attendance
-router.get('/attendance', ctrl.listAttendance);
-router.post('/attendance/clock-in', ctrl.clockIn);
-router.post('/attendance/clock-out', ctrl.clockOut);
+/* ----------------------------- LEAVE ----------------------------- */
+// support /leave, /leaves, /leave-requests (the UI may hit any)
+const leaveListPaths = ['/leave', '/leaves', '/leave-requests'];
+leaveListPaths.forEach(p => {
+  router.get(p, async (_req, res) => {
+    if (models?.LeaveRequest?.findAll) {
+      try {
+        const rows = await models.LeaveRequest.findAll({ order: [['createdAt','DESC']] });
+        return res.json(rows);
+      } catch (e) {}
+    }
+    return res.json(up.leaves);
+  });
+});
 
-// Leave
-router.get('/leave', ctrl.listLeave);
-router.post('/leave', ctrl.createLeave);
-router.patch('/leave/:id/status', ctrl.updateLeaveStatus);
+router.post(['/leave', '/leaves', '/leave-requests'], async (req, res) => {
+  const { type, from, to, paid = true, reason = '' } = req.body || {};
+  if (models?.LeaveRequest?.create) {
+    try {
+      const row = await models.LeaveRequest.create({ type, from, to, paid: !!paid, reason, status: 'PENDING' });
+      return res.status(201).json(row);
+    } catch (e) {}
+  }
+  const row = { id: nextId(up.leaves), type, from, to, paid: !!paid, reason, status: 'PENDING', createdAt: new Date().toISOString() };
+  up.leaves.unshift(row);
+  writeJSON(LEAVE_FILE, up.leaves);
+  res.status(201).json(row);
+});
 
-// Contracts
-router.get('/contracts', ctrl.listContracts);
-router.post('/contracts', ctrl.createContract);
-router.put('/contracts/:id', ctrl.updateContract);
+/* --------------------------- CONTRACTS --------------------------- */
+const multer = require('multer');
+const contractsDir = path.resolve(__dirname, '../../uploads/contracts');
+fs.mkdirSync(contractsDir, { recursive: true });
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, contractsDir),
+  filename: (_req, file, cb) => {
+    const safe = file.originalname.replace(/\s+/g, '_');
+    cb(null, `${Date.now()}_${safe}`);
+  },
+});
+const upload = multer({ storage });
 
-// Optional: quick seed for dev
-if (process.env.ENABLE_HR_DEV === 'true') {
-  router.post('/dev/seed-basic', ctrl.seedBasic);
-}
+router.get('/contracts', async (_req, res) => {
+  if (models?.Contract?.findAll) {
+    try {
+      const rows = await models.Contract.findAll({ order: [['createdAt','DESC']] });
+      return res.json(rows);
+    } catch (e) {}
+  }
+  return res.json(up.contracts);
+});
+
+router.post('/contracts', upload.single('file'), async (req, res) => {
+  const { employeeId, title, startDate, endDate } = req.body || {};
+  const filePath = req.file ? `/uploads/contracts/${req.file.filename}` : null;
+  const status = (endDate && new Date(endDate) < new Date()) ? 'EXPIRED' : 'ACTIVE';
+
+  if (models?.Contract?.create) {
+    try {
+      const row = await models.Contract.create({ employeeId, title, startDate, endDate, status, fileUrl: filePath });
+      return res.status(201).json(row);
+    } catch (e) {}
+  }
+  const row = { id: nextId(up.contracts), employeeId, title, startDate, endDate, status, fileUrl: filePath, createdAt: new Date().toISOString() };
+  up.contracts.unshift(row);
+  writeJSON(CONTRACTS_FILE, up.contracts);
+  res.status(201).json(row);
+});
 
 module.exports = router;
