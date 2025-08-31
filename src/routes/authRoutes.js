@@ -2,7 +2,9 @@
 
 const express = require('express');
 const router = express.Router();
-const { authenticateUser } = require('../middleware/authMiddleware');
+
+// Pull in the enriched auth middleware (now exposes requireAuth + me)
+const { authenticateUser, requireAuth, me } = require('../middleware/authMiddleware');
 
 const {
   login,
@@ -13,21 +15,27 @@ const {
 } = require('../controllers/authController');
 
 /**
- * Supports both mounts:
- * - app.use('/api/login', authRoutes) -> POST /api/login
- * - app.use('/api/auth',  authRoutes) -> POST /api/auth/login
+ * This router intentionally supports BOTH mounts:
+ *   app.use('/api/login', authRoutes)  -> POST /api/login
+ *   app.use('/api/auth',  authRoutes)  -> POST /api/auth/login
  */
 router.post('/', login);          // /api/login
 router.post('/login', login);     // /api/auth/login
 
-// 2FA endpoints (require auth). Frontend calls these:
+/* ----------------------------- Current user ----------------------------- */
+/** Frontend expects GET /api/auth/me */
+router.get('/me', authenticateUser, requireAuth, me);
+// Optional alias if any code calls /api/auth/whoami
+router.get('/whoami', authenticateUser, requireAuth, me);
+
+/* --------------------------------- 2FA ---------------------------------- */
 // GET    /api/auth/2fa/status
 // POST   /api/auth/2fa/setup
 // POST   /api/auth/2fa/verify  { token }
 // POST   /api/auth/2fa/disable { token }
-router.get('/2fa/status', authenticateUser, getTwoFAStatus);
-router.post('/2fa/setup', authenticateUser, setupTwoFA);
-router.post('/2fa/verify', authenticateUser, verifyTwoFA);
-router.post('/2fa/disable', authenticateUser, disableTwoFA);
+router.get('/2fa/status',  authenticateUser, requireAuth, getTwoFAStatus);
+router.post('/2fa/setup',  authenticateUser, requireAuth, setupTwoFA);
+router.post('/2fa/verify', authenticateUser, requireAuth, verifyTwoFA);
+router.post('/2fa/disable',authenticateUser, requireAuth, disableTwoFA);
 
 module.exports = router;
