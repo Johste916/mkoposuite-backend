@@ -21,13 +21,11 @@ try { models = require('./models'); } catch { try { models = require('../models'
 if (models) app.set('models', models);
 
 /* ------------------------------- App context ------------------------------- */
-/** Basic request context so controllers can read consistent metadata */
 app.use((req, res, next) => {
   const reqId = req.headers['x-request-id'] || crypto.randomUUID?.() || String(Date.now());
   req.id = reqId;
   res.setHeader('X-Request-Id', reqId);
 
-  // multi-tenant helpers (soft)
   req.context = {
     tenantId: req.headers['x-tenant-id'] || null,
     branchId: req.headers['x-branch-id'] || null,
@@ -42,7 +40,6 @@ if (helmet) app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin'
 if (compression) app.use(compression());
 if (process.env.NODE_ENV !== 'production' && morgan) app.use(morgan('dev'));
 
-// Optional basic rate-limiting for public APIs (safe defaults)
 if (rateLimit) {
   app.use('/api/', rateLimit({
     windowMs: 60 * 1000,
@@ -59,7 +56,6 @@ const defaultOrigins = [
   'http://localhost:3000','http://127.0.0.1:3000',
   'https://strong-fudge-7fc28d.netlify.app','https://mkoposuite.netlify.app',
 ];
-// Support both CORS_ORIGINS and CORS_ALLOW_ORIGINS and FRONTEND_URL
 const envOrigins = [
   ...(process.env.CORS_ALLOW_ORIGINS || process.env.CORS_ORIGINS || '')
     .split(',').map(s => s.trim()).filter(Boolean),
@@ -72,7 +68,6 @@ function isAllowedOrigin(origin) {
   if (allowedOrigins.has(origin)) return true;
   try {
     const { hostname, protocol } = new URL(origin);
-    // any Netlify preview/site
     if ((protocol === 'https:' || protocol === 'http:') && hostname.endsWith('.netlify.app')) return true;
   } catch {}
   return false;
@@ -98,7 +93,6 @@ app.use((req, res, next) => {
     requested && String(requested).trim().length ? requested : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
 
-  // Let browser read filename on downloads + counts for tables
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition,X-Total-Count');
 
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -106,7 +100,7 @@ app.use((req, res, next) => {
 });
 
 /* --------------------------------- Parsers --------------------------------- */
-app.use(express.json({ limit: '20mb' })); // bump a bit for payroll imports
+app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 /* ----------------------------- Static /uploads ----------------------------- */
@@ -120,9 +114,7 @@ app.use('/uploads', express.static(uploadsDir, {
 app.use((req, res, next) => {
   res.ok = (data, extra = {}) => {
     if (typeof extra.total === 'number') res.setHeader('X-Total-Count', String(extra.total));
-    if (extra.filename) {
-      res.setHeader('Content-Disposition', `attachment; filename="${extra.filename}"`);
-    }
+    if (extra.filename) res.setHeader('Content-Disposition', `attachment; filename="${extra.filename}"`);
     return res.json(data);
   };
   res.fail = (status, message, extra = {}) => res.status(status).json({ error: message, ...extra });
@@ -130,10 +122,10 @@ app.use((req, res, next) => {
 });
 
 /* ------------------------ Helpers: safe route loading ----------------------- */
+const FORCE_REAL = process.env.REAL_DATA === '1' || process.env.FORCE_REAL_ROUTES === '1';
+
 function makeDummyRouter(sample) {
   const r = express.Router();
-
-  // list (with total count)
   r.get('/', (_req, res) => {
     if (Array.isArray(sample)) {
       res.setHeader('X-Total-Count', String(sample.length));
@@ -141,8 +133,6 @@ function makeDummyRouter(sample) {
     }
     return res.json(sample);
   });
-
-  // basic show
   r.get('/:id', (req, res) => {
     const id = String(req.params.id);
     if (Array.isArray(sample)) {
@@ -151,12 +141,9 @@ function makeDummyRouter(sample) {
     }
     return res.json(sample);
   });
-
-  // write ops are no-ops on dummy routers (helps frontends proceed)
   r.post('/', (req, res) => res.status(201).json({ ...req.body, id: Date.now() }));
   r.put('/:id', (req, res) => res.json({ id: req.params.id, ...req.body }));
   r.delete('/:id', (_req, res) => res.status(204).end());
-
   return r;
 }
 
@@ -169,9 +156,11 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
     } catch (e) {
       if (e.code !== 'MODULE_NOT_FOUND') {
         console.warn(`⚠️  Failed loading ${p}: ${e.message}`);
+        if (FORCE_REAL) throw e;
       }
     }
   }
+  if (FORCE_REAL) throw new Error(`Real route required but missing: ${relPathFromSrc}`);
   console.warn(`⚠️  Using dummy routes for ${relPathFromSrc} — create this file to enable real API.`);
   return dummyRouter;
 }
@@ -272,7 +261,6 @@ const assetManagementRoutes = safeLoadRoutes('./routes/assetManagementRoutes', m
 ]));
 const billingRoutes = safeLoadRoutes('./routes/billingRoutes', makeDummyRouter({ plan: 'free', status: 'active', invoices: [] }));
 
-// Prefer real accounting routes; fallback remains available for local dev.
 const accountingRoutes = safeLoadRoutes(
   './routes/accountingRoutes',
   makeDummyRouter({
@@ -310,7 +298,7 @@ app.use((req, res, next) => {
         ip: req.ip,
         reversed: false,
       }).catch(() => {});
-    } catch { /* no-op */ }
+    } catch {}
   });
   next();
 });
@@ -318,7 +306,7 @@ app.use((req, res, next) => {
 /* ----------------------------- Branch fallback ----------------------------- */
 let sequelize;
 try { ({ sequelize } = require('./models')); } catch { try { ({ sequelize } = require('../models')); } catch {} }
-if (sequelize) {
+if (sequelize && !FORCE_REAL) {
   app.get('/api/branches', async (_req, res, next) => {
     try {
       const [rows] = await sequelize.query('SELECT id, name, code FROM "public"."branches" ORDER BY name ASC;');
@@ -328,10 +316,8 @@ if (sequelize) {
 }
 
 /* --------------------------------- Mounting -------------------------------- */
-// borrower search must come BEFORE /api/borrowers
 app.use('/api/borrowers/search', borrowerSearchRoutes);
 
-// Auth FIRST
 app.use('/api/auth',   authRoutes);
 app.use('/api/login',  authRoutes);
 
@@ -369,17 +355,17 @@ app.use('/api/savings-transactions', savingsTransactionsRoutes);
 app.use('/api/investors',            investorRoutes);
 app.use('/api/esignatures',          esignaturesRoutes);
 
-/* HR & Payroll: mount BOTH styles for compatibility with frontend */
-app.use('/api/hr',                   hrRoutes);        // e.g. /api/hr/employees, /api/hr/leave, /api/hr/contracts
-app.use('/api/hr/payroll',           payrollRoutes);   // new, namespaced under HR
-app.use('/api/payroll',              payrollRoutes);   // legacy path still supported
+/* HR & Payroll */
+app.use('/api/hr',                   hrRoutes);
+app.use('/api/hr/payroll',           payrollRoutes);
+app.use('/api/payroll',              payrollRoutes);
 
 app.use('/api/expenses',             expensesRoutes);
 app.use('/api/other-income',         otherIncomeRoutes);
 app.use('/api/assets',               assetManagementRoutes);
 app.use('/api/billing',              billingRoutes);
 
-/* --- REAL accounting endpoints (controllers) --- */
+/* Accounting */
 app.use('/api/accounting',           accountingRoutes);
 
 /* ---------- Misc: metadata & entitlements stubs ---------------------------- */
@@ -399,7 +385,6 @@ app.get('/api/tenants/me/entitlements', (_req, res) => {
 app.get('/api/test',   (_req, res) => res.send('✅ API is working!'));
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-// DB health + missing tables check (helps with “Required table is missing”)
 try {
   let sequelize2;
   try { ({ sequelize: sequelize2 } = require('./models')); } catch { ({ sequelize: sequelize2 } = require('../models')); }
@@ -414,18 +399,12 @@ try {
       }
     });
 
-    // Opinionated list of HR/Payroll tables you likely need
     app.get('/api/health/db/hr-tables', async (_req, res) => {
       const expected = [
-        // Employees core
         'employees','employee_roles','employee_contracts',
-        // Leave
         'leave_types','leave_requests',
-        // Attendance (optional)
         'attendances',
-        // Payroll
         'payroll_runs','payroll_items','payroll_components',
-        // Attachments (optional)
         'employee_documents',
       ];
       try {
@@ -445,6 +424,17 @@ try {
   }
 } catch {}
 
+/* -------- Optional fallback for /auth/me if your authRoutes lacks it ------- */
+// Enable by setting AUTH_ME_FALLBACK=1 (keeps compatibility without touching authRoutes)
+if (process.env.AUTH_ME_FALLBACK === '1') {
+  try {
+    const { authenticateUser, requireAuth } = require('./middleware/authMiddleware');
+    app.get('/api/auth/me', authenticateUser, requireAuth, (req, res) => res.json(req.user));
+  } catch (e) {
+    console.warn('AUTH_ME_FALLBACK enabled but middleware missing:', e.message);
+  }
+}
+
 /* ----------------------------------- 404 ----------------------------------- */
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Not found' });
@@ -453,8 +443,6 @@ app.use((req, res) => {
 
 /* ------------------------------- Error handler ----------------------------- */
 app.use((err, _req, res, _next) => {
-  // Postgres codes we want to surface as friendly messages:
-  // 42P01: undefined_table, 42703: undefined_column, 23505: unique_violation, 23503: foreign_key_violation
   const pgCode = err?.original?.code || err?.parent?.code;
 
   let status = err.status || 500;
