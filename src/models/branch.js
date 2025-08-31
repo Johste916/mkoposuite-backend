@@ -1,24 +1,38 @@
+// backend/src/models/branch.js
 'use strict';
 module.exports = (sequelize, DataTypes) => {
-  const Branch = sequelize.define('Branch', {
-    id:        { type: DataTypes.BIGINT, primaryKey: true, autoIncrement: true },
-    tenantId:  { type: DataTypes.BIGINT, field: 'tenant_id' },
-    name:      { type: DataTypes.TEXT, allowNull: false },
-    code:      { type: DataTypes.TEXT, allowNull: false, unique: true },
-    email:     { type: DataTypes.TEXT },
-    phone:     { type: DataTypes.TEXT },
-    address:   { type: DataTypes.TEXT },
-    status:    { type: DataTypes.TEXT, defaultValue: 'active' },
-    geoLat:    { type: DataTypes.DECIMAL(10,6), field: 'geo_lat' },
-    geoLng:    { type: DataTypes.DECIMAL(10,6), field: 'geo_lng' },
-    createdAt: { type: DataTypes.DATE, field: 'created_at', defaultValue: DataTypes.NOW },
-    updatedAt: { type: DataTypes.DATE, field: 'updated_at', defaultValue: DataTypes.NOW },
-    deletedAt: { type: DataTypes.DATE, field: 'deleted_at' },
-  }, {
-    tableName: 'branches',
-    timestamps: true,
-    paranoid: true,
-    underscored: true,
-  });
+  const Branch = sequelize.define(
+    'Branch',
+    {
+      id:        { type: DataTypes.BIGINT, primaryKey: true, autoIncrement: true },
+      name:      { type: DataTypes.STRING, allowNull: false },
+      code:      { type: DataTypes.STRING },
+      phone:     { type: DataTypes.STRING },
+      address:   { type: DataTypes.TEXT },
+      managerId: { type: DataTypes.BIGINT, field: 'manager_id' },
+      tenantId:  { type: DataTypes.UUID,   field: 'tenant_id' },
+
+      // Important: map the timestamp fields to camelCase columns that already exist
+      createdAt: { type: DataTypes.DATE, field: 'createdAt' },
+      updatedAt: { type: DataTypes.DATE, field: 'updatedAt' },
+      deletedAt: { type: DataTypes.DATE, field: 'deletedAt' }, // ← match existing column
+    },
+    {
+      tableName: 'branches',
+      timestamps: true,
+      paranoid: true,
+      createdAt: 'createdAt',
+      updatedAt: 'updatedAt',
+      deletedAt: 'deletedAt', // ← this makes Sequelize generate "Branch"."deletedAt" IS NULL
+      underscored: false,     // keep camelCase for this table (since DB already uses it)
+    }
+  );
+
+  Branch.associate = (models) => {
+    if (models.User) {
+      Branch.hasMany(models.User, { foreignKey: 'branchId', as: 'Users' });
+    }
+  };
+
   return Branch;
 };
