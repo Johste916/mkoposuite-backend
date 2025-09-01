@@ -3,12 +3,11 @@
 const express = require('express');
 const router = express.Router();
 
-// Auth middleware (kept your behavior, added guards you can toggle per section)
 const { authenticateUser, requireAuth, authorizeRoles } = require('../middleware/authMiddleware');
 
 /* =============================================================================
    Controllers (existing)
-   ============================================================================= */
+============================================================================= */
 const loanCategoriesController        = require('../controllers/settings/loanCategoriesController');
 const loanSettingsController          = require('../controllers/settings/loanSettingsController');
 const systemSettingsController        = require('../controllers/settings/systemSettingsController');
@@ -30,7 +29,7 @@ const communicationSettingsController = require('../controllers/settings/communi
 
 /* =============================================================================
    NEW controllers
-   ============================================================================= */
+============================================================================= */
 const generalSettingsController   = require('../controllers/settings/generalSettingsController');
 const apiSettingsController       = require('../controllers/settings/apiSettingsController');
 const smsSettingsController       = require('../controllers/settings/smsSettingsController');
@@ -42,18 +41,28 @@ const loanTemplatesController     = require('../controllers/settings/loanTemplat
 const loanApprovalsController     = require('../controllers/settings/loanApprovalsController');
 
 /* =============================================================================
-   Helpers
-   ============================================================================= */
-
-// Role groups used below (easy to tweak in one place)
+   Guards & helpers
+============================================================================= */
 const ADMIN_ONLY     = authorizeRoles('admin', 'director');
 const ADMIN_OR_HR    = authorizeRoles('admin', 'director', 'payroll_admin');
 const ADMIN_OR_STAFF = authorizeRoles('admin', 'director', 'branch_manager'); // for certain lists
+const ANY_AUTH       = requireAuth;
 
-// For GET routes where any authenticated user can read:
-const ANY_AUTH = requireAuth;
+// Access models via app (ensures the same Sequelize instance)
+function getModels(req) {
+  return req.app.get('models') || require('../models');
+}
+function tenantIdFrom(req) {
+  return req.headers['x-tenant-id'] || req.context?.tenantId || null;
+}
+function rawJson(res, value, status = 200) {
+  // Generic editors expect the raw JSON blob, not {key, value}
+  return res.status(status).json(value ?? {});
+}
 
-// Optional: expose a simple “settings status” for quick checks
+/* =============================================================================
+   Quick status + sidebar (unchanged)
+============================================================================= */
 router.get('/status', authenticateUser, (req, res) => {
   res.json({
     ok: true,
@@ -62,12 +71,6 @@ router.get('/status', authenticateUser, (req, res) => {
   });
 });
 
-/* =============================================================================
-   Sidebar config (mirrors your React NAV and feature flags)
-   =============================================================================
-   If you want this pre-login, remove authenticateUser and ANY_AUTH.
-   Keeping it auth’d means it can reflect the caller’s entitlements later.
-*/
 router.get('/sidebar', authenticateUser, ANY_AUTH, (_req, res) => {
   res.json({
     items: [
@@ -105,7 +108,7 @@ router.get('/sidebar', authenticateUser, ANY_AUTH, (_req, res) => {
 
 /* =============================================================================
    Loan Categories
-   ============================================================================= */
+============================================================================= */
 router
   .route('/loan-categories')
   .get(authenticateUser, ANY_AUTH, loanCategoriesController.getLoanCategories)
@@ -118,15 +121,15 @@ router
 
 /* =============================================================================
    Loan Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/loan-settings')
   .get(authenticateUser, ANY_AUTH, loanSettingsController.getLoanSettings)
   .put(authenticateUser, ADMIN_ONLY, loanSettingsController.updateLoanSettings);
 
 /* =============================================================================
-   System Settings (global knobs)
-   ============================================================================= */
+   System Settings
+============================================================================= */
 router
   .route('/system-settings')
   .get(authenticateUser, ADMIN_ONLY, systemSettingsController.getSystemSettings)
@@ -134,7 +137,7 @@ router
 
 /* =============================================================================
    Penalty Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/penalty-settings')
   .get(authenticateUser, ANY_AUTH, penaltySettingsController.getPenaltySettings)
@@ -142,7 +145,7 @@ router
 
 /* =============================================================================
    Integration Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/integration-settings')
   .get(authenticateUser, ADMIN_ONLY, integrationSettingsController.getIntegrationSettings)
@@ -150,8 +153,7 @@ router
 
 /* =============================================================================
    Branch Settings
-   ============================================================================= */
-// Keep GET open to any auth’d user (e.g., for UI filters), PUT restricted
+============================================================================= */
 router
   .route('/branch-settings')
   .get(authenticateUser, ANY_AUTH, branchSettingsController.getBranchSettings);
@@ -161,23 +163,23 @@ router
 
 /* =============================================================================
    Borrower Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/borrower-settings')
   .get(authenticateUser, ANY_AUTH, borrowerSettingsController.getBorrowerSettings)
   .put(authenticateUser, ADMIN_ONLY, borrowerSettingsController.updateBorrowerSettings);
 
 /* =============================================================================
-   User Management (Admin: staff)
-   ============================================================================= */
+   User Management
+============================================================================= */
 router
   .route('/user-management')
   .get(authenticateUser, ADMIN_OR_STAFF, userManagementController.getUsers)
   .put(authenticateUser, ADMIN_ONLY, userManagementController.updateUser);
 
 /* =============================================================================
-   Bulk SMS (basic gateway config)
-   ============================================================================= */
+   Bulk SMS
+============================================================================= */
 router
   .route('/bulk-sms-settings')
   .get(authenticateUser, ADMIN_ONLY, bulkSmsSettingsController.getBulkSmsSettings)
@@ -185,7 +187,7 @@ router
 
 /* =============================================================================
    Saving Account Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/saving-settings')
   .get(authenticateUser, ANY_AUTH, savingAccountSettingsController.getSavingAccountSettings)
@@ -193,7 +195,7 @@ router
 
 /* =============================================================================
    Payroll Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/payroll-settings')
   .get(authenticateUser, ADMIN_OR_HR, payrollSettingsController.getPayrollSettings)
@@ -201,7 +203,7 @@ router
 
 /* =============================================================================
    Payment Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/payment-settings')
   .get(authenticateUser, ADMIN_ONLY, paymentSettingsController.getPaymentSettings)
@@ -209,7 +211,7 @@ router
 
 /* =============================================================================
    Comment Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/comment-settings')
   .get(authenticateUser, ANY_AUTH, commentSettingsController.getCommentSettings)
@@ -217,7 +219,7 @@ router
 
 /* =============================================================================
    Dashboard Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/dashboard-settings')
   .get(authenticateUser, ANY_AUTH, dashboardSettingsController.getDashboardSettings)
@@ -225,7 +227,7 @@ router
 
 /* =============================================================================
    Loan Sector Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/loan-sector-settings')
   .get(authenticateUser, ANY_AUTH, loanSectorSettingsController.getLoanSectorSettings)
@@ -233,7 +235,7 @@ router
 
 /* =============================================================================
    Income Source Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/income-source-settings')
   .get(authenticateUser, ANY_AUTH, incomeSourceSettingsController.getIncomeSourceSettings)
@@ -241,15 +243,15 @@ router
 
 /* =============================================================================
    Holiday Settings
-   ============================================================================= */
+============================================================================= */
 router
   .route('/holiday-settings')
   .get(authenticateUser, ANY_AUTH, holidaySettingsController.getHolidaySettings)
   .put(authenticateUser, ADMIN_ONLY, holidaySettingsController.updateHolidaySettings);
 
 /* =============================================================================
-   Communications (internal announcements with attachments)
-   ============================================================================= */
+   Communications (internal announcements)
+============================================================================= */
 router
   .route('/communications')
   .get(authenticateUser, ANY_AUTH, communicationSettingsController.listCommunications)
@@ -277,7 +279,7 @@ router.delete(
 
 /* =============================================================================
    NEW — General / API / SMS / Email
-   ============================================================================= */
+============================================================================= */
 router
   .route('/general')
   .get(authenticateUser, ANY_AUTH, generalSettingsController.getGeneral)
@@ -300,7 +302,7 @@ router
 
 /* =============================================================================
    NEW — Loans: Fees / Reminders / Cycles / Templates / Approvals
-   ============================================================================= */
+============================================================================= */
 router
   .route('/loan-fees')
   .get(authenticateUser, ANY_AUTH, loanFeesController.getLoanFees)
@@ -327,6 +329,106 @@ router
   .put(authenticateUser, ADMIN_ONLY, loanApprovalsController.updateLoanApprovals);
 
 /* =============================================================================
+   GENERIC SETTINGS STORE (tenant-aware via Setting model)
+   MUST be placed AFTER the specific routes to avoid route conflicts.
+   Frontend uses these for keys like "expense-types", "asset-management-types", etc.
+============================================================================= */
+
+// GET /api/settings?key=foo  -> returns raw JSON value ({} if missing)
+router.get('/', authenticateUser, ANY_AUTH, async (req, res, next) => {
+  try {
+    const key = String(req.query.key || '').trim();
+    if (!key) return res.status(400).json({ error: 'key is required' });
+    const { Setting } = getModels(req);
+    const value = await Setting.get(key, {}, { tenantId: tenantIdFrom(req) });
+    return rawJson(res, value);
+  } catch (e) { next(e); }
+});
+
+// PUT /api/settings       Body: { key, value }  OR plain JSON as value if you prefer
+router.put('/', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try {
+    const key = String(req.body?.key || '').trim();
+    if (!key) return res.status(400).json({ error: 'key is required' });
+    const value =
+      req.body && Object.prototype.hasOwnProperty.call(req.body, 'value')
+        ? req.body.value
+        : (req.body ?? {});
+    const { Setting } = getModels(req);
+    const saved = await Setting.set(key, value ?? {}, {
+      tenantId: tenantIdFrom(req),
+      updatedBy: req.user?.id || null,
+      createdBy: req.user?.id || null,
+    });
+    return rawJson(res, saved);
+  } catch (e) { next(e); }
+});
+
+// PATCH /api/settings     Body: { key, patch } OR patch object
+router.patch('/', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try {
+    const key = String(req.body?.key || '').trim();
+    if (!key) return res.status(400).json({ error: 'key is required' });
+    const patch = Object.prototype.hasOwnProperty.call(req.body || {}, 'patch')
+      ? req.body.patch
+      : (req.body ?? {});
+    if (patch && typeof patch !== 'object') {
+      return res.status(400).json({ error: 'patch must be an object' });
+    }
+    const { Setting } = getModels(req);
+    const merged = await Setting.merge(key, patch || {}, {
+      tenantId: tenantIdFrom(req),
+      updatedBy: req.user?.id || null,
+    });
+    return rawJson(res, merged);
+  } catch (e) { next(e); }
+});
+
+// GET /api/settings/:key
+router.get('/:key', authenticateUser, ANY_AUTH, async (req, res, next) => {
+  try {
+    const key = String(req.params.key || '').trim();
+    const { Setting } = getModels(req);
+    const value = await Setting.get(key, {}, { tenantId: tenantIdFrom(req) });
+    return rawJson(res, value);
+  } catch (e) { next(e); }
+});
+
+// PUT /api/settings/:key  Body: {key,value} OR raw value
+router.put('/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try {
+    const key = String(req.params.key || '').trim();
+    const body = req.body ?? {};
+    const value = Object.prototype.hasOwnProperty.call(body, 'value') ? body.value : body;
+    const { Setting } = getModels(req);
+    const saved = await Setting.set(key, value ?? {}, {
+      tenantId: tenantIdFrom(req),
+      updatedBy: req.user?.id || null,
+      createdBy: req.user?.id || null,
+    });
+    return rawJson(res, saved);
+  } catch (e) { next(e); }
+});
+
+// PATCH /api/settings/:key  Body: {patch} OR patch object
+router.patch('/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try {
+    const key = String(req.params.key || '').trim();
+    const body = req.body ?? {};
+    const patch = Object.prototype.hasOwnProperty.call(body, 'patch') ? body.patch : body;
+    if (patch && typeof patch !== 'object') {
+      return res.status(400).json({ error: 'patch must be an object' });
+    }
+    const { Setting } = getModels(req);
+    const merged = await Setting.merge(key, patch || {}, {
+      tenantId: tenantIdFrom(req),
+      updatedBy: req.user?.id || null,
+    });
+    return rawJson(res, merged);
+  } catch (e) { next(e); }
+});
+
+/* =============================================================================
    Export
-   ============================================================================= */
+============================================================================= */
 module.exports = router;
