@@ -22,14 +22,14 @@ if (models) app.set('models', models);
 
 /* ------------------------------- App context ------------------------------- */
 app.use((req, res, next) => {
-  const reqId = req.headers['x-request-id'] || crypto.randomUUID?.() || String(Date.now());
+  const reqId = req.headers['x-request-id'] || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
   req.id = reqId;
   res.setHeader('X-Request-Id', reqId);
 
   req.context = {
     tenantId: req.headers['x-tenant-id'] || null,
     branchId: req.headers['x-branch-id'] || null,
-    tz: req.headers['x-timezone'] || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    tz: req.headers['x-timezone'] || (Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'),
     tzOffset: req.headers['x-tz-offset'] || null,
   };
   next();
@@ -425,7 +425,6 @@ try {
 } catch {}
 
 /* -------- Optional fallback for /auth/me if your authRoutes lacks it ------- */
-// Enable by setting AUTH_ME_FALLBACK=1 (keeps compatibility without touching authRoutes)
 if (process.env.AUTH_ME_FALLBACK === '1') {
   try {
     const { authenticateUser, requireAuth } = require('./middleware/authMiddleware');
