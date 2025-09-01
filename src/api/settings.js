@@ -1,5 +1,8 @@
+// src/api/settings.js (or wherever this lives)
 import api from "./index";
-const P = (p) => `/api/settings/${p}`; // if your axios has baseURL:'/api', change to: const P = (p)=>`/settings/${p}`
+
+// Because api has baseURL that already ends with '/api', use just '/settings'
+const P = (p) => `/settings/${p}`;
 
 export const SettingsAPI = {
   // ----- Entity lists / CRUD -----
@@ -80,7 +83,7 @@ export const SettingsAPI = {
   getLoanReminders: () => api.get(P("loan-reminders")).then(r=>r.data),
   saveLoanReminders: (p) => api.put(P("loan-reminders"), p).then(r=>r.data),
 
-  // user-management is a “settings” blob per your routes
+  // user-management is treated as a settings blob
   getUsersSettings: () => api.get(P("user-management")).then(r=>r.data),
   saveUsersSettings: (p) => api.put(P("user-management"), p).then(r=>r.data),
 };
