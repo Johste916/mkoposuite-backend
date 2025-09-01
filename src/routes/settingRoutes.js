@@ -48,16 +48,15 @@ const ADMIN_OR_HR    = authorizeRoles('admin', 'director', 'payroll_admin');
 const ADMIN_OR_STAFF = authorizeRoles('admin', 'director', 'branch_manager');
 const ANY_AUTH       = requireAuth;
 
-// shared models (same Sequelize instance the app booted with)
+// Access models via app (ensures the same Sequelize instance)
 function getModels(req) {
   return req.app.get('models') || require('../models');
 }
 function tenantIdFrom(req) {
   return req.headers['x-tenant-id'] || req.context?.tenantId || null;
 }
-
-// generic editors expect a raw JSON blob in the body, not { key, value }
 function rawJson(res, value, status = 200) {
+  // Editors expect the raw JSON blob
   return res.status(status).json(value ?? {});
 }
 
@@ -121,7 +120,7 @@ router
   .delete(authenticateUser, ADMIN_ONLY, loanCategoriesController.deleteLoanCategory);
 
 /* =============================================================================
-   Loan Settings (singleton)
+   Loan Settings
 ============================================================================= */
 router
   .route('/loan-settings')
@@ -129,7 +128,7 @@ router
   .put(authenticateUser, ADMIN_ONLY, loanSettingsController.updateLoanSettings);
 
 /* =============================================================================
-   System Settings (singleton)
+   System Settings
 ============================================================================= */
 router
   .route('/system-settings')
@@ -251,7 +250,7 @@ router
   .put(authenticateUser, ADMIN_ONLY, holidaySettingsController.updateHolidaySettings);
 
 /* =============================================================================
-   Communications (internal announcements)
+   Communications
 ============================================================================= */
 router
   .route('/communications')
@@ -330,165 +329,78 @@ router
   .put(authenticateUser, ADMIN_ONLY, loanApprovalsController.updateLoanApprovals);
 
 /* =============================================================================
-   KV SETTINGS (EXPLICIT, TENANT-AWARE) — Safe path: /api/settings/kv/:key
-   These are used by Admin pages that store simple JSON blobs.
-   GET allowed for any auth user; PUT/PATCH restricted to ADMIN_ONLY.
-   Returns RAW JSON in the response body.
+   GENERIC SETTINGS STORE (tenant-aware via Setting model)
+   (Specific routes above take precedence)
+============================================================================= */
+
+// helpers reused in both legacy and kv aliases
+async function getValue(req) {
+  const { Setting } = getModels(req);
+  const key = String(req.params.key || req.query.key || '').trim();
+  if (!key) throw Object.assign(new Error('key is required'), { status: 400 });
+  return Setting.get(key, {}, { tenantId: tenantIdFrom(req) });
+}
+async function putValue(req) {
+  const { Setting } = getModels(req);
+  const key = String(req.params.key || req.body?.key || '').trim();
+  if (!key) throw Object.assign(new Error('key is required'), { status: 400 });
+
+  const body = req.body ?? {};
+  const value = Object.prototype.hasOwnProperty.call(body, 'value') ? body.value : body;
+  return Setting.set(key, value ?? {}, {
+    tenantId: tenantIdFrom(req),
+    updatedBy: req.user?.id || null,
+    createdBy: req.user?.id || null,
+  });
+}
+async function patchValue(req) {
+  const { Setting } = getModels(req);
+  const key = String(req.params.key || req.body?.key || '').trim();
+  if (!key) throw Object.assign(new Error('key is required'), { status: 400 });
+
+  const body = req.body ?? {};
+  const patch = Object.prototype.hasOwnProperty.call(body, 'patch') ? body.patch : body;
+  if (patch && typeof patch !== 'object') {
+    throw Object.assign(new Error('patch must be an object'), { status: 400 });
+  }
+  return Setting.merge(key, patch || {}, {
+    tenantId: tenantIdFrom(req),
+    updatedBy: req.user?.id || null,
+  });
+}
+
+// Legacy forms
+router.get('/', authenticateUser, ANY_AUTH, async (req, res, next) => {
+  try { rawJson(res, await getValue(req)); } catch (e) { next(e); }
+});
+router.put('/', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try { rawJson(res, await putValue(req)); } catch (e) { next(e); }
+});
+router.patch('/', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try { rawJson(res, await patchValue(req)); } catch (e) { next(e); }
+});
+router.get('/:key', authenticateUser, ANY_AUTH, async (req, res, next) => {
+  try { rawJson(res, await getValue(req)); } catch (e) { next(e); }
+});
+router.put('/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try { rawJson(res, await putValue(req)); } catch (e) { next(e); }
+});
+router.patch('/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try { rawJson(res, await patchValue(req)); } catch (e) { next(e); }
+});
+
+/* =============================================================================
+   KV ALIASES (the new editors call these)
+   These are just clean aliases to the same logic above.
 ============================================================================= */
 router.get('/kv/:key', authenticateUser, ANY_AUTH, async (req, res, next) => {
-  try {
-    const key = String(req.params.key || '').trim();
-    if (!key) return res.status(400).json({ error: 'key is required' });
-    const { Setting } = getModels(req);
-    if (!Setting) return res.status(501).json({ error: 'Setting model not available' });
-    const value = await Setting.get(key, {}, { tenantId: tenantIdFrom(req) });
-    return rawJson(res, value);
-  } catch (e) { next(e); }
+  try { rawJson(res, await getValue(req)); } catch (e) { next(e); }
 });
-
 router.put('/kv/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
-  try {
-    const key = String(req.params.key || '').trim();
-    if (!key) return res.status(400).json({ error: 'key is required' });
-    const body = req.body ?? {};
-    const value = Object.prototype.hasOwnProperty.call(body, 'value') ? body.value : body;
-    const { Setting } = getModels(req);
-    if (!Setting) return res.status(501).json({ error: 'Setting model not available' });
-    const saved = await Setting.set(key, value ?? {}, {
-      tenantId: tenantIdFrom(req),
-      updatedBy: req.user?.id || null,
-      createdBy: req.user?.id || null,
-    });
-    return rawJson(res, saved);
-  } catch (e) { next(e); }
+  try { rawJson(res, await putValue(req)); } catch (e) { next(e); }
 });
-
 router.patch('/kv/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
-  try {
-    const key = String(req.params.key || '').trim();
-    if (!key) return res.status(400).json({ error: 'key is required' });
-    const body = req.body ?? {};
-    const patch = Object.prototype.hasOwnProperty.call(body, 'patch') ? body.patch : body;
-    if (patch && typeof patch !== 'object') {
-      return res.status(400).json({ error: 'patch must be an object' });
-    }
-    const { Setting } = getModels(req);
-    if (!Setting) return res.status(501).json({ error: 'Setting model not available' });
-    const merged = await Setting.merge(key, patch || {}, {
-      tenantId: tenantIdFrom(req),
-      updatedBy: req.user?.id || null,
-    });
-    return rawJson(res, merged);
-  } catch (e) { next(e); }
+  try { rawJson(res, await patchValue(req)); } catch (e) { next(e); }
 });
 
-/* =============================================================================
-   GENERIC SETTINGS STORE (BACKWARD-COMPATIBLE)
-   MUST be after specific routes to avoid conflicts.
-   Frontend can still use these (GET/PUT/PATCH with ?key=...) or /:key.
-============================================================================= */
-
-// GET /api/settings?key=foo  -> raw JSON value ({} if missing)
-router.get('/', authenticateUser, ANY_AUTH, async (req, res, next) => {
-  try {
-    const key = String(req.query.key || '').trim();
-    if (!key) return res.status(400).json({ error: 'key is required' });
-    const { Setting } = getModels(req);
-    if (!Setting) return res.status(501).json({ error: 'Setting model not available' });
-    const value = await Setting.get(key, {}, { tenantId: tenantIdFrom(req) });
-    return rawJson(res, value);
-  } catch (e) { next(e); }
-});
-
-// PUT /api/settings  Body: { key, value } OR raw JSON as value
-router.put('/', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
-  try {
-    const key = String(req.body?.key || '').trim();
-    if (!key) return res.status(400).json({ error: 'key is required' });
-    const value =
-      req.body && Object.prototype.hasOwnProperty.call(req.body, 'value')
-        ? req.body.value
-        : (req.body ?? {});
-    const { Setting } = getModels(req);
-    if (!Setting) return res.status(501).json({ error: 'Setting model not available' });
-    const saved = await Setting.set(key, value ?? {}, {
-      tenantId: tenantIdFrom(req),
-      updatedBy: req.user?.id || null,
-      createdBy: req.user?.id || null,
-    });
-    return rawJson(res, saved);
-  } catch (e) { next(e); }
-});
-
-// PATCH /api/settings  Body: { key, patch } OR patch object
-router.patch('/', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
-  try {
-    const key = String(req.body?.key || '').trim();
-    if (!key) return res.status(400).json({ error: 'key is required' });
-    const patch = Object.prototype.hasOwnProperty.call(req.body || {}, 'patch')
-      ? req.body.patch
-      : (req.body ?? {});
-    if (patch && typeof patch !== 'object') {
-      return res.status(400).json({ error: 'patch must be an object' });
-    }
-    const { Setting } = getModels(req);
-    if (!Setting) return res.status(501).json({ error: 'Setting model not available' });
-    const merged = await Setting.merge(key, patch || {}, {
-      tenantId: tenantIdFrom(req),
-      updatedBy: req.user?.id || null,
-    });
-    return rawJson(res, merged);
-  } catch (e) { next(e); }
-});
-
-// GET /api/settings/:key -> raw JSON value
-router.get('/:key', authenticateUser, ANY_AUTH, async (req, res, next) => {
-  try {
-    const key = String(req.params.key || '').trim();
-    const { Setting } = getModels(req);
-    if (!Setting) return res.status(501).json({ error: 'Setting model not available' });
-    const value = await Setting.get(key, {}, { tenantId: tenantIdFrom(req) });
-    return rawJson(res, value);
-  } catch (e) { next(e); }
-});
-
-// PUT /api/settings/:key  Body: {value} OR raw value
-router.put('/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
-  try {
-    const key = String(req.params.key || '').trim();
-    const body = req.body ?? {};
-    const value = Object.prototype.hasOwnProperty.call(body, 'value') ? body.value : body;
-    const { Setting } = getModels(req);
-    if (!Setting) return res.status(501).json({ error: 'Setting model not available' });
-    const saved = await Setting.set(key, value ?? {}, {
-      tenantId: tenantIdFrom(req),
-      updatedBy: req.user?.id || null,
-      createdBy: req.user?.id || null,
-    });
-    return rawJson(res, saved);
-  } catch (e) { next(e); }
-});
-
-// PATCH /api/settings/:key  Body: {patch} OR patch object
-router.patch('/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
-  try {
-    const key = String(req.params.key || '').trim();
-    const body = req.body ?? {};
-    const patch = Object.prototype.hasOwnProperty.call(body, 'patch') ? body.patch : body;
-    if (patch && typeof patch !== 'object') {
-      return res.status(400).json({ error: 'patch must be an object' });
-    }
-    const { Setting } = getModels(req);
-    if (!Setting) return res.status(501).json({ error: 'Setting model not available' });
-    const merged = await Setting.merge(key, patch || {}, {
-      tenantId: tenantIdFrom(req),
-      updatedBy: req.user?.id || null,
-    });
-    return rawJson(res, merged);
-  } catch (e) { next(e); }
-});
-
-/* =============================================================================
-   Export
-============================================================================= */
 module.exports = router;
