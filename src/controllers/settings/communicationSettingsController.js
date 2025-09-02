@@ -1,9 +1,12 @@
+// backend/controllers/settings/communicationSettingsController.js
 const db = require('../../models');
 const { Communication, CommunicationAttachment } = db;
 const { Op } = db.Sequelize;
 
-const likeOp = db.sequelize.getDialect() === 'postgres' ? Op.iLike : Op.like;
+// Use case-insensitive like on Postgres, else normal like
+const likeOp = db.sequelize?.getDialect?.() === 'postgres' ? Op.iLike : Op.like;
 
+/** GET /api/settings/communications */
 exports.listCommunications = async (req, res) => {
   try {
     const {
@@ -15,7 +18,7 @@ exports.listCommunications = async (req, res) => {
       isActive,
       showOnDashboard,
       showInTicker,
-      branchId
+      branchId,
     } = req.query;
 
     const where = {};
@@ -32,7 +35,7 @@ exports.listCommunications = async (req, res) => {
       include: [{ model: CommunicationAttachment, as: 'attachments' }],
       order: [['createdAt', 'DESC']],
       offset: (Number(page) - 1) * Number(pageSize),
-      limit: Number(pageSize)
+      limit: Number(pageSize),
     });
 
     res.json({ items: rows, total: count });
@@ -42,12 +45,21 @@ exports.listCommunications = async (req, res) => {
   }
 };
 
+/** POST /api/settings/communications */
 exports.createCommunication = async (req, res) => {
   try {
+    const title = (req.body.title || '').trim();
+    // accept both "text" and legacy "body"
+    const text = (req.body.text ?? req.body.body ?? '').toString().trim();
+
+    if (!title || !text) {
+      return res.status(400).json({ error: 'title and text are required' });
+    }
+
     const payload = {
-      title: req.body.title?.trim(),
-      text: req.body.text?.trim(),
-      type: req.body.type || 'notice',
+      title,
+      text,
+      type: req.body.type || req.body.channel || 'inapp',
       priority: req.body.priority || 'normal',
       audienceRole: req.body.audienceRole || null,
       audienceBranchId: req.body.audienceBranchId || null,
@@ -57,12 +69,8 @@ exports.createCommunication = async (req, res) => {
       showInTicker: req.body.showInTicker !== false,
       isActive: req.body.isActive !== false,
       createdBy: req.user?.id || null,
-      updatedBy: req.user?.id || null
+      updatedBy: req.user?.id || null,
     };
-
-    if (!payload.title || !payload.text) {
-      return res.status(400).json({ error: 'title and text are required' });
-    }
 
     const c = await Communication.create(payload);
     res.status(201).json(c);
@@ -72,10 +80,11 @@ exports.createCommunication = async (req, res) => {
   }
 };
 
+/** GET /api/settings/communications/:id */
 exports.getCommunication = async (req, res) => {
   try {
     const c = await Communication.findByPk(req.params.id, {
-      include: [{ model: CommunicationAttachment, as: 'attachments' }]
+      include: [{ model: CommunicationAttachment, as: 'attachments' }],
     });
     if (!c) return res.status(404).json({ error: 'Not found' });
     res.json(c);
@@ -85,12 +94,17 @@ exports.getCommunication = async (req, res) => {
   }
 };
 
+/** PUT /api/settings/communications/:id */
 exports.updateCommunication = async (req, res) => {
   try {
     const c = await Communication.findByPk(req.params.id);
     if (!c) return res.status(404).json({ error: 'Not found' });
 
+    // normalize incoming body/text
     const updates = { ...req.body, updatedBy: req.user?.id || null };
+    if (updates.body && !updates.text) updates.text = updates.body;
+    delete updates.body;
+
     await c.update(updates);
     res.json(c);
   } catch (e) {
@@ -99,6 +113,7 @@ exports.updateCommunication = async (req, res) => {
   }
 };
 
+/** DELETE /api/settings/communications/:id */
 exports.deleteCommunication = async (req, res) => {
   try {
     const c = await Communication.findByPk(req.params.id);
@@ -111,6 +126,7 @@ exports.deleteCommunication = async (req, res) => {
   }
 };
 
+/** POST /api/settings/communications/:id/attachments */
 exports.addAttachment = async (req, res) => {
   try {
     const { id } = req.params;
@@ -130,6 +146,7 @@ exports.addAttachment = async (req, res) => {
   }
 };
 
+/** DELETE /api/settings/communications/:id/attachments/:attId */
 exports.removeAttachment = async (req, res) => {
   try {
     const { id, attId } = req.params;

@@ -1,3 +1,4 @@
+// backend/controllers/settings/dashboardSettingsController.js
 const db = require('../../models');
 const Setting = db.Setting;
 
@@ -10,6 +11,7 @@ const ALLOWED = new Set([
   'showDisbursementWidget',
   'showCollectionsWidget',
   'recentActivityLimit',
+  'showTicker', // NEW: optional compatibility
 ]);
 
 /**
@@ -30,7 +32,6 @@ const getDashboardSettings = async (_req, res) => {
  */
 const updateDashboardSettings = async (req, res) => {
   try {
-    // merge + filter keys
     const existing = await Setting.findOne({ where: { key: KEY } });
     const curr = existing?.value || {};
     const next = { ...curr };
