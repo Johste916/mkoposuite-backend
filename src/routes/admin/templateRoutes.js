@@ -2,37 +2,63 @@
 const express = require('express');
 const router = express.Router();
 
-const { authenticateUser, requireAuth, authorizeRoles } = require('../../middleware/authMiddleware');
-const ADMIN = authorizeRoles('admin', 'director');
+let models;
+try { models = require('../../models'); } catch { models = require('../models'); }
 
-// In-memory store; swap to Sequelize later if needed
-const mem = new Map(); // key: category, val: [{id, name, subject, body, channel}]
+function tenantFrom(req){ return req.headers['x-tenant-id'] || req.context?.tenantId || null; }
+const getSequelize = () => {
+  try { return models?.sequelize || require('../../models').sequelize; } catch { return null; }
+};
 
-function listFor(cat) {
-  if (!mem.has(cat)) mem.set(cat, []);
-  return mem.get(cat);
-}
-
-router.get('/:category', authenticateUser, requireAuth, (req, res) => {
-  const rows = listFor(req.params.category);
-  res.setHeader('X-Total-Count', String(rows.length));
-  return res.json(rows);
+router.get('/:category', async (req, res, next) => {
+  const category = String(req.params.category);
+  try {
+    if (models?.AdminTemplate) {
+      const rows = await models.AdminTemplate.findAll({ where:{ category }, order:[['name','ASC']] });
+      return res.json(rows);
+    }
+    const sequelize = getSequelize();
+    if (!sequelize) throw Object.assign(new Error('DB not available'), { status:500 });
+    const [rows] = await sequelize.query(
+      'SELECT id, name, subject, body, channel FROM admin_templates WHERE category = :category ORDER BY name ASC',
+      { replacements: { category } }
+    );
+    return res.json(rows);
+  } catch (e) { next(e); }
 });
 
-router.post('/:category', authenticateUser, ADMIN, (req, res) => {
-  const rows = listFor(req.params.category);
-  const id = Date.now();
-  const { name, subject, body, channel } = req.body || {};
-  rows.push({ id, name, subject: subject || null, body: body || '', channel: channel || 'email' });
-  return res.status(201).json({ id });
+router.post('/:category', async (req, res, next) => {
+  const category = String(req.params.category);
+  const { name, subject = null, body = "", channel = "email" } = req.body || {};
+  try {
+    const tenantId = tenantFrom(req);
+    if (models?.AdminTemplate) {
+      const row = await models.AdminTemplate.create({ category, name, subject, body, channel, tenantId });
+      return res.status(201).json(row);
+    }
+    const sequelize = getSequelize();
+    if (!sequelize) throw Object.assign(new Error('DB not available'), { status:500 });
+    const [result] = await sequelize.query(
+      'INSERT INTO admin_templates (category, name, subject, body, channel, "tenantId", "createdAt", "updatedAt") VALUES (:category,:name,:subject,:body,:channel,:tenantId, NOW(), NOW()) RETURNING id, name, subject, body, channel',
+      { replacements: { category, name, subject, body, channel, tenantId } }
+    );
+    return res.status(201).json(result?.[0] || {});
+  } catch (e) { next(e); }
 });
 
-router.delete('/:category/:id', authenticateUser, ADMIN, (req, res) => {
-  const rows = listFor(req.params.category);
-  const id = String(req.params.id);
-  const idx = rows.findIndex(r => String(r.id) === id);
-  if (idx >= 0) rows.splice(idx, 1);
-  return res.status(204).end();
+router.delete('/:category/:id', async (req, res, next) => {
+  const category = String(req.params.category);
+  const id = Number(req.params.id);
+  try {
+    if (models?.AdminTemplate) {
+      await models.AdminTemplate.destroy({ where:{ id, category } });
+      return res.status(204).end();
+    }
+    const sequelize = getSequelize();
+    if (!sequelize) throw Object.assign(new Error('DB not available'), { status:500 });
+    await sequelize.query('DELETE FROM admin_templates WHERE id = :id AND category = :category', { replacements:{ id, category } });
+    return res.status(204).end();
+  } catch (e) { next(e); }
 });
 
 module.exports = router;

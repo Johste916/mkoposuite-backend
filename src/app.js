@@ -205,6 +205,10 @@ const permissionRoutes      = safeLoadRoutes('./routes/permissionRoutes', makeDu
 const adminAuditRoutes      = safeLoadRoutes('./routes/admin/auditRoutes', makeDummyRouter([]));
 const adminReportSubRoutes  = safeLoadRoutes('./routes/admin/reportSubscriptionRoutes', makeDummyRouter([]));
 
+/* ✅ NEW: Admin generic CRUD endpoints (types/templates) */
+const adminTypesRoutes      = safeLoadRoutes('./routes/admin/typesRoutes', makeDummyRouter([]));
+const adminTemplatesRoutes  = safeLoadRoutes('./routes/admin/templatesRoutes', makeDummyRouter([]));
+
 /* New modules — optional/dummy-friendly */
 const collateralRoutes = safeLoadRoutes(
   './routes/collateralRoutes',
@@ -339,6 +343,10 @@ app.use('/api/permissions',     permissionRoutes);
 app.use('/api/admin/audit',     adminAuditRoutes);
 app.use('/api/audit-logs',      adminAuditRoutes);
 app.use('/api/admin/report-subscriptions', adminReportSubRoutes);
+
+/* ✅ NEW admin generic CRUD mounts */
+app.use('/api/admin/types',      adminTypesRoutes);
+app.use('/api/admin/templates',  adminTemplatesRoutes);
 
 /* Other core mounts */
 app.use('/api/users',          userRoutes);

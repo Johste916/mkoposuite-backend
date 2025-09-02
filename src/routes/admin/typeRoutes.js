@@ -2,38 +2,65 @@
 const express = require('express');
 const router = express.Router();
 
-// Optional: require auth middleware if you want to protect them
-const { authenticateUser, requireAuth, authorizeRoles } = require('../../middleware/authMiddleware');
-const ADMIN = authorizeRoles('admin', 'director');
+let models;
+try { models = require('../../models'); } catch { models = require('../models'); }
 
-// In-memory store; swap to Sequelize later if needed
-const mem = new Map(); // key: category, val: [{id, name, code, meta}]
+function tenantFrom(req){ return req.headers['x-tenant-id'] || req.context?.tenantId || null; }
 
-function listFor(cat) {
-  if (!mem.has(cat)) mem.set(cat, []);
-  return mem.get(cat);
-}
+// Prefer a model if you have one; fall back to raw SQL.
+const getSequelize = () => {
+  try { return models?.sequelize || require('../../models').sequelize; } catch { return null; }
+};
 
-router.get('/:category', authenticateUser, requireAuth, (req, res) => {
-  const rows = listFor(req.params.category);
-  res.setHeader('X-Total-Count', String(rows.length));
-  return res.json(rows);
+router.get('/:category', async (req, res, next) => {
+  const category = String(req.params.category);
+  try {
+    if (models?.AdminType) {
+      const rows = await models.AdminType.findAll({ where:{ category }, order:[['name','ASC']] });
+      return res.json(rows);
+    }
+    const sequelize = getSequelize();
+    if (!sequelize) throw Object.assign(new Error('DB not available'), { status:500 });
+    const [rows] = await sequelize.query(
+      'SELECT id, name, code, meta FROM admin_types WHERE category = :category ORDER BY name ASC',
+      { replacements: { category } }
+    );
+    return res.json(rows);
+  } catch (e) { next(e); }
 });
 
-router.post('/:category', authenticateUser, ADMIN, (req, res) => {
-  const rows = listFor(req.params.category);
-  const id = Date.now();
-  const { name, code, meta } = req.body || {};
-  rows.push({ id, name, code, meta: meta ?? null });
-  return res.status(201).json({ id });
+router.post('/:category', async (req, res, next) => {
+  const category = String(req.params.category);
+  const { name, code = null, meta = null } = req.body || {};
+  try {
+    const tenantId = tenantFrom(req);
+    if (models?.AdminType) {
+      const row = await models.AdminType.create({ category, name, code, meta, tenantId });
+      return res.status(201).json(row);
+    }
+    const sequelize = getSequelize();
+    if (!sequelize) throw Object.assign(new Error('DB not available'), { status:500 });
+    const [result] = await sequelize.query(
+      'INSERT INTO admin_types (category, name, code, meta, "tenantId", "createdAt", "updatedAt") VALUES (:category,:name,:code,:meta,:tenantId, NOW(), NOW()) RETURNING id, name, code, meta',
+      { replacements: { category, name, code, meta: meta ? JSON.stringify(meta) : null, tenantId } }
+    );
+    return res.status(201).json(result?.[0] || {});
+  } catch (e) { next(e); }
 });
 
-router.delete('/:category/:id', authenticateUser, ADMIN, (req, res) => {
-  const rows = listFor(req.params.category);
-  const id = String(req.params.id);
-  const idx = rows.findIndex(r => String(r.id) === id);
-  if (idx >= 0) rows.splice(idx, 1);
-  return res.status(204).end();
+router.delete('/:category/:id', async (req, res, next) => {
+  const category = String(req.params.category);
+  const id = Number(req.params.id);
+  try {
+    if (models?.AdminType) {
+      await models.AdminType.destroy({ where:{ id, category } });
+      return res.status(204).end();
+    }
+    const sequelize = getSequelize();
+    if (!sequelize) throw Object.assign(new Error('DB not available'), { status:500 });
+    await sequelize.query('DELETE FROM admin_types WHERE id = :id AND category = :category', { replacements:{ id, category } });
+    return res.status(204).end();
+  } catch (e) { next(e); }
 });
 
 module.exports = router;
