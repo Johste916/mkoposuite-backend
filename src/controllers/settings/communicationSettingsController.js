@@ -1,160 +1,319 @@
-// backend/controllers/settings/communicationSettingsController.js
-const db = require('../../models');
-const { Communication, CommunicationAttachment } = db;
-const { Op } = db.Sequelize;
+'use strict';
 
-// Use case-insensitive like on Postgres, else normal like
-const likeOp = db.sequelize?.getDialect?.() === 'postgres' ? Op.iLike : Op.like;
+const tryRequireModels = () => {
+  try { return require('../../models'); } catch (e) { try { return require('../../../models'); } catch { return null; } }
+};
+const db = tryRequireModels();
+const hasSequelize = !!(db && db.sequelize && db.Sequelize);
+const Setting = db?.Setting;
 
-/** GET /api/settings/communications */
+const Communication = db?.Communication || null;
+const CommunicationAttachment = db?.CommunicationAttachment || null;
+
+const Op = hasSequelize ? db.Sequelize.Op : null;
+const likeOp = hasSequelize
+  ? (db.sequelize.getDialect() === 'postgres' ? db.Sequelize.Op.iLike : db.Sequelize.Op.like)
+  : null;
+
+// ---------- KV fallback helpers ----------
+const KV_KEY = 'general_communications';
+
+// very small uid helper when no DB
+const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+async function kvLoad() {
+  if (!Setting?.get) return [];
+  const data = await Setting.get(KV_KEY, []);
+  return Array.isArray(data) ? data : [];
+}
+async function kvSave(items, userId) {
+  if (!Setting?.set) return;
+  await Setting.set(KV_KEY, items, { updatedBy: userId || null, createdBy: userId || null });
+}
+
+// ---------- shape normalizer ----------
+function normalizePayload(body, user) {
+  const title = String(body?.title || '').trim();
+  const text  = String(body?.text  || body?.body || '').trim(); // accept "body" from old UIs
+  return {
+    title,
+    text,
+    type: body?.type || 'notice',
+    priority: body?.priority || 'normal',
+    audienceRole: body?.audienceRole || null,
+    audienceBranchId: body?.audienceBranchId || null,
+    startAt: body?.startAt || null,
+    endAt: body?.endAt || null,
+    showOnDashboard: body?.showOnDashboard !== false,
+    showInTicker: body?.showInTicker !== false,
+    isActive: body?.isActive !== false,
+    createdBy: user?.id || null,
+    updatedBy: user?.id || null,
+  };
+}
+
+// ============================================================================
+// LIST
+// GET /api/settings/communications?q=&page=&pageSize=&type=&priority=&isActive=&showOnDashboard=&showInTicker=&branchId=
+// ============================================================================
 exports.listCommunications = async (req, res) => {
   try {
-    const {
-      q = '',
-      page = 1,
-      pageSize = 20,
-      type,
-      priority,
-      isActive,
-      showOnDashboard,
-      showInTicker,
-      branchId,
-    } = req.query;
+    // DB path
+    if (Communication && Communication.findAndCountAll) {
+      const {
+        q = '', page = 1, pageSize = 20, type, priority,
+        isActive, showOnDashboard, showInTicker, branchId,
+      } = req.query;
 
-    const where = {};
-    if (q) where[Op.or] = [{ title: { [likeOp]: `%${q}%` } }, { text: { [likeOp]: `%${q}%` } }];
-    if (type) where.type = type;
-    if (priority) where.priority = priority;
-    if (typeof isActive !== 'undefined') where.isActive = String(isActive) === 'true';
-    if (typeof showOnDashboard !== 'undefined') where.showOnDashboard = String(showOnDashboard) === 'true';
-    if (typeof showInTicker !== 'undefined') where.showInTicker = String(showInTicker) === 'true';
-    if (branchId) where.audienceBranchId = branchId;
+      const where = {};
+      if (q && hasSequelize) {
+        where[Op.or] = [{ title: { [likeOp]: `%${q}%` } }, { text: { [likeOp]: `%${q}%` } }];
+      }
+      if (type) where.type = type;
+      if (priority) where.priority = priority;
+      if (typeof isActive !== 'undefined') where.isActive = String(isActive) === 'true';
+      if (typeof showOnDashboard !== 'undefined') where.showOnDashboard = String(showOnDashboard) === 'true';
+      if (typeof showInTicker !== 'undefined') where.showInTicker = String(showInTicker) === 'true';
+      if (branchId) where.audienceBranchId = branchId;
 
-    const { count, rows } = await Communication.findAndCountAll({
-      where,
-      include: [{ model: CommunicationAttachment, as: 'attachments' }],
-      order: [['createdAt', 'DESC']],
-      offset: (Number(page) - 1) * Number(pageSize),
-      limit: Number(pageSize),
-    });
+      const { count, rows } = await Communication.findAndCountAll({
+        where,
+        include: CommunicationAttachment ? [{ model: CommunicationAttachment, as: 'attachments' }] : [],
+        order: [['createdAt', 'DESC']],
+        offset: (Number(page) - 1) * Number(pageSize),
+        limit: Number(pageSize),
+      });
+      return res.json({ items: rows, total: count });
+    }
 
-    res.json({ items: rows, total: count });
+    // KV fallback
+    const { q = '', type, priority, isActive, showOnDashboard, showInTicker, branchId } = req.query;
+    let items = await kvLoad();
+
+    const ql = String(q || '').toLowerCase();
+    if (ql) {
+      items = items.filter((x) =>
+        String(x.title || '').toLowerCase().includes(ql) ||
+        String(x.text  || '').toLowerCase().includes(ql)
+      );
+    }
+    if (type)    items = items.filter((x) => x.type === type);
+    if (priority)items = items.filter((x) => x.priority === priority);
+    if (typeof isActive !== 'undefined')        items = items.filter((x) => !!x.isActive === (String(isActive) === 'true'));
+    if (typeof showOnDashboard !== 'undefined') items = items.filter((x) => !!x.showOnDashboard === (String(showOnDashboard) === 'true'));
+    if (typeof showInTicker !== 'undefined')    items = items.filter((x) => !!x.showInTicker === (String(showInTicker) === 'true'));
+    if (branchId) items = items.filter((x) => String(x.audienceBranchId || '') === String(branchId));
+
+    return res.json({ items, total: items.length });
   } catch (e) {
     console.error('listCommunications error:', e);
     res.status(500).json({ error: 'Failed to list communications' });
   }
 };
 
-/** POST /api/settings/communications */
+// ============================================================================
+// CREATE
+// POST /api/settings/communications
+// body: { title, text, ... }
+// ============================================================================
 exports.createCommunication = async (req, res) => {
   try {
-    const title = (req.body.title || '').trim();
-    // accept both "text" and legacy "body"
-    const text = (req.body.text ?? req.body.body ?? '').toString().trim();
-
-    if (!title || !text) {
+    const payload = normalizePayload(req.body, req.user);
+    if (!payload.title || !payload.text) {
       return res.status(400).json({ error: 'title and text are required' });
     }
 
-    const payload = {
-      title,
-      text,
-      type: req.body.type || req.body.channel || 'inapp',
-      priority: req.body.priority || 'normal',
-      audienceRole: req.body.audienceRole || null,
-      audienceBranchId: req.body.audienceBranchId || null,
-      startAt: req.body.startAt || null,
-      endAt: req.body.endAt || null,
-      showOnDashboard: req.body.showOnDashboard !== false,
-      showInTicker: req.body.showInTicker !== false,
-      isActive: req.body.isActive !== false,
-      createdBy: req.user?.id || null,
-      updatedBy: req.user?.id || null,
-    };
+    // DB path
+    if (Communication && Communication.create) {
+      const row = await Communication.create(payload);
+      return res.status(201).json(row);
+    }
 
-    const c = await Communication.create(payload);
-    res.status(201).json(c);
+    // KV fallback
+    const items = await kvLoad();
+    const row = {
+      id: uid(),
+      ...payload,
+      attachments: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    items.unshift(row);
+    await kvSave(items, req.user?.id);
+    return res.status(201).json(row);
   } catch (e) {
     console.error('createCommunication error:', e);
     res.status(400).json({ error: 'Failed to create communication' });
   }
 };
 
-/** GET /api/settings/communications/:id */
+// ============================================================================
+// GET ONE
+// GET /api/settings/communications/:id
+// ============================================================================
 exports.getCommunication = async (req, res) => {
   try {
-    const c = await Communication.findByPk(req.params.id, {
-      include: [{ model: CommunicationAttachment, as: 'attachments' }],
-    });
-    if (!c) return res.status(404).json({ error: 'Not found' });
-    res.json(c);
+    const id = String(req.params.id);
+
+    // DB path
+    if (Communication && Communication.findByPk) {
+      const row = await Communication.findByPk(id, {
+        include: CommunicationAttachment ? [{ model: CommunicationAttachment, as: 'attachments' }] : [],
+      });
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      return res.json(row);
+    }
+
+    // KV fallback
+    const items = await kvLoad();
+    const row = items.find((x) => String(x.id) === id);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    return res.json(row);
   } catch (e) {
     console.error('getCommunication error:', e);
     res.status(500).json({ error: 'Failed to fetch communication' });
   }
 };
 
-/** PUT /api/settings/communications/:id */
+// ============================================================================
+// UPDATE
+// PUT /api/settings/communications/:id
+// ============================================================================
 exports.updateCommunication = async (req, res) => {
   try {
-    const c = await Communication.findByPk(req.params.id);
-    if (!c) return res.status(404).json({ error: 'Not found' });
+    const id = String(req.params.id);
 
-    // normalize incoming body/text
-    const updates = { ...req.body, updatedBy: req.user?.id || null };
-    if (updates.body && !updates.text) updates.text = updates.body;
-    delete updates.body;
+    // DB path
+    if (Communication && Communication.findByPk) {
+      const row = await Communication.findByPk(id);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      const updates = { ...req.body, updatedBy: req.user?.id || null };
+      await row.update(updates);
+      return res.json(row);
+    }
 
-    await c.update(updates);
-    res.json(c);
+    // KV fallback
+    const items = await kvLoad();
+    const idx = items.findIndex((x) => String(x.id) === id);
+    if (idx === -1) return res.status(404).json({ error: 'Not found' });
+    const next = { ...items[idx], ...req.body, updatedAt: new Date().toISOString() };
+    items[idx] = next;
+    await kvSave(items, req.user?.id);
+    return res.json(next);
   } catch (e) {
     console.error('updateCommunication error:', e);
     res.status(400).json({ error: 'Failed to update communication' });
   }
 };
 
-/** DELETE /api/settings/communications/:id */
+// ============================================================================
+// DELETE
+// DELETE /api/settings/communications/:id
+// ============================================================================
 exports.deleteCommunication = async (req, res) => {
   try {
-    const c = await Communication.findByPk(req.params.id);
-    if (!c) return res.status(404).json({ error: 'Not found' });
-    await c.destroy();
-    res.json({ ok: true });
+    const id = String(req.params.id);
+
+    // DB path
+    if (Communication && Communication.destroy) {
+      const n = await Communication.destroy({ where: { id } });
+      if (!n) return res.status(404).json({ error: 'Not found' });
+      return res.json({ ok: true });
+    }
+
+    // KV fallback
+    const items = await kvLoad();
+    const next = items.filter((x) => String(x.id) !== id);
+    if (next.length === items.length) return res.status(404).json({ error: 'Not found' });
+    await kvSave(next, req.user?.id);
+    return res.json({ ok: true });
   } catch (e) {
     console.error('deleteCommunication error:', e);
     res.status(500).json({ error: 'Failed to delete communication' });
   }
 };
 
-/** POST /api/settings/communications/:id/attachments */
+// ============================================================================
+// ATTACHMENT ADD (DB or KV)
+// POST /api/settings/communications/:id/attachments
+// body: { fileName, mimeType, size, fileUrl }
+// ============================================================================
 exports.addAttachment = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { fileName, mimeType, size, fileUrl } = req.body;
+    const id = String(req.params.id);
+    const { fileName, mimeType, size, fileUrl } = req.body || {};
     if (!fileName || !mimeType || !size || !fileUrl) {
       return res.status(400).json({ error: 'fileName, mimeType, size, fileUrl are required' });
     }
 
-    const comm = await Communication.findByPk(id);
-    if (!comm) return res.status(404).json({ error: 'Communication not found' });
+    // DB path
+    if (CommunicationAttachment && CommunicationAttachment.create) {
+      // make sure the communication exists
+      if (Communication && Communication.findByPk) {
+        const found = await Communication.findByPk(id);
+        if (!found) return res.status(404).json({ error: 'Communication not found' });
+      }
+      const att = await CommunicationAttachment.create({
+        communicationId: id, fileName, mimeType, size, fileUrl,
+      });
+      return res.status(201).json(att);
+    }
 
-    const att = await CommunicationAttachment.create({ communicationId: id, fileName, mimeType, size, fileUrl });
-    res.status(201).json(att);
+    // KV fallback
+    const items = await kvLoad();
+    const idx = items.findIndex((x) => String(x.id) === id);
+    if (idx === -1) return res.status(404).json({ error: 'Communication not found' });
+
+    const att = {
+      id: uid(),
+      fileName, mimeType, size, fileUrl,
+      uploadedAt: new Date().toISOString(),
+      uploadedBy: req.user?.id || null,
+    };
+    const row = items[idx];
+    row.attachments = Array.isArray(row.attachments) ? row.attachments : [];
+    row.attachments.push(att);
+    row.updatedAt = new Date().toISOString();
+
+    await kvSave(items, req.user?.id);
+    return res.status(201).json(att);
   } catch (e) {
     console.error('addAttachment error:', e);
     res.status(400).json({ error: 'Failed to add attachment' });
   }
 };
 
-/** DELETE /api/settings/communications/:id/attachments/:attId */
+// ============================================================================
+// ATTACHMENT REMOVE (DB or KV)
+// DELETE /api/settings/communications/:id/attachments/:attId
+// ============================================================================
 exports.removeAttachment = async (req, res) => {
   try {
-    const { id, attId } = req.params;
-    const att = await CommunicationAttachment.findOne({ where: { id: attId, communicationId: id } });
-    if (!att) return res.status(404).json({ error: 'Attachment not found' });
+    const id = String(req.params.id);
+    const attId = String(req.params.attId);
 
-    await att.destroy();
-    res.json({ ok: true });
+    // DB path
+    if (CommunicationAttachment && CommunicationAttachment.destroy) {
+      const n = await CommunicationAttachment.destroy({ where: { id: attId, communicationId: id } });
+      if (!n) return res.status(404).json({ error: 'Attachment not found' });
+      return res.json({ ok: true });
+    }
+
+    // KV fallback
+    const items = await kvLoad();
+    const idx = items.findIndex((x) => String(x.id) === id);
+    if (idx === -1) return res.status(404).json({ error: 'Communication not found' });
+
+    const row = items[idx];
+    const before = Array.isArray(row.attachments) ? row.attachments.length : 0;
+    row.attachments = (row.attachments || []).filter((a) => String(a.id) !== attId);
+    const after = row.attachments.length;
+
+    if (before === after) return res.status(404).json({ error: 'Attachment not found' });
+
+    row.updatedAt = new Date().toISOString();
+    await kvSave(items, req.user?.id);
+    return res.json({ ok: true });
   } catch (e) {
     console.error('removeAttachment error:', e);
     res.status(500).json({ error: 'Failed to remove attachment' });
