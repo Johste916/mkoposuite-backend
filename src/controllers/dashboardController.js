@@ -43,8 +43,7 @@ const safeSum = async (Model, field, where) => {
     if (!Model?.sum) return 0;
     const v = await Model.sum(field, { where });
     return safeNumber(v || 0);
-  } catch (e) {
-    // swallow 42P01 (relation missing) and others; treat as 0
+  } catch {
     return 0;
   }
 };
@@ -88,26 +87,22 @@ async function countLoansCreatedBetween(start, end) {
   const Loan = models.Loan || null;
   if (!Loan) return 0;
 
-  // 1) Try createdAt (camel)
   try {
     return await Loan.count({ where: { createdAt: { [Op.between]: [start, end] } } });
   } catch {}
 
-  // 2) Try raw column "Loan"."createdAt"
   try {
     return await Loan.count({
       where: sequelize.where(sequelize.col('"Loan"."createdAt"'), { [Op.between]: [start, end] }),
     });
   } catch {}
 
-  // 3) Try raw column "Loan"."created_at"
   try {
     return await Loan.count({
       where: sequelize.where(sequelize.col('"Loan"."created_at"'), { [Op.between]: [start, end] }),
     });
   } catch {}
 
-  // 4) As a last resort, use disbursementDate
   try {
     return await Loan.count({ where: { disbursementDate: { [Op.between]: [start, end] } } });
   } catch {}
@@ -169,7 +164,6 @@ async function fetchCommunications({ role, branchId, limit = 20 } = {}) {
       })),
     }));
   } catch {
-    // Fallback demo ticker so UI still feels alive
     return [
       { id: "c1", text: "System notice: Collections review every Friday 16:00." },
       { id: "c2", text: "Reminder: Ensure KYC docs are complete before disbursement." },
@@ -231,7 +225,7 @@ async function fetchDashboardMessage({ role, branchId } = {}) {
 
 /**
  * Amber/Blue header lines: take the first two highest-priority active items
- * that are flagged `showOnDashboard = true`, respecting role/branch/time windows.
+ * flagged `showOnDashboard = true`, respecting role/branch/time windows.
  */
 async function fetchHeaderMessages({ role, branchId } = {}) {
   try {
@@ -298,13 +292,13 @@ exports.getDashboardSummary = async (req, res) => {
     if (start && end) {
       whereLoan.createdAt         = { [Op.between]: [start, end] };
       whereLoan.disbursementDate  = { [Op.between]: [start, end] };
-      whereRepay.dueDate          = { [Op.between]: [start, end] };   // correct column
+      whereRepay.dueDate          = { [Op.between]: [start, end] };
       whereSavings.date           = { [Op.between]: [start, end] };
-      wherePayments.createdAt     = { [Op.between]: [start, end] };   // fallback for payments
+      wherePayments.createdAt     = { [Op.between]: [start, end] };
     }
 
     const Borrower           = models.Borrower || null;
-    const Loan               = models.Lloan || models.Loan || null; // tolerate naming differences
+    const Loan               = models.Lloan || models.Loan || null;
     const LoanRepayment      = models.LoanRepayment || null;
     const SavingsTransaction = models.SavingsTransaction || null;
     const LoanPayment        = models.LoanPayment || null;
@@ -329,7 +323,7 @@ exports.getDashboardSummary = async (req, res) => {
       safeCount(Borrower, whereBorrower),
       safeCount(Loan, whereLoan),
       safeSum(Loan, "amount", { ...whereLoan, status: "disbursed" }),
-      safeSum(LoanPayment, "amount", wherePayments),                   // 0 if table missing
+      safeSum(LoanPayment, "amount", wherePayments),
       safeSum(LoanRepayment, "total", whereRepay),
       safeFindAll(SavingsTransaction, { where: whereSavings }),
       safeSum(LoanRepayment, "principal", { ...whereRepay, status: "overdue" }),
@@ -339,8 +333,8 @@ exports.getDashboardSummary = async (req, res) => {
       safeSum(Loan, "amount", { ...whereLoan, status: "written-off" }),
       fetchCommunications({ role: req.user?.role, branchId, limit: 10 }),
       fetchDashboardMessage({ role: req.user?.role, branchId }),
-      getSettingKV("general", {}, req),                                // read admin “General Settings”
-      fetchHeaderMessages({ role: req.user?.role, branchId }),         // 🔸 amber + 🔷 blue
+      getSettingKV("general", {}, req),
+      fetchHeaderMessages({ role: req.user?.role, branchId }),
     ]);
 
     let totalDeposits = 0, totalWithdrawals = 0;
@@ -357,7 +351,7 @@ exports.getDashboardSummary = async (req, res) => {
       ? Number(((safeNumber(defaultedPrincipal) / safeNumber(outstandingPrincipal)) * 100).toFixed(2))
       : 0;
 
-    // Pull the two single-line messages from settings if available
+    // KV overrides for the two header lines
     const importantNoticeFromKV = generalKV?.dashboard?.importantNotice;
     const companyMessageFromKV  = generalKV?.dashboard?.companyMessage;
 
@@ -401,7 +395,7 @@ exports.getDashboardSummary = async (req, res) => {
       // 3) Bottom ticker (array)
       generalCommunications: Array.isArray(generalComms) ? generalComms : [],
 
-      // Optional curated card (center white card)
+      // Optional curated card
       dashboardMessage: dashMsg,
     });
   } catch (error) {
@@ -435,7 +429,7 @@ exports.getDefaulters = async (req, res) => {
           attributes: ["name", "phone", "email"],
         }] : [],
       }] : [],
-      order: [["dueDate", "ASC"]], // correct column
+      order: [["dueDate", "ASC"]],
     };
 
     if (page && pageSize) {

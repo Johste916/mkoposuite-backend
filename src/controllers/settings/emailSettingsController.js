@@ -1,8 +1,10 @@
 // backend/src/controllers/settings/emailSettingsController.js
-const db = require('../../models');
+"use strict";
+
+const db = require("../../models");
 const Setting = db.Setting;
 
-const KEY = 'emailSettings';
+const KEY = "emailSettings";
 
 const DEFAULTS = {
   accounts: [
@@ -10,40 +12,40 @@ const DEFAULTS = {
   ],
   templates: {
     dueReminder: {
-      subject: 'Installment Due: {{dueDate}}',
-      html: '<p>Hello {{name}},</p><p>Your installment of <b>{{amount}}</b> is due on <b>{{dueDate}}</b>.</p>'
+      subject: "Installment Due: {{dueDate}}",
+      html: "<p>Hello {{name}},</p><p>Your installment of <b>{{amount}}</b> is due on <b>{{dueDate}}</b>.</p>"
     },
     arrears: {
-      subject: 'Arrears Notice',
-      html: '<p>Hello {{name}},</p><p>Your account is in arrears: <b>{{amount}}</b>. Please make a payment.</p>'
+      subject: "Arrears Notice",
+      html: "<p>Hello {{name}},</p><p>Your account is in arrears: <b>{{amount}}</b>. Please make a payment.</p>"
     }
   },
   autoRules: {
     enabled: false,
-    accountId: 'default',
+    accountId: "default",
     daysBeforeDue: 2
   }
 };
 
-const getEmailSettings = async (_req, res) => {
+exports.getEmailSettings = async (req, res) => {
   try {
-    const row = await Setting.findOne({ where: { key: KEY } });
-    res.json(row?.value || DEFAULTS);
+    const tenantId = req.headers["x-tenant-id"] || req.context?.tenantId || null;
+    const v = await Setting.get(KEY, DEFAULTS, { tenantId });
+    res.json(v || DEFAULTS);
   } catch (e) {
-    console.error('getEmailSettings error:', e);
-    res.status(500).json({ message: 'Failed to fetch Email settings' });
+    console.error("getEmailSettings error:", e);
+    res.status(500).json({ message: "Failed to fetch Email settings" });
   }
 };
 
-const updateEmailSettings = async (req, res) => {
+exports.updateEmailSettings = async (req, res) => {
   try {
+    const tenantId = req.headers["x-tenant-id"] || req.context?.tenantId || null;
     const merged = { ...DEFAULTS, ...(req.body || {}) };
-    const [row] = await Setting.upsert({ key: KEY, value: merged });
-    res.json({ message: 'Email settings updated', settings: row?.value || merged });
+    await Setting.set(KEY, merged, { tenantId, updatedBy: req.user?.id || null });
+    res.json({ message: "Email settings updated", settings: merged });
   } catch (e) {
-    console.error('updateEmailSettings error:', e);
-    res.status(500).json({ message: 'Failed to update Email settings' });
+    console.error("updateEmailSettings error:", e);
+    res.status(500).json({ message: "Failed to update Email settings" });
   }
 };
-
-module.exports = { getEmailSettings, updateEmailSettings };
