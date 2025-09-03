@@ -11,7 +11,7 @@ const {
   parseISO, isValid,
 } = require("date-fns");
 
-const sequelize = models.sequelize;
+const sequelize = models?.sequelize;
 
 /* ========================= Helpers ========================= */
 
@@ -40,17 +40,18 @@ const safeNumber = (v) => Number(v || 0);
 
 const safeSum = async (Model, field, where) => {
   try {
-    if (!Model) return 0;
+    if (!Model?.sum) return 0;
     const v = await Model.sum(field, { where });
     return safeNumber(v || 0);
-  } catch {
+  } catch (e) {
+    // swallow 42P01 (relation missing) and others; treat as 0
     return 0;
   }
 };
 
 const safeCount = async (Model, where) => {
   try {
-    if (!Model) return 0;
+    if (!Model?.count) return 0;
     const v = await Model.count({ where });
     return Number(v || 0);
   } catch {
@@ -60,7 +61,7 @@ const safeCount = async (Model, where) => {
 
 const safeFindAll = async (Model, opts) => {
   try {
-    if (!Model) return [];
+    if (!Model?.findAll) return [];
     const rows = await Model.findAll(opts);
     return rows || [];
   } catch {
@@ -68,7 +69,21 @@ const safeFindAll = async (Model, opts) => {
   }
 };
 
-/** Count loans created in [start,end], trying both createdAt and created_at */
+/** Read a KV/Setting (tenant-aware if your Setting model supports it) */
+async function getSettingKV(key, fallback = {}, req = null) {
+  try {
+    const Setting = models?.Setting;
+    if (!Setting?.get) return fallback;
+    const tenantId =
+      req?.headers?.["x-tenant-id"] || req?.context?.tenantId || null;
+    const v = await Setting.get(key, fallback, { tenantId });
+    return v ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Count loans created in [start,end], trying several columns to fit your schema */
 async function countLoansCreatedBetween(start, end) {
   const Loan = models.Loan || null;
   if (!Loan) return 0;
@@ -92,7 +107,7 @@ async function countLoansCreatedBetween(start, end) {
     });
   } catch {}
 
-  // 4) As a last resort, try disbursementDate (common business metric)
+  // 4) As a last resort, use disbursementDate
   try {
     return await Loan.count({ where: { disbursementDate: { [Op.between]: [start, end] } } });
   } catch {}
@@ -102,6 +117,10 @@ async function countLoansCreatedBetween(start, end) {
 
 /* ========= Internal: Communications ========= */
 
+/**
+ * General Communications ticker (bottom line).
+ * Returns items even if the tables don’t exist (fallback static messages).
+ */
 async function fetchCommunications({ role, branchId, limit = 20 } = {}) {
   try {
     if (!models.Communication?.findAll) throw new Error("Communication model missing");
@@ -150,6 +169,7 @@ async function fetchCommunications({ role, branchId, limit = 20 } = {}) {
       })),
     }));
   } catch {
+    // Fallback demo ticker so UI still feels alive
     return [
       { id: "c1", text: "System notice: Collections review every Friday 16:00." },
       { id: "c2", text: "Reminder: Ensure KYC docs are complete before disbursement." },
@@ -157,6 +177,10 @@ async function fetchCommunications({ role, branchId, limit = 20 } = {}) {
   }
 }
 
+/**
+ * Curated card message (center white card).
+ * Pick the highest priority active message flagged showOnDashboard.
+ */
 async function fetchDashboardMessage({ role, branchId } = {}) {
   try {
     if (!models.Communication?.findOne) return null;
@@ -231,13 +255,13 @@ exports.getDashboardSummary = async (req, res) => {
     if (start && end) {
       whereLoan.createdAt         = { [Op.between]: [start, end] };
       whereLoan.disbursementDate  = { [Op.between]: [start, end] };
-      whereRepay.dueDate          = { [Op.between]: [start, end] };  // ✅ correct column
+      whereRepay.dueDate          = { [Op.between]: [start, end] };   // correct column
       whereSavings.date           = { [Op.between]: [start, end] };
-      wherePayments.createdAt     = { [Op.between]: [start, end] };  // fallback for payments
+      wherePayments.createdAt     = { [Op.between]: [start, end] };   // fallback for payments
     }
 
     const Borrower           = models.Borrower || null;
-    const Loan               = models.Loan || null;
+    const Loan               = models.Lloan || models.Loan || null; // tolerate naming differences
     const LoanRepayment      = models.LoanRepayment || null;
     const SavingsTransaction = models.SavingsTransaction || null;
     const LoanPayment        = models.LoanPayment || null;
@@ -256,12 +280,12 @@ exports.getDashboardSummary = async (req, res) => {
       writtenOffAmount,
       generalComms,
       dashMsg,
+      generalKV,
     ] = await Promise.all([
       safeCount(Borrower, whereBorrower),
       safeCount(Loan, whereLoan),
       safeSum(Loan, "amount", { ...whereLoan, status: "disbursed" }),
-      // ✅ will return 0 if table doesn't exist
-      safeSum(LoanPayment, "amount", wherePayments),
+      safeSum(LoanPayment, "amount", wherePayments),                   // 0 if table missing
       safeSum(LoanRepayment, "total", whereRepay),
       safeFindAll(SavingsTransaction, { where: whereSavings }),
       safeSum(LoanRepayment, "principal", { ...whereRepay, status: "overdue" }),
@@ -271,11 +295,12 @@ exports.getDashboardSummary = async (req, res) => {
       safeSum(Loan, "amount", { ...whereLoan, status: "written-off" }),
       fetchCommunications({ role: req.user?.role, branchId, limit: 10 }),
       fetchDashboardMessage({ role: req.user?.role, branchId }),
+      getSettingKV("general", {}, req),                                // read admin “General Settings”
     ]);
 
     let totalDeposits = 0, totalWithdrawals = 0;
     for (const tx of savingsTxs) {
-      if (tx.type === "deposit")   totalDeposits   += safeNumber(tx.amount);
+      if (tx.type === "deposit")    totalDeposits    += safeNumber(tx.amount);
       if (tx.type === "withdrawal") totalWithdrawals += safeNumber(tx.amount);
     }
 
@@ -286,6 +311,10 @@ exports.getDashboardSummary = async (req, res) => {
     const parPercent = safeNumber(outstandingPrincipal) > 0
       ? Number(((safeNumber(defaultedPrincipal) / safeNumber(outstandingPrincipal)) * 100).toFixed(2))
       : 0;
+
+    // Pull the two single-line messages from settings if available
+    const importantNoticeFromKV = generalKV?.dashboard?.importantNotice;
+    const companyMessageFromKV  = generalKV?.dashboard?.companyMessage;
 
     res.json({
       totalBorrowers,
@@ -303,9 +332,23 @@ exports.getDashboardSummary = async (req, res) => {
       outstandingInterest: safeNumber(outstandingInterest),
       writtenOff: safeNumber(writtenOffAmount),
       parPercent,
-      companyMessage: "Welcome to MkopoSuite LMS — Q3 focus: Risk reduction & collections discipline.",
-      importantNotice: "REMINDER: Submit weekly branch PAR review by Friday 4:00 PM.",
+
+      // 1) Top amber bar
+      importantNotice:
+        (typeof importantNoticeFromKV === "string" && importantNoticeFromKV.trim()) ?
+          importantNoticeFromKV.trim() :
+          "REMINDER: Submit weekly branch PAR review by Friday 4:00 PM.",
+
+      // 2) Middle blue line
+      companyMessage:
+        (typeof companyMessageFromKV === "string" && companyMessageFromKV.trim()) ?
+          companyMessageFromKV.trim() :
+          "Welcome to MkopoSuite LMS — Q3 focus: Risk reduction & collections discipline.",
+
+      // 3) Bottom ticker (array)
       generalCommunications: Array.isArray(generalComms) ? generalComms : [],
+
+      // Optional curated card
       dashboardMessage: dashMsg,
     });
   } catch (error) {
@@ -322,6 +365,8 @@ exports.getDefaulters = async (req, res) => {
     const Borrower      = models.Borrower || null;
     const LoanRepayment = models.LoanRepayment || null;
 
+    if (!LoanRepayment?.findAll) return res.json([]);
+
     const whereLoan = {};
     if (branchId) whereLoan.branchId = branchId;
     if (officerId) whereLoan.initiatedBy = officerId;
@@ -337,18 +382,25 @@ exports.getDefaulters = async (req, res) => {
           attributes: ["name", "phone", "email"],
         }] : [],
       }] : [],
-      order: [["dueDate", "ASC"]], // ✅ correct column
+      order: [["dueDate", "ASC"]], // correct column
     };
 
     if (page && pageSize) {
       const limit  = Number(pageSize);
       const offset = (Number(page) - 1) * limit;
 
-      const { count, rows } = await LoanRepayment.findAndCountAll({
-        ...baseQuery,
-        offset,
-        limit,
-      });
+      let count = 0, rows = [];
+      try {
+        ({ count, rows } = await LoanRepayment.findAndCountAll({
+          ...baseQuery,
+          offset,
+          limit,
+        }));
+      } catch (e) {
+        if (e?.parent?.code === "42P01") return res.json({ items: [], total: 0 });
+        throw e;
+      }
+
       return res.json({
         items: rows.map(r => ({
           name:  r?.Loan?.Borrower?.name  || "Unknown",
@@ -360,7 +412,13 @@ exports.getDefaulters = async (req, res) => {
       });
     }
 
-    const rows = await LoanRepayment.findAll(baseQuery);
+    let rows = [];
+    try {
+      rows = await LoanRepayment.findAll(baseQuery);
+    } catch (e) {
+      if (e?.parent?.code === "42P01") return res.json([]);
+      throw e;
+    }
     res.json(rows.map(r => ({
       name:  r?.Loan?.Borrower?.name  || "Unknown",
       phone: r?.Loan?.Borrower?.phone || "",
@@ -376,7 +434,6 @@ exports.getDefaulters = async (req, res) => {
 // GET /api/dashboard/monthly-trends
 exports.getMonthlyTrends = async (_req, res) => {
   try {
-    const Loan               = models.Loan || null;
     const LoanRepayment      = models.LoanRepayment || null;
     const SavingsTransaction = models.SavingsTransaction || null;
 
@@ -388,16 +445,16 @@ exports.getMonthlyTrends = async (_req, res) => {
       countLoansCreatedBetween(start, end),
       (async () => {
         try {
-          if (!SavingsTransaction) return 0;
+          if (!SavingsTransaction?.sum) return 0;
           const v = await SavingsTransaction.sum("amount", {
             where: { type: "deposit", date: { [Op.between]: [start, end] } },
           });
-        return safeNumber(v || 0);
+          return safeNumber(v || 0);
         } catch { return 0; }
       })(),
       (async () => {
         try {
-          if (!LoanRepayment) return 0;
+          if (!LoanRepayment?.sum) return 0;
           const v = await LoanRepayment.sum("total", {
             where: { dueDate: { [Op.between]: [start, end] } },
           });
@@ -422,7 +479,7 @@ exports.getMonthlyTrends = async (_req, res) => {
 // GET /api/dashboard/activity
 exports.getActivityFeed = async (req, res) => {
   try {
-    if (!models.ActivityLog) return res.json({ items: [], total: 0 });
+    if (!models.ActivityLog?.findAndCountAll) return res.json({ items: [], total: 0 });
 
     const { page = 1, pageSize = 10, dateFrom, dateTo } = req.query;
     const where = {};
@@ -453,14 +510,13 @@ exports.getActivityFeed = async (req, res) => {
         limit,
       }));
     } catch (e) {
-      // relation not found → return empty instead of 500
       if (e?.parent?.code === '42P01') return res.json({ items: [], total: 0 });
       throw e;
     }
 
     const items = await Promise.all(rows.map(async a => {
       let comments = [];
-      if (models.ActivityComment) {
+      if (models.ActivityComment?.findAll) {
         const cInclude = models.User ? [{ model: models.User, as: 'User', attributes: ["id", "name", "email"] }] : [];
         try {
           comments = await models.ActivityComment.findAll({
@@ -500,7 +556,9 @@ exports.getActivityFeed = async (req, res) => {
 // POST /api/dashboard/activity/:id/comment
 exports.addActivityComment = async (req, res) => {
   try {
-    if (!models.ActivityComment) return res.status(400).json({ error: "Activity comments not enabled" });
+    if (!models.ActivityComment?.create) {
+      return res.status(400).json({ error: "Activity comments not enabled" });
+    }
 
     const { id } = req.params;
     const { comment } = req.body;
@@ -524,7 +582,9 @@ exports.addActivityComment = async (req, res) => {
 // POST /api/dashboard/activity/:id/assign
 exports.assignActivityTask = async (req, res) => {
   try {
-    if (!models.ActivityAssignment) return res.status(400).json({ error: "Assignments not enabled" });
+    if (!models.ActivityAssignment?.create) {
+      return res.status(400).json({ error: "Assignments not enabled" });
+    }
 
     const { id } = req.params;
     const { assigneeId, dueDate, note } = req.body;
