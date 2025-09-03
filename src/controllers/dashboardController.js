@@ -229,6 +229,49 @@ async function fetchDashboardMessage({ role, branchId } = {}) {
   }
 }
 
+/**
+ * Amber/Blue header lines: take the first two highest-priority active items
+ * that are flagged `showOnDashboard = true`, respecting role/branch/time windows.
+ */
+async function fetchHeaderMessages({ role, branchId } = {}) {
+  try {
+    if (!models.Communication?.findAll) return { important: null, company: null };
+
+    const now = new Date();
+    const rows = await models.Communication.findAll({
+      where: {
+        isActive: true,
+        showOnDashboard: true,
+        [Op.and]: [
+          { [Op.or]: [{ startAt: null }, { startAt: { [Op.lte]: now } }] },
+          { [Op.or]: [{ endAt: null },   { endAt:   { [Op.gte]: now } }] },
+        ],
+        [Op.or]: [{ audienceRole: null }, { audienceRole: role || null }],
+        ...(branchId ? { [Op.or]: [{ audienceBranchId: null }, { audienceBranchId: branchId }] } : {}),
+      },
+      order: [
+        [models.sequelize.literal(`
+          CASE 
+            WHEN priority='critical' THEN 4 
+            WHEN priority='high' THEN 3 
+            WHEN priority='normal' THEN 2 
+            ELSE 1 
+          END
+        `), "DESC"],
+        ["createdAt", "DESC"],
+      ],
+      limit: 2,
+    });
+
+    return {
+      important: rows[0] || null,
+      company: rows[1] || null,
+    };
+  } catch {
+    return { important: null, company: null };
+  }
+}
+
 /* ======================= Controller Functions ======================= */
 
 // GET /api/dashboard/summary
@@ -281,6 +324,7 @@ exports.getDashboardSummary = async (req, res) => {
       generalComms,
       dashMsg,
       generalKV,
+      headerMsgs,
     ] = await Promise.all([
       safeCount(Borrower, whereBorrower),
       safeCount(Loan, whereLoan),
@@ -296,6 +340,7 @@ exports.getDashboardSummary = async (req, res) => {
       fetchCommunications({ role: req.user?.role, branchId, limit: 10 }),
       fetchDashboardMessage({ role: req.user?.role, branchId }),
       getSettingKV("general", {}, req),                                // read admin “General Settings”
+      fetchHeaderMessages({ role: req.user?.role, branchId }),         // 🔸 amber + 🔷 blue
     ]);
 
     let totalDeposits = 0, totalWithdrawals = 0;
@@ -316,6 +361,14 @@ exports.getDashboardSummary = async (req, res) => {
     const importantNoticeFromKV = generalKV?.dashboard?.importantNotice;
     const companyMessageFromKV  = generalKV?.dashboard?.companyMessage;
 
+    // Build strings from header comms (title + text) if present
+    const importantFromComms = headerMsgs?.important
+      ? `${headerMsgs.important.title || ""} ${headerMsgs.important.text || ""}`.trim()
+      : null;
+    const companyFromComms = headerMsgs?.company
+      ? `${headerMsgs.company.title || ""} ${headerMsgs.company.text || ""}`.trim()
+      : null;
+
     res.json({
       totalBorrowers,
       totalLoans,
@@ -333,22 +386,22 @@ exports.getDashboardSummary = async (req, res) => {
       writtenOff: safeNumber(writtenOffAmount),
       parPercent,
 
-      // 1) Top amber bar
+      // 1) Top amber bar (KV > comms > default)
       importantNotice:
-        (typeof importantNoticeFromKV === "string" && importantNoticeFromKV.trim()) ?
-          importantNoticeFromKV.trim() :
-          "REMINDER: Submit weekly branch PAR review by Friday 4:00 PM.",
+        (typeof importantNoticeFromKV === "string" && importantNoticeFromKV.trim())
+          ? importantNoticeFromKV.trim()
+          : (importantFromComms || "REMINDER: Submit weekly branch PAR review by Friday 4:00 PM."),
 
-      // 2) Middle blue line
+      // 2) Middle blue line (KV > comms > default)
       companyMessage:
-        (typeof companyMessageFromKV === "string" && companyMessageFromKV.trim()) ?
-          companyMessageFromKV.trim() :
-          "Welcome to MkopoSuite LMS — Q3 focus: Risk reduction & collections discipline.",
+        (typeof companyMessageFromKV === "string" && companyMessageFromKV.trim())
+          ? companyMessageFromKV.trim()
+          : (companyFromComms || "Welcome to MkopoSuite LMS — Q3 focus: Risk reduction & collections discipline."),
 
       // 3) Bottom ticker (array)
       generalCommunications: Array.isArray(generalComms) ? generalComms : [],
 
-      // Optional curated card
+      // Optional curated card (center white card)
       dashboardMessage: dashMsg,
     });
   } catch (error) {
