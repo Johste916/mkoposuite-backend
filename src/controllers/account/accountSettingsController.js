@@ -1,7 +1,8 @@
 'use strict';
 
 const bcrypt = require('bcryptjs');
-const { Setting, User } = require('../../models');
+const db = require('../../models');
+const { Setting, User, Branch } = db;
 
 /* --------------------------- BILLING (via Setting) -------------------------- */
 const BILLING_KEY = 'account.billing';
@@ -18,9 +19,21 @@ const BILLING_DEFAULTS = {
   autoRenew: false,
 };
 
+const tenantFromReq = (req) =>
+  req.tenant?.id || req.headers['x-tenant-id'] || req.user?.tenantId || null;
+
 exports.getBilling = async (req, res) => {
   try {
-    const value = await Setting.get(BILLING_KEY, BILLING_DEFAULTS);
+    const tenantId = tenantFromReq(req);
+
+    // Prefer tenant-aware Setting.get(key, defaults, tenantId), fall back gracefully
+    let value;
+    try {
+      value = await Setting.get(BILLING_KEY, BILLING_DEFAULTS, tenantId);
+    } catch {
+      value = await Setting.get(BILLING_KEY, BILLING_DEFAULTS);
+    }
+
     return res.json({ ok: true, settings: { ...BILLING_DEFAULTS, ...(value || {}) } });
   } catch (err) {
     console.error('getBilling error:', err);
@@ -31,6 +44,7 @@ exports.getBilling = async (req, res) => {
 exports.updateBilling = async (req, res) => {
   try {
     const userId = req.user?.id || null;
+    const tenantId = tenantFromReq(req);
 
     // allow only known keys (ignore random payload)
     const allowed = [
@@ -41,11 +55,72 @@ exports.updateBilling = async (req, res) => {
     const patch = {};
     for (const k of allowed) if (k in (req.body || {})) patch[k] = req.body[k];
 
-    const merged = await Setting.merge(BILLING_KEY, patch, userId);
+    let merged;
+    try {
+      merged = await Setting.merge(BILLING_KEY, patch, userId, tenantId);
+    } catch {
+      merged = await Setting.merge(BILLING_KEY, patch, userId);
+    }
+
     return res.json({ ok: true, settings: { ...BILLING_DEFAULTS, ...(merged || {}) } });
   } catch (err) {
     console.error('updateBilling error:', err);
     return res.status(500).json({ ok: false, message: 'Failed to update billing settings' });
+  }
+};
+
+/* ------------------------------ PROFILE (new) ------------------------------- */
+/** GET /account/profile — fetch current user's profile (plus branch name when available) */
+exports.getProfile = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const include = [];
+    if (Branch) include.push({ model: Branch, as: 'branch', attributes: ['id', 'name'] });
+
+    const user = await User.findByPk(userId, {
+      attributes: ['id', 'name', 'email', 'phone', 'avatarUrl', 'branchId', ...(User.rawAttributes.tenantId ? ['tenantId'] : [])],
+      include,
+    });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    return res.json({ ok: true, user });
+  } catch (err) {
+    console.error('getProfile error:', err);
+    return res.status(500).json({ message: 'Failed to load profile' });
+  }
+};
+
+/** PATCH /account/profile — update name/phone/avatarUrl/branchId */
+exports.updateProfile = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const { name, phone, avatarUrl, branchId } = req.body || {};
+    const patch = {};
+    if (typeof name === 'string') patch.name = name.trim();
+    if (typeof phone === 'string') patch.phone = phone.trim();
+    if (typeof avatarUrl === 'string') patch.avatarUrl = avatarUrl.trim();
+
+    // branch change allowed only if the column exists
+    if (branchId != null && User.rawAttributes.branchId) {
+      if (!Branch) return res.status(400).json({ message: 'Branch not available' });
+      const branch = await Branch.findByPk(branchId);
+      if (!branch) return res.status(400).json({ message: 'Invalid branchId' });
+      patch.branchId = branch.id;
+    }
+
+    const user = await User.findByPk(userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    await user.update(patch);
+
+    return res.json({ ok: true, message: 'Profile updated', user });
+  } catch (err) {
+    console.error('updateProfile error:', err);
+    return res.status(500).json({ message: 'Failed to update profile' });
   }
 };
 
@@ -59,8 +134,6 @@ exports.changePassword = async (req, res) => {
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ message: 'currentPassword and newPassword are required' });
     }
-
-    // Basic policy (tune later)
     if (String(newPassword).length < 8) {
       return res.status(400).json({ message: 'New password must be at least 8 characters' });
     }
@@ -75,7 +148,6 @@ exports.changePassword = async (req, res) => {
 
     const salt = await bcrypt.genSalt(10);
     const nextHash = await bcrypt.hash(String(newPassword), salt);
-
     await user.update({ password_hash: nextHash });
 
     return res.json({ ok: true, message: 'Password updated successfully' });
