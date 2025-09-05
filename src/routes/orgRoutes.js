@@ -1,171 +1,130 @@
-// routes/orgRoutes.js
 'use strict';
-
 const express = require('express');
 const router = express.Router();
 
-/**
- * Resolve models safely (works whether models are exported from ./models or set on the app)
- */
+/** Helper to fetch models safely */
 function getModels(req) {
+  try { return req.app.get('models') || require('../models'); }
+  catch { return null; }
+}
+
+async function getTenantPlanInfo(models, tenantId) {
+  const q = models?.sequelize;
+  if (!q) return { planCode: 'basic', planId: null };
+
+  // Try to read the tenant's plan (works whether columns exist or not)
   try {
-    // Prefer the app-attached models if present
-    const appModels = req.app?.get?.('models');
-    if (appModels) return appModels;
-  } catch {}
+    const [rows] = await q.query(`
+      SELECT plan_code, plan_id
+      FROM public.tenants
+      WHERE id = $1
+      LIMIT 1
+    `, { bind: [tenantId] });
+    if (rows?.length) {
+      return {
+        planCode: (rows[0].plan_code || 'basic')?.toLowerCase() || 'basic',
+        planId: rows[0].plan_id || null
+      };
+    }
+  } catch (_) {}
+  return { planCode: 'basic', planId: null };
+}
+
+async function getPlanRecord(models, { planCode, planId }) {
+  const q = models?.sequelize;
+  if (!q) return null;
   try {
-    // Fallback to requiring models directly
-    return require('../models');
-  } catch {
-    try { return require('../../models'); } catch {}
-  }
-  return null;
+    if (planId) {
+      const [rows] = await q.query(`SELECT id, code, name, limits FROM public.plans WHERE id = $1 LIMIT 1`, { bind: [planId] });
+      if (rows?.length) return rows[0];
+    }
+    const [rows2] = await q.query(`SELECT id, code, name, limits FROM public.plans WHERE LOWER(code) = LOWER($1) LIMIT 1`, { bind: [planCode] });
+    return rows2?.[0] || null;
+  } catch (_) { return null; }
 }
 
-/** Extract current tenant id from headers/user/context */
-function getTenantId(req) {
-  return (
-    req.headers['x-tenant-id'] ||
-    req.user?.tenantId ||
-    req.context?.tenantId ||
-    process.env.DEFAULT_TENANT_ID ||
-    '00000000-0000-0000-0000-000000000000'
-  );
-}
-
-/** Normalize plan limits if stored as JSON text or object */
-function parseLimits(limits) {
-  if (!limits) return {};
-  if (typeof limits === 'string') {
-    try { return JSON.parse(limits); } catch { return {}; }
-  }
-  if (typeof limits === 'object') return limits;
-  return {};
-}
-
-/** Very light usage stub (replace with your real counters if/when needed) */
-async function getTenantUsage(_models, _tenantId) {
-  // Example: return actual counts from your DB here
+function entKeysToModules(keys) {
+  const on = new Set(keys || []);
+  const has = (k) => on.has(k);
   return {
-    borrowers: 0,
-    loans: 0,
+    savings:      has('savings.view'),
+    accounting:   has('accounting.view'),
+    payroll:      has('payroll.view'),
+    collateral:   has('collateral.view'),
+    loans:        has('loans.view'),
+    sms:          has('sms.send'),
+    investors:    has('investors.view'),
+    collections:  has('collections.view'),
+    esignatures:  has('esign.view'),
+    assets:       has('assets.view'),
+    reports:      has('reports.view'),
   };
 }
 
-/**
- * GET /api/org/limits
- * Returns: { plan: {id,name,code?}, limits: {...}, entitlements: [keys], usage: {...} }
- */
+/** GET /api/org/limits */
 router.get('/limits', async (req, res) => {
-  const models = getModels(req);
+  try {
+    const models = getModels(req);
+    const tenantId = req.headers['x-tenant-id'] || null;
 
-  // No models? Return a friendly, working fallback so the UI renders.
-  if (!models) {
-    return res.json({
-      plan: { id: 'fallback', name: 'Basic', code: 'basic' },
-      limits: { borrowers: 1000, loans: 2000 },
-      entitlements: [
-        'savings.view','accounting.view','collateral.view','loans.view',
-        'investors.view','collections.view','assets.view'
-      ],
-      usage: { borrowers: 0, loans: 0 },
+    const tp = await getTenantPlanInfo(models, tenantId);
+    const plan = await getPlanRecord(models, tp);
+
+    if (!plan) return res.ok({
+      plan: { id: null, code: (tp.planCode || 'basic'), name: (tp.planCode || 'basic').toUpperCase() },
+      limits: {},
+      usage: {},
     });
+
+    // Optionally compute usage (safe fallbacks)
+    let borrowers = 0, loans = 0;
+    try {
+      const q = models.sequelize;
+      const [b] = await q.query(`SELECT COUNT(*)::int AS c FROM public.borrowers`);
+      const [l] = await q.query(`SELECT COUNT(*)::int AS c FROM public.loans`);
+      borrowers = b?.[0]?.c || 0;
+      loans = l?.[0]?.c || 0;
+    } catch {}
+
+    res.ok({
+      plan: { id: plan.id, code: plan.code, name: plan.name },
+      limits: plan.limits || {},
+      usage: { borrowers, loans },
+    });
+  } catch (e) {
+    res.fail(500, e.message || 'Failed to load limits');
   }
-
-  const { Tenant, Plan, Entitlement, PlanEntitlement, sequelize } = models;
-  const tenantId = getTenantId(req);
-
-  // Look up tenant & plan
-  let tenant = null, plan = null;
-  try {
-    if (Tenant?.findByPk) tenant = await Tenant.findByPk(tenantId);
-  } catch {}
-  try {
-    if (plan == null && tenant?.planId && Plan?.findByPk) {
-      plan = await Plan.findByPk(tenant.planId);
-    }
-  } catch {}
-
-  // If the tenant has a planCode instead of FK
-  if (!plan && tenant?.planCode && Plan?.findOne) {
-    plan = await Plan.findOne({ where: { code: tenant.planCode } }).catch(() => null);
-  }
-
-  // Entitlements joined through plan
-  let entitlementKeys = [];
-  try {
-    if (PlanEntitlement?.findAll && Entitlement) {
-      const joinRows = await PlanEntitlement.findAll({
-        where: { planId: plan?.id },
-        include: [{ model: Entitlement, attributes: ['key'] }],
-      });
-      entitlementKeys = joinRows.map(j => j?.Entitlement?.key).filter(Boolean);
-    }
-  } catch {
-    // Silent fallback below
-  }
-
-  // If no entitlements via join, try a simple fallback
-  if (entitlementKeys.length === 0) {
-    if (Entitlement?.findAll && PlanEntitlement?.findAll && plan?.id) {
-      const ents = await Entitlement.findAll().catch(() => []);
-      entitlementKeys = ents.map(e => e.key).slice(0, 6); // arbitrary safe fallback
-    } else {
-      entitlementKeys = [
-        'savings.view','accounting.view','collateral.view','loans.view',
-        'investors.view','collections.view','assets.view'
-      ];
-    }
-  }
-
-  // Limits & usage
-  const limits = parseLimits(plan?.limits) || {};
-  // If limits empty, give gentle defaults so UI shows something
-  const safeLimits = Object.keys(limits).length ? limits : { borrowers: 1000, loans: 2000 };
-
-  const usage = await getTenantUsage(models, tenantId, sequelize).catch(() => ({}));
-
-  return res.json({
-    plan: plan ? { id: plan.id, name: plan.name, code: plan.code } : { id: 'unknown', name: 'Basic', code: 'basic' },
-    limits: safeLimits,
-    entitlements: entitlementKeys,
-    usage: usage || {},
-  });
 });
 
+/** GET /api/org/entitlements */
+router.get('/entitlements', async (req, res) => {
+  try {
+    const models = getModels(req);
+    const tp = await getTenantPlanInfo(models, req.headers['x-tenant-id'] || null);
+    const plan = await getPlanRecord(models, tp);
 
-/**
- * GET /api/org/invoices
- * Returns: { invoices: [...] }
- */
-router.get('/invoices', async (req, res) => {
-  const models = getModels(req);
-  const tenantId = getTenantId(req);
+    if (!plan) return res.ok({ modules: entKeysToModules([]), planCode: tp.planCode || 'basic', status: 'active' });
 
-  if (!models?.Invoice?.findAll) {
-    // Safe fallback – empty invoice list
-    return res.json({ invoices: [] });
+    let keys = [];
+    try {
+      const [rows] = await models.sequelize.query(`
+        SELECT e.key
+        FROM public.plan_entitlements pe
+        JOIN public.entitlements e ON e.id = pe.entitlement_id
+        WHERE pe.plan_id = $1
+      `, { bind: [plan.id] });
+      keys = rows.map(r => r.key);
+    } catch {}
+
+    res.ok({ modules: entKeysToModules(keys), planCode: plan.code, status: 'active' });
+  } catch (e) {
+    res.fail(500, e.message || 'Failed to load entitlements');
   }
+});
 
-  const invoices = await models.Invoice.findAll({
-    where: { tenantId },
-    order: [['issuedAt', 'DESC']],
-    limit: 50,
-  }).catch(() => []);
-
-  // Normalize a bit so the UI is happy regardless of exact column names
-  const norm = invoices.map((inv) => ({
-    id: inv.id,
-    number: inv.number || inv.invoiceNumber || inv.code || String(inv.id),
-    currency: inv.currency || 'USD',
-    amountCents: inv.amountCents ?? inv.amount_cents ?? (inv.totalCents ?? null),
-    status: inv.status || 'open',
-    issuedAt: inv.issuedAt ?? inv.issued_at ?? inv.createdAt ?? inv.created_at ?? null,
-    dueDate: inv.dueDate ?? inv.due_date ?? null,
-    downloadUrl: inv.downloadUrl ?? inv.pdfUrl ?? null,
-  }));
-
-  return res.json({ invoices: norm });
+/** GET /api/org/invoices  (placeholder; real billing system can replace) */
+router.get('/invoices', async (_req, res) => {
+  res.ok({ invoices: [] });
 });
 
 module.exports = router;

@@ -86,9 +86,9 @@ db.LeaveRequest = tryLoad(() => require('./leaveRequest')(sequelize, DataTypes),
 db.Contract     = tryLoad(() => require('./contract')(sequelize, DataTypes),     'Contract');
 
 /* ✅ Plans & Entitlements (new; safe if files/tables missing) */
-db.Plan             = tryLoad(() => require('./plan')(sequelize, DataTypes),             'Plan');
-db.Entitlement      = tryLoad(() => require('./entitlement')(sequelize, DataTypes),      'Entitlement');
-db.PlanEntitlement  = tryLoad(() => require('./planentitlement')(sequelize, DataTypes),  'PlanEntitlement');
+db.Plan            = tryLoad(() => require('./plan')(sequelize, DataTypes),            'Plan');
+db.Entitlement     = tryLoad(() => require('./entitlement')(sequelize, DataTypes),     'Entitlement');
+db.PlanEntitlement = tryLoad(() => require('./planentitlement')(sequelize, DataTypes), 'PlanEntitlement');
 
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
