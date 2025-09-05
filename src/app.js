@@ -241,12 +241,8 @@ function makeTenantsFallbackRouter() {
 /* --------------------------------- Routes ---------------------------------- */
 // Auth must exist
 let authRoutes;
-try {
-  authRoutes = require('./routes/authRoutes');
-} catch (e) {
-  console.error('FATAL: Failed to load ./routes/authRoutes.', e);
-  throw e;
-}
+try { authRoutes = require('./routes/authRoutes'); }
+catch (e) { console.error('FATAL: Failed to load ./routes/authRoutes.', e); throw e; }
 
 /** Optional core */
 const accountRoutes         = safeLoadRoutes('./routes/accountRoutes', makeDummyRouter({ settings: {} }));
@@ -283,36 +279,24 @@ const adminTypesRoutes      = safeLoadRoutes('./routes/admin/typesRoutes', makeD
 const adminTemplatesRoutes  = safeLoadRoutes('./routes/admin/templatesRoutes', makeDummyRouter([]));
 
 /* New modules — optional/dummy-friendly */
-const collateralRoutes = safeLoadRoutes(
-  './routes/collateralRoutes',
-  makeDummyRouter([
-    { id: 1, borrower: 'John Doe', item: 'Laptop', model: 'Dell', status: 'Active' },
-    { id: 2, borrower: 'Jane Smith', item: 'Car', model: 'Toyota', status: 'Released' },
-  ])
-);
-const collectionSheetsRoutes = safeLoadRoutes(
-  './routes/collectionSheetsRoutes',
-  makeDummyRouter([
-    { id: 1, type: 'FIELD', date: '2025-08-01', status: 'PENDING' },
-    { id: 2, type: 'OFFICE', date: '2025-08-02', status: 'COMPLETED' },
-  ])
-);
-const savingsTransactionsRoutes = safeLoadRoutes(
-  './routes/savingsTransactionsRoutes',
-  makeDummyRouter([
-    { id: 1, borrower: 'John Doe', type: 'deposit', amount: 150, date: '2025-08-01' },
-    { id: 2, borrower: 'Jane Smith', type: 'withdrawal', amount: 80, date: '2025-08-03' },
-  ])
-);
+const collateralRoutes = safeLoadRoutes('./routes/collateralRoutes', makeDummyRouter([
+  { id: 1, borrower: 'John Doe', item: 'Laptop', model: 'Dell', status: 'Active' },
+  { id: 2, borrower: 'Jane Smith', item: 'Car', model: 'Toyota', status: 'Released' },
+]));
+const collectionSheetsRoutes = safeLoadRoutes('./routes/collectionSheetsRoutes', makeDummyRouter([
+  { id: 1, type: 'FIELD', date: '2025-08-01', status: 'PENDING' },
+  { id: 2, type: 'OFFICE', date: '2025-08-02', status: 'COMPLETED' },
+]));
+const savingsTransactionsRoutes = safeLoadRoutes('./routes/savingsTransactionsRoutes', makeDummyRouter([
+  { id: 1, borrower: 'John Doe', type: 'deposit', amount: 150, date: '2025-08-01' },
+  { id: 2, borrower: 'Jane Smith', type: 'withdrawal', amount: 80, date: '2025-08-03' },
+]));
 
 /* Investors */
-const investorRoutes = safeLoadRoutes(
-  './routes/investorRoute',
-  makeDummyRouter([
-    { id: 1, name: 'Alpha Capital', phone: '255700000001', shares: 10000, totalContribution: 45000000 },
-    { id: 2, name: 'Beta Partners', phone: '255700000002', shares: 5500,  totalContribution: 22000000 },
-  ])
-);
+const investorRoutes = safeLoadRoutes('./routes/investorRoute', makeDummyRouter([
+  { id: 1, name: 'Alpha Capital', phone: '255700000001', shares: 10000, totalContribution: 45000000 },
+  { id: 2, name: 'Beta Partners', phone: '255700000002', shares: 5500,  totalContribution: 22000000 },
+]));
 
 /* E-signatures / Payroll / HR / Expenses / Other Income / Assets / Billing */
 const esignaturesRoutes = safeLoadRoutes('./routes/esignaturesRoutes', makeDummyRouter([
@@ -338,22 +322,28 @@ const assetManagementRoutes = safeLoadRoutes('./routes/assetManagementRoutes', m
 ]));
 const billingRoutes = safeLoadRoutes('./routes/billingRoutes', makeDummyRouter({ plan: 'free', status: 'active', invoices: [] }));
 
-const accountingRoutes = safeLoadRoutes(
-  './routes/accountingRoutes',
-  makeDummyRouter({
-    cashflowMonthly: [
-      { month: 'Jan', inflow: 5000000, outflow: 3200000 },
-      { month: 'Feb', inflow: 6200000, outflow: 4100000 },
-    ],
-    trialBalance: [{ account: '1000 Cash', debit: 1200000, credit: 0 }],
-  })
-);
+const accountingRoutes = safeLoadRoutes('./routes/accountingRoutes', makeDummyRouter({
+  cashflowMonthly: [
+    { month: 'Jan', inflow: 5000000, outflow: 3200000 },
+    { month: 'Feb', inflow: 6200000, outflow: 4100000 },
+  ],
+  trialBalance: [{ account: '1000 Cash', debit: 1200000, credit: 0 }],
+}));
 
 /* Tenants (real file if present; otherwise fallback keeps UI alive) */
 const tenantRoutes = safeLoadRoutes('./routes/tenantRoutes', makeTenantsFallbackRouter());
 
 /* Super-admin: manage all tenants */
 const adminTenantsRoutes = safeLoadRoutes('./routes/admin/tenantsRoutes', makeDummyRouter([]));
+
+/* -------------------- Import guards safely (no hard crash) ----------------- */
+let authenticateUser, ensureTenantActive, requireEntitlement;
+try { ({ authenticateUser } = require('./middleware/authMiddleware')); } catch {}
+try { ({ ensureTenantActive, requireEntitlement } = require('./middleware/tenantGuards')); } catch {}
+
+const auth = authenticateUser ? [authenticateUser] : [];
+const active = ensureTenantActive ? [ensureTenantActive] : [];
+const ent = (k) => (requireEntitlement ? [requireEntitlement(k)] : []);
 
 /* -------------------------- Automatic audit hooks -------------------------- */
 let AuditLog;
@@ -412,54 +402,54 @@ app.use('/api/tenants', tenantRoutes);
 /* Super-admin tenant console */
 app.use('/api/admin/tenants', adminTenantsRoutes);
 
-app.use('/api/borrowers',      borrowerRoutes);
-app.use('/api/loans',          loanRoutes);
-app.use('/api/dashboard',      dashboardRoutes);
-app.use('/api/savings',        savingsRoutes);
-app.use('/api/savings/transactions', savingsTransactionsRoutes);
-app.use('/api/disbursements',  disbursementRoutes);
-app.use('/api/repayments',     repaymentRoutes);
-app.use('/api/reports',        reportRoutes);
-app.use('/api/settings',       settingRoutes);
+/* Feature modules with guards (no-op if guards missing) */
+app.use('/api/borrowers',      ...auth, ...active, borrowerRoutes);
+app.use('/api/loans',          ...auth, ...active, ...ent('loans'),       loanRoutes);
+app.use('/api/dashboard',      ...auth, ...active, dashboardRoutes);
+app.use('/api/savings',        ...auth, ...active, ...ent('savings'),     savingsRoutes);
+app.use('/api/savings/transactions', ...auth, ...active, ...ent('savings'), savingsTransactionsRoutes);
+app.use('/api/disbursements',  ...auth, ...active, ...ent('loans'),       disbursementRoutes);
+app.use('/api/repayments',     ...auth, ...active, ...ent('loans'),       repaymentRoutes);
+app.use('/api/reports',        ...auth, ...active, reportRoutes);
+app.use('/api/settings',       ...auth, ...active, settingRoutes);
 
 /* Admin/ACL */
-app.use('/api/admin/staff',     adminStaffRoutes);
-app.use('/api/permissions',     permissionRoutes);
-app.use('/api/admin/audit',     adminAuditRoutes);
-app.use('/api/audit-logs',      adminAuditRoutes);
-app.use('/api/admin/report-subscriptions', adminReportSubRoutes);
+app.use('/api/admin/staff',     ...auth, ...active, adminStaffRoutes);
+app.use('/api/permissions',     ...auth, ...active, permissionRoutes);
+app.use('/api/admin/audit',     ...auth, ...active, adminAuditRoutes);
+app.use('/api/audit-logs',      ...auth, ...active, adminAuditRoutes);
+app.use('/api/admin/report-subscriptions', ...auth, ...active, adminReportSubRoutes);
 
 /* ✅ NEW admin generic CRUD mounts */
-app.use('/api/admin/types',      adminTypesRoutes);
-app.use('/api/admin/templates',  adminTemplatesRoutes);
+app.use('/api/admin/types',      ...auth, ...active, adminTypesRoutes);
+app.use('/api/admin/templates',  ...auth, ...active, adminTemplatesRoutes);
 
 /* Other core mounts */
-app.use('/api/users',          userRoutes);
-app.use('/api/roles',          roleRoutes);
-app.use('/api/branches',       branchRoutes);
-app.use('/api/user-roles',     userRoleRoutes);
-app.use('/api/user-branches',  userBranchRoutes);
-app.use('/api/loan-products',  loanProductRoutes);
+app.use('/api/users',          ...auth, ...active, userRoutes);
+app.use('/api/roles',          ...auth, ...active, roleRoutes);
+app.use('/api/branches',       ...auth, ...active, branchRoutes);
+app.use('/api/user-roles',     ...auth, ...active, userRoleRoutes);
+app.use('/api/user-branches',  ...auth, ...active, userBranchRoutes);
+app.use('/api/loan-products',  ...auth, ...active, loanProductRoutes);
 
 /* New modules */
-app.use('/api/collateral',           collateralRoutes);
-app.use('/api/collections',          collectionSheetsRoutes);
-app.use('/api/savings-transactions', savingsTransactionsRoutes);
-app.use('/api/investors',            investorRoutes);
-app.use('/api/esignatures',          esignaturesRoutes);
+app.use('/api/collateral',           ...auth, ...active, ...ent('collateral'),   collateralRoutes);
+app.use('/api/collections',          ...auth, ...active, ...ent('collections'),  collectionSheetsRoutes);
+app.use('/api/investors',            ...auth, ...active, ...ent('investors'),    investorRoutes);
+app.use('/api/esignatures',          ...auth, ...active, ...ent('esignatures'),  esignaturesRoutes);
 
 /* HR & Payroll */
-app.use('/api/hr',                   hrRoutes);
-app.use('/api/hr/payroll',           payrollRoutes);
-app.use('/api/payroll',              payrollRoutes);
+app.use('/api/hr',                   ...auth, ...active, hrRoutes);
+app.use('/api/hr/payroll',           ...auth, ...active, ...ent('payroll'),      payrollRoutes);
+app.use('/api/payroll',              ...auth, ...active, ...ent('payroll'),      payrollRoutes);
 
-app.use('/api/expenses',             expensesRoutes);
-app.use('/api/other-income',         otherIncomeRoutes);
-app.use('/api/assets',               assetManagementRoutes);
-app.use('/api/billing',              billingRoutes);
+app.use('/api/expenses',             ...auth, ...active, expensesRoutes);
+app.use('/api/other-income',         ...auth, ...active, otherIncomeRoutes);
+app.use('/api/assets',               ...auth, ...active, ...ent('assets'),       assetManagementRoutes);
+app.use('/api/billing',              ...auth, ...active, billingRoutes);
 
 /* Accounting */
-app.use('/api/accounting',           accountingRoutes);
+app.use('/api/accounting',           ...auth, ...active, ...ent('accounting'),   accountingRoutes);
 
 /* ---------- Misc: metadata (no tenants stub here to avoid conflicts) ------ */
 app.get('/api/meta', (_req, res) => {
@@ -480,28 +470,19 @@ try {
   try { ({ sequelize: sequelize2 } = require('./models')); } catch { ({ sequelize: sequelize2 } = require('../models')); }
   if (sequelize2) {
     app.get('/api/health/db', async (_req, res) => {
-      try {
-        await sequelize2.authenticate();
-        res.json({ db: 'ok', ts: new Date().toISOString() });
-      } catch (e) {
-        console.error('DB health error:', e);
-        res.status(500).json({ db: 'down', error: e.message });
-      }
+      try { await sequelize2.authenticate(); res.json({ db: 'ok', ts: new Date().toISOString() }); }
+      catch (e) { console.error('DB health error:', e); res.status(500).json({ db: 'down', error: e.message }); }
     });
 
     app.get('/api/health/db/hr-tables', async (_req, res) => {
       const expected = [
         'employees','employee_roles','employee_contracts',
-        'leave_types','leave_requests',
-        'attendances',
-        'payroll_runs','payroll_items','payroll_components',
-        'employee_documents',
+        'leave_types','leave_requests','attendances',
+        'payroll_runs','payroll_items','payroll_components','employee_documents',
       ];
       try {
         const [rows] = await sequelize2.query(`
-          SELECT table_name
-          FROM information_schema.tables
-          WHERE table_schema = 'public'
+          SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'
         `);
         const present = new Set(rows.map(r => r.table_name));
         const missing = expected.filter(t => !present.has(t));

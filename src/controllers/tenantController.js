@@ -20,7 +20,6 @@ function getTenantId(req) {
 
 /** In-memory fallback so the page still works without DB tables. */
 const MEMORY_TENANTS = new Map();
-/** Default in-memory record shape (matches GET /me response). */
 function defaultMemoryTenant(id) {
   return {
     id,
@@ -43,7 +42,6 @@ const PLAN_DEFAULTS = {
   premium: { savings: true, loans: true, collections: true, accounting: true, sms: true,  esignatures: true,  payroll: true,  investors: true, assets: true, collateral: true },
 };
 
-/** Helpers */
 const isPgMissingTable = (e) =>
   e?.original?.code === '42P01' || e?.parent?.code === '42P01';
 
@@ -164,34 +162,13 @@ exports.updateMe = async (req, res, next) => {
     const q = [];
     const rep = { id };
 
-    if ('name' in patch) {
-      q.push(`name = :name`);
-      rep.name = patch.name;
-    }
-    if ('planCode' in patch) {
-      q.push(`plan_code = :planCode`);
-      rep.planCode = patch.planCode;
-    }
-    if ('status' in patch) {
-      q.push(`status = :status`);
-      rep.status = patch.status;
-    }
-    if ('trialEndsAt' in patch) {
-      q.push(`trial_ends_at = :trialEndsAt`);
-      rep.trialEndsAt = patch.trialEndsAt;
-    }
-    if ('autoDisableOverdue' in patch) {
-      q.push(`auto_disable_overdue = :autoDisableOverdue`);
-      rep.autoDisableOverdue = patch.autoDisableOverdue;
-    }
-    if ('graceDays' in patch) {
-      q.push(`grace_days = :graceDays`);
-      rep.graceDays = patch.graceDays;
-    }
-    if ('billingEmail' in patch) {
-      q.push(`billing_email = :billingEmail`);
-      rep.billingEmail = patch.billingEmail;
-    }
+    if ('name' in patch)       { q.push(`name = :name`); rep.name = patch.name; }
+    if ('planCode' in patch)   { q.push(`plan_code = :planCode`); rep.planCode = patch.planCode; }
+    if ('status' in patch)     { q.push(`status = :status`); rep.status = patch.status; }
+    if ('trialEndsAt' in patch){ q.push(`trial_ends_at = :trialEndsAt`); rep.trialEndsAt = patch.trialEndsAt; }
+    if ('autoDisableOverdue' in patch) { q.push(`auto_disable_overdue = :autoDisableOverdue`); rep.autoDisableOverdue = patch.autoDisableOverdue; }
+    if ('graceDays' in patch)  { q.push(`grace_days = :graceDays`); rep.graceDays = patch.graceDays; }
+    if ('billingEmail' in patch){ q.push(`billing_email = :billingEmail`); rep.billingEmail = patch.billingEmail; }
 
     if (q.length > 0) {
       await sequelize.query(
@@ -216,8 +193,7 @@ exports.updateMe = async (req, res, next) => {
       if ('planCode' in patch) next.plan_code = patch.planCode;
       if ('status' in patch) next.status = patch.status;
       if ('trialEndsAt' in patch) next.trial_ends_at = patch.trialEndsAt;
-      if ('autoDisableOverdue' in patch)
-        next.auto_disable_overdue = patch.autoDisableOverdue;
+      if ('autoDisableOverdue' in patch) next.auto_disable_overdue = patch.autoDisableOverdue;
       if ('graceDays' in patch) next.grace_days = patch.graceDays;
       if ('billingEmail' in patch) next.billing_email = patch.billingEmail;
       next.updated_at = new Date().toISOString();
@@ -249,71 +225,107 @@ exports.entitlements = async (req, res, next) => {
     }
 
     const modules = { ...base, ...overrides };
-    return res.json({
-      modules,
-      planCode: plan,
-      status: dbTenant?.status || 'trial',
-    });
+    return res.json({ modules, planCode: plan, status: dbTenant?.status || 'trial' });
   } catch (e) {
     if (isPgMissingTable(e)) {
       const mem = MEMORY_TENANTS.get(id) || defaultMemoryTenant(id);
       const plan = (mem.plan_code || 'basic').toLowerCase();
-      return res.json({
-        modules: { ...PLAN_DEFAULTS[plan] },
-        planCode: plan,
-        status: mem.status || 'trial',
-      });
+      return res.json({ modules: { ...PLAN_DEFAULTS[plan] }, planCode: plan, status: mem.status || 'trial' });
     }
     return next(e);
   }
 };
 
-/** NEW: seats/usage limits */
-exports.limits = async (req, res, next) => {
+/* ------------------------- NEW: limits & invoices -------------------------- */
+
+exports.getLimits = async (req, res, next) => {
   const id = getTenantId(req);
   try {
     const rows = await sequelize.query(
-      `select key, value::int as value
-         from public.tenant_limits
-        where tenant_id = :id`,
+      `select key, value_int, value_numeric, value_text, value_json
+         from public.tenant_limits where tenant_id = :id`,
       { replacements: { id }, type: QueryTypes.SELECT }
     );
-    return res.json(Object.fromEntries(rows.map(r => [r.key, r.value])));
-  } catch (e) {
-    if (isPgMissingTable(e)) {
-      // sensible defaults when table isn't there yet
-      const defaults = {
-        seats: Number(process.env.DEFAULT_SEATS || 5),
-        borrowers: Number(process.env.DEFAULT_BORROWER_CAP || 10000),
-        storage_mb: Number(process.env.DEFAULT_STORAGE_MB || 5120),
-      };
-      return res.json(defaults);
+    const obj = {};
+    for (const r of rows) {
+      const v = r.value_int ?? (r.value_numeric != null ? Number(r.value_numeric)
+                : (r.value_text ?? r.value_json ?? null));
+      obj[r.key] = v;
     }
+    return res.json(obj);
+  } catch (e) {
+    if (isPgMissingTable(e)) return res.json({});
     return next(e);
   }
 };
 
-/** NEW: invoices list */
-exports.invoices = async (req, res, next) => {
+exports.setLimits = async (req, res, next) => {
+  const id = getTenantId(req);
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const entries = Object.entries(body);
+  if (!entries.length) return res.json({ ok: true, limits: {} });
+
+  try {
+    const values = [];
+    for (const [key, val] of entries) {
+      let vi=null, vn=null, vt=null, vj=null;
+      if (typeof val === 'number' && Number.isFinite(val)) {
+        if (Number.isInteger(val)) vi = val; else vn = val;
+      } else if (typeof val === 'string') vt = val;
+      else vj = JSON.stringify(val);
+      values.push({ key, vi, vn, vt, vj });
+    }
+
+    const chunks = values.map((_, i) => `(:id,:k${i},:vi${i},:vn${i},:vt${i},:vj${i},now(),now())`);
+    const repl = { id };
+    values.forEach((v, i) => {
+      repl[`k${i}`]  = v.key;
+      repl[`vi${i}`] = v.vi;
+      repl[`vn${i}`] = v.vn;
+      repl[`vt${i}`] = v.vt;
+      repl[`vj${i}`] = v.vj;
+    });
+
+    await sequelize.query(`
+      insert into public.tenant_limits
+        (tenant_id,key,value_int,value_numeric,value_text,value_json,created_at,updated_at)
+      values ${chunks.join(',')}
+      on conflict (tenant_id,key) do update set
+        value_int=excluded.value_int,
+        value_numeric=excluded.value_numeric,
+        value_text=excluded.value_text,
+        value_json=excluded.value_json,
+        updated_at=now()
+    `, { replacements: repl });
+
+    return exports.getLimits(req, res, next);
+  } catch (e) {
+    if (isPgMissingTable(e)) return res.json({});
+    return next(e);
+  }
+};
+
+exports.listInvoices = async (req, res, next) => {
   const id = getTenantId(req);
   try {
     const rows = await sequelize.query(
-      `select id, number, amount_cents, currency, due_date, status, created_at
+      `select id, number, amount_cents, currency, status, due_date, issued_at, paid_at
          from public.invoices
         where tenant_id = :id
-        order by created_at desc`,
+        order by coalesce(issued_at, created_at) desc
+        limit 250`,
       { replacements: { id }, type: QueryTypes.SELECT }
     );
     return res.json(rows);
   } catch (e) {
-    if (isPgMissingTable(e)) return res.json([]); // fallback: no invoices yet
+    if (isPgMissingTable(e)) return res.json([]);
     return next(e);
   }
 };
 
+/* ------------------------------- Billing cron ------------------------------ */
 exports.cronCheck = async (_req, res, next) => {
   try {
-    // 1) Past-due invoices beyond grace -> suspend (ignore if tables missing)
     try {
       await sequelize.query(`
         with past_due as (
@@ -331,11 +343,8 @@ exports.cronCheck = async (_req, res, next) => {
            and t.auto_disable_overdue = true
            and t.status <> 'suspended';
       `);
-    } catch (e) {
-      if (!isPgMissingTable(e)) throw e;
-    }
+    } catch (e) { if (!isPgMissingTable(e)) throw e; }
 
-    // 2) Expired trials -> suspend
     try {
       await sequelize.query(`
         update public.tenants
@@ -344,12 +353,12 @@ exports.cronCheck = async (_req, res, next) => {
            and trial_ends_at is not null
            and trial_ends_at < current_date;
       `);
-    } catch (e) {
-      if (!isPgMissingTable(e)) throw e;
-    }
+    } catch (e) { if (!isPgMissingTable(e)) throw e; }
 
-    return res.json({ ok: true, ts: new Date().toISOString() });
-  } catch (e) {
-    return next(e);
-  }
+    res.json({ ok: true, ts: new Date().toISOString() });
+  } catch (e) { next(e); }
 };
+
+/* -------------------- optional backward-compatible aliases ----------------- */
+exports.limits    = exports.getLimits;
+exports.invoices  = exports.listInvoices;
