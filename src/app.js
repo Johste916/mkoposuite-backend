@@ -168,7 +168,6 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
 /* ---------- Fallback tenants router (in-memory; keeps UI working) ---------- */
 function makeTenantsFallbackRouter() {
   const r = express.Router();
-
   const MEM = {};
   function memTenant(id) {
     if (!MEM[id]) {
@@ -236,7 +235,6 @@ function makeTenantsFallbackRouter() {
   });
 
   r.post('/admin/billing/cron-check', (_req, res) => res.json({ ok: true }));
-
   return r;
 }
 
@@ -354,6 +352,9 @@ const accountingRoutes = safeLoadRoutes(
 /* Tenants (real file if present; otherwise fallback keeps UI alive) */
 const tenantRoutes = safeLoadRoutes('./routes/tenantRoutes', makeTenantsFallbackRouter());
 
+/* Super-admin: manage all tenants */
+const adminTenantsRoutes = safeLoadRoutes('./routes/admin/tenantsRoutes', makeDummyRouter([]));
+
 /* -------------------------- Automatic audit hooks -------------------------- */
 let AuditLog;
 try { ({ AuditLog } = require('./models')); } catch { try { ({ AuditLog } = require('../models')); } catch {} }
@@ -408,6 +409,9 @@ app.use('/api/account', accountRoutes);
 /* ✅ Single canonical tenants mount */
 app.use('/api/tenants', tenantRoutes);
 
+/* Super-admin tenant console */
+app.use('/api/admin/tenants', adminTenantsRoutes);
+
 app.use('/api/borrowers',      borrowerRoutes);
 app.use('/api/loans',          loanRoutes);
 app.use('/api/dashboard',      dashboardRoutes);
@@ -457,7 +461,7 @@ app.use('/api/billing',              billingRoutes);
 /* Accounting */
 app.use('/api/accounting',           accountingRoutes);
 
-/* ---------- Misc: metadata (removed old tenants stub to avoid conflicts) --- */
+/* ---------- Misc: metadata (no tenants stub here to avoid conflicts) ------ */
 app.get('/api/meta', (_req, res) => {
   res.json({
     name: 'MkopoSuite API',

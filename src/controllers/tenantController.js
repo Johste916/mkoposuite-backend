@@ -88,7 +88,6 @@ function cleanPatch(body = {}) {
   if (body.trialEndsAt === '' || body.trialEndsAt === null) {
     out.trialEndsAt = null;
   } else if (typeof body.trialEndsAt === 'string') {
-    // light ISO validation
     const d = Date.parse(body.trialEndsAt);
     if (!Number.isNaN(d)) out.trialEndsAt = body.trialEndsAt.slice(0, 10);
   }
@@ -132,7 +131,9 @@ function toResponseShape(row) {
   };
 }
 
-/** --- Handlers --- */
+/* -------------------------------------------------------------------------- */
+/* Handlers                                                                   */
+/* -------------------------------------------------------------------------- */
 
 exports.me = async (req, res, next) => {
   const id = getTenantId(req);
@@ -263,6 +264,49 @@ exports.entitlements = async (req, res, next) => {
         status: mem.status || 'trial',
       });
     }
+    return next(e);
+  }
+};
+
+/** NEW: seats/usage limits */
+exports.limits = async (req, res, next) => {
+  const id = getTenantId(req);
+  try {
+    const rows = await sequelize.query(
+      `select key, value::int as value
+         from public.tenant_limits
+        where tenant_id = :id`,
+      { replacements: { id }, type: QueryTypes.SELECT }
+    );
+    return res.json(Object.fromEntries(rows.map(r => [r.key, r.value])));
+  } catch (e) {
+    if (isPgMissingTable(e)) {
+      // sensible defaults when table isn't there yet
+      const defaults = {
+        seats: Number(process.env.DEFAULT_SEATS || 5),
+        borrowers: Number(process.env.DEFAULT_BORROWER_CAP || 10000),
+        storage_mb: Number(process.env.DEFAULT_STORAGE_MB || 5120),
+      };
+      return res.json(defaults);
+    }
+    return next(e);
+  }
+};
+
+/** NEW: invoices list */
+exports.invoices = async (req, res, next) => {
+  const id = getTenantId(req);
+  try {
+    const rows = await sequelize.query(
+      `select id, number, amount_cents, currency, due_date, status, created_at
+         from public.invoices
+        where tenant_id = :id
+        order by created_at desc`,
+      { replacements: { id }, type: QueryTypes.SELECT }
+    );
+    return res.json(rows);
+  } catch (e) {
+    if (isPgMissingTable(e)) return res.json([]); // fallback: no invoices yet
     return next(e);
   }
 };
