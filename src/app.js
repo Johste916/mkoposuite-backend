@@ -165,6 +165,81 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
   return dummyRouter;
 }
 
+/* ---------- Fallback tenants router (in-memory; keeps UI working) ---------- */
+function makeTenantsFallbackRouter() {
+  const r = express.Router();
+
+  const MEM = {};
+  function memTenant(id) {
+    if (!MEM[id]) {
+      MEM[id] = {
+        id,
+        name: 'Organization',
+        status: 'trial',
+        plan_code: 'basic',
+        trial_ends_at: null,
+        auto_disable_overdue: false,
+        grace_days: 7,
+        billing_email: '',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+    }
+    return MEM[id];
+  }
+
+  r.get('/me', (req, res) => {
+    const id = req.headers['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000000';
+    const t = memTenant(id);
+    const today = new Date().toISOString().slice(0, 10);
+    const trialLeft = t.trial_ends_at ? Math.ceil((Date.parse(t.trial_ends_at) - Date.parse(today)) / 86400000) : null;
+    res.json({
+      id: t.id,
+      name: t.name,
+      status: t.status,
+      planCode: (t.plan_code || 'basic').toLowerCase(),
+      trialEndsAt: t.trial_ends_at,
+      trialDaysLeft: trialLeft,
+      autoDisableOverdue: !!t.auto_disable_overdue,
+      graceDays: t.grace_days,
+      billingEmail: t.billing_email,
+      createdAt: t.created_at,
+      updatedAt: t.updated_at,
+    });
+  });
+
+  r.patch('/me', (req, res) => {
+    const id = req.headers['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000000';
+    const t = memTenant(id);
+    const b = req.body || {};
+    if (typeof b.name === 'string') t.name = b.name.trim();
+    if (typeof b.planCode === 'string') t.plan_code = b.planCode.toLowerCase();
+    if (typeof b.status === 'string') t.status = b.status.trim();
+    if (b.trialEndsAt === '' || b.trialEndsAt === null) t.trial_ends_at = null;
+    else if (typeof b.trialEndsAt === 'string') t.trial_ends_at = b.trialEndsAt.slice(0, 10);
+    if (typeof b.autoDisableOverdue === 'boolean') t.auto_disable_overdue = b.autoDisableOverdue;
+    if (!Number.isNaN(Number(b.graceDays))) t.grace_days = Math.max(0, Math.min(90, Number(b.graceDays)));
+    if (typeof b.billingEmail === 'string') t.billing_email = b.billingEmail.trim();
+    t.updated_at = new Date().toISOString();
+    res.json({ ok: true, tenant: t });
+  });
+
+  r.get('/me/entitlements', (_req, res) => {
+    res.json({
+      modules: {
+        savings: true, loans: true, collections: true, accounting: true,
+        sms: false, esignatures: false, payroll: false, investors: true, assets: true, collateral: true,
+      },
+      planCode: 'basic',
+      status: 'trial',
+    });
+  });
+
+  r.post('/admin/billing/cron-check', (_req, res) => res.json({ ok: true }));
+
+  return r;
+}
+
 /* --------------------------------- Routes ---------------------------------- */
 // Auth must exist
 let authRoutes;
@@ -276,6 +351,9 @@ const accountingRoutes = safeLoadRoutes(
   })
 );
 
+/* Tenants (real file if present; otherwise fallback keeps UI alive) */
+const tenantRoutes = safeLoadRoutes('./routes/tenantRoutes', makeTenantsFallbackRouter());
+
 /* -------------------------- Automatic audit hooks -------------------------- */
 let AuditLog;
 try { ({ AuditLog } = require('./models')); } catch { try { ({ AuditLog } = require('../models')); } catch {} }
@@ -327,6 +405,9 @@ app.use('/api/login',  authRoutes);
 
 app.use('/api/account', accountRoutes);
 
+/* ✅ Single canonical tenants mount */
+app.use('/api/tenants', tenantRoutes);
+
 app.use('/api/borrowers',      borrowerRoutes);
 app.use('/api/loans',          loanRoutes);
 app.use('/api/dashboard',      dashboardRoutes);
@@ -376,7 +457,7 @@ app.use('/api/billing',              billingRoutes);
 /* Accounting */
 app.use('/api/accounting',           accountingRoutes);
 
-/* ---------- Misc: metadata & entitlements stubs ---------------------------- */
+/* ---------- Misc: metadata (removed old tenants stub to avoid conflicts) --- */
 app.get('/api/meta', (_req, res) => {
   res.json({
     name: 'MkopoSuite API',
@@ -384,9 +465,6 @@ app.get('/api/meta', (_req, res) => {
     commit: process.env.GIT_COMMIT || undefined,
     time: new Date().toISOString(),
   });
-});
-app.get('/api/tenants/me/entitlements', (_req, res) => {
-  res.json({ modules: {}, status: 'ok' });
 });
 
 /* -------------------------------- Healthchecks ----------------------------- */
