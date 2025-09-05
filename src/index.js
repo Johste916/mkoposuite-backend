@@ -116,6 +116,11 @@ async function ensureCoreTables() {
   if (db.LoanSchedule)  await db.LoanSchedule.sync({ alter: true });
   if (db.LoanFee)       await db.LoanFee.sync({ alter: true });
 
+  // ✅ Accounting (for reports like TB/PL/Cashflow)
+  if (db.Account)       await db.Account.sync({ alter: true });
+  if (db.JournalEntry)  await db.JournalEntry.sync({ alter: true });
+  if (db.LedgerEntry)   await db.LedgerEntry.sync({ alter: true });
+
   console.log('✅ CORE tables ready');
 }
 
