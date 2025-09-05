@@ -238,6 +238,24 @@ function makeTenantsFallbackRouter() {
   return r;
 }
 
+/* --------------------- Fallback org router (limits/invoices) -------------------- */
+function makeOrgFallbackRouter() {
+  const r = express.Router();
+  r.get('/limits', (_req, res) => {
+    res.json({
+      plan: { id: 'fallback', name: 'Basic', code: 'basic' },
+      limits: { borrowers: 1000, loans: 2000 },
+      entitlements: [
+        'savings.view','accounting.view','collateral.view','loans.view',
+        'investors.view','collections.view','assets.view'
+      ],
+      usage: { borrowers: 0, loans: 0 },
+    });
+  });
+  r.get('/invoices', (_req, res) => res.json({ invoices: [] }));
+  return r;
+}
+
 /* --------------------------------- Routes ---------------------------------- */
 // Auth must exist
 let authRoutes;
@@ -333,6 +351,9 @@ const accountingRoutes = safeLoadRoutes('./routes/accountingRoutes', makeDummyRo
 /* Tenants (real file if present; otherwise fallback keeps UI alive) */
 const tenantRoutes = safeLoadRoutes('./routes/tenantRoutes', makeTenantsFallbackRouter());
 
+/* ✅ NEW: Organization (limits & invoices) */
+const orgRoutes = safeLoadRoutes('./routes/orgRoutes', makeOrgFallbackRouter());
+
 /* Super-admin: manage all tenants */
 const adminTenantsRoutes = safeLoadRoutes('./routes/admin/tenantsRoutes', makeDummyRouter([]));
 
@@ -398,6 +419,9 @@ app.use('/api/account', accountRoutes);
 
 /* ✅ Single canonical tenants mount */
 app.use('/api/tenants', tenantRoutes);
+
+/* ✅ NEW: Organization module (limits/invoices) */
+app.use('/api/org', ...auth, ...active, orgRoutes);
 
 /* Super-admin tenant console */
 app.use('/api/admin/tenants', adminTenantsRoutes);

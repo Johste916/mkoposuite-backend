@@ -85,6 +85,11 @@ db.Payslip      = tryLoad(() => require('./payslip')(sequelize, DataTypes),     
 db.LeaveRequest = tryLoad(() => require('./leaveRequest')(sequelize, DataTypes), 'LeaveRequest');
 db.Contract     = tryLoad(() => require('./contract')(sequelize, DataTypes),     'Contract');
 
+/* ✅ Plans & Entitlements (new; safe if files/tables missing) */
+db.Plan             = tryLoad(() => require('./plan')(sequelize, DataTypes),             'Plan');
+db.Entitlement      = tryLoad(() => require('./entitlement')(sequelize, DataTypes),      'Entitlement');
+db.PlanEntitlement  = tryLoad(() => require('./planentitlement')(sequelize, DataTypes),  'PlanEntitlement');
+
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
   db.User.belongsTo(db.Branch,   { foreignKey: 'branchId' });
@@ -259,6 +264,18 @@ if (db.Contract && db.Employee) {
   const fk = hasAttr(db.Contract, 'employee_id') ? 'employee_id' : 'employeeId';
   db.Contract.belongsTo(db.Employee, { foreignKey: fk, as: 'employee' });
   db.Employee.hasMany(db.Contract,   { foreignKey: fk, as: 'contracts' });
+}
+
+/* ---------- Plans & Entitlements associations (guarded) ---------- */
+if (db.Plan && db.Entitlement) {
+  if (db.PlanEntitlement) {
+    db.Plan.belongsToMany(db.Entitlement, { through: db.PlanEntitlement, foreignKey: 'plan_id', otherKey: 'entitlement_id', as: 'entitlements' });
+    db.Entitlement.belongsToMany(db.Plan, { through: db.PlanEntitlement, foreignKey: 'entitlement_id', otherKey: 'plan_id', as: 'plans' });
+  } else {
+    // Even if the join model file is missing, this keeps codepaths working if tables exist
+    db.Plan.belongsToMany(db.Entitlement, { through: 'plan_entitlements', foreignKey: 'plan_id', otherKey: 'entitlement_id', as: 'entitlements' });
+    db.Entitlement.belongsToMany(db.Plan, { through: 'plan_entitlements', foreignKey: 'entitlement_id', otherKey: 'plan_id', as: 'plans' });
+  }
 }
 
 db.sequelize = sequelize;
