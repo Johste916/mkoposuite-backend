@@ -38,7 +38,7 @@ async function authenticateUser(req, res, next) {
 
     const secret = process.env.JWT_SECRET || process.env.JWT_KEY;
     if (!secret) {
-      // keep your current behavior (explicit error) to avoid silent auth bypass
+      // explicit error to avoid silent auth bypass
       console.error('JWT secret is not set (JWT_SECRET or JWT_KEY).');
       return res.status(500).json({ error: 'Server misconfigured: JWT secret missing' });
     }
@@ -123,8 +123,20 @@ async function authenticateUser(req, res, next) {
       email: dbUser?.email ?? payload.email ?? null,
       name: dbUser?.name ?? dbUser?.fullName ?? payload.name ?? payload.fullName ?? null,
       role: roleName || null,
-      tenantId: dbUser?.tenantId ?? payload.tenantId ?? null,
-      branchId: dbUser?.branchId ?? payload.branchId ?? null,
+      // 👇 broaden tenant/branch extraction so downstream guards see it
+      tenantId:
+        dbUser?.tenantId ??
+        payload.tenantId ??
+        payload.tenant_id ??
+        payload.tid ??
+        payload.tenant ??
+        null,
+      branchId:
+        dbUser?.branchId ??
+        payload.branchId ??
+        payload.branch_id ??
+        payload.bid ??
+        null,
       isActive: (dbUser?.isActive ?? dbUser?.status) ?? payload.isActive ?? true,
     };
 
@@ -259,5 +271,5 @@ module.exports = {
   authenticateUser,
   requireAuth,
   authorizeRoles,
-  me, // <— add this export and mount it on /api/auth/me
+  me, // export for /api/auth/me
 };
