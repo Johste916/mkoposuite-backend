@@ -8,11 +8,34 @@ function getModels(req) {
   catch { return null; }
 }
 
+const DEFAULT_LIMITS = {
+  basic:      { borrowers: 1000,  loans: 2000,  sms_credits: 0 },
+  pro:        { borrowers: 10000, loans: 20000, sms_credits: 1000 },
+  premium:    { borrowers: null,  loans: null,  sms_credits: null }, // unlimited
+  enterprise: { borrowers: null,  loans: null,  sms_credits: null }, // alias of premium
+};
+
+const ENT_KEYS = [
+  'savings.view','accounting.view','payroll.view','collateral.view',
+  'loans.view','sms.send','investors.view','collections.view',
+  'esign.view','assets.view','reports.view'
+];
+const BASIC_KEYS = new Set([
+  'savings.view','accounting.view','collateral.view',
+  'loans.view','investors.view','collections.view','assets.view'
+]);
+
+function normalizePlanCode(code) {
+  const c = (code || 'basic').toLowerCase();
+  // Treat premium as enterprise interchangeably
+  if (c === 'enterprise') return 'premium';
+  return c;
+}
+
 async function getTenantPlanInfo(models, tenantId) {
   const q = models?.sequelize;
   if (!q) return { planCode: 'basic', planId: null };
 
-  // Try to read the tenant's plan (works whether columns exist or not)
   try {
     const [rows] = await q.query(`
       SELECT plan_code, plan_id
@@ -22,7 +45,7 @@ async function getTenantPlanInfo(models, tenantId) {
     `, { bind: [tenantId] });
     if (rows?.length) {
       return {
-        planCode: (rows[0].plan_code || 'basic')?.toLowerCase() || 'basic',
+        planCode: normalizePlanCode(rows[0].plan_code || 'basic'),
         planId: rows[0].plan_id || null
       };
     }
@@ -35,10 +58,16 @@ async function getPlanRecord(models, { planCode, planId }) {
   if (!q) return null;
   try {
     if (planId) {
-      const [rows] = await q.query(`SELECT id, code, name, limits FROM public.plans WHERE id = $1 LIMIT 1`, { bind: [planId] });
+      const [rows] = await q.query(
+        `SELECT id, code, name, limits FROM public.plans WHERE id = $1 LIMIT 1`,
+        { bind: [planId] }
+      );
       if (rows?.length) return rows[0];
     }
-    const [rows2] = await q.query(`SELECT id, code, name, limits FROM public.plans WHERE LOWER(code) = LOWER($1) LIMIT 1`, { bind: [planCode] });
+    const [rows2] = await q.query(
+      `SELECT id, code, name, limits FROM public.plans WHERE LOWER(code) = LOWER($1) LIMIT 1`,
+      { bind: [planCode] }
+    );
     return rows2?.[0] || null;
   } catch (_) { return null; }
 }
@@ -68,31 +97,36 @@ router.get('/limits', async (req, res) => {
     const tenantId = req.headers['x-tenant-id'] || null;
 
     const tp = await getTenantPlanInfo(models, tenantId);
-    const plan = await getPlanRecord(models, tp);
+    const planCode = normalizePlanCode(tp.planCode);
+    const plan = await getPlanRecord(models, { planCode, planId: tp.planId });
 
-    if (!plan) return res.ok({
-      plan: { id: null, code: (tp.planCode || 'basic'), name: (tp.planCode || 'basic').toUpperCase() },
-      limits: {},
-      usage: {},
-    });
+    // DB-backed plan if present; otherwise synthetic plan with defaults
+    const effective = plan || {
+      id: null,
+      code: planCode,
+      name: planCode.charAt(0).toUpperCase() + planCode.slice(1),
+      limits: DEFAULT_LIMITS[planCode] || {},
+    };
 
     // Optionally compute usage (safe fallbacks)
     let borrowers = 0, loans = 0;
     try {
-      const q = models.sequelize;
-      const [b] = await q.query(`SELECT COUNT(*)::int AS c FROM public.borrowers`);
-      const [l] = await q.query(`SELECT COUNT(*)::int AS c FROM public.loans`);
-      borrowers = b?.[0]?.c || 0;
-      loans = l?.[0]?.c || 0;
+      const q = models?.sequelize;
+      if (q) {
+        const [b] = await q.query(`SELECT COUNT(*)::int AS c FROM public.borrowers`);
+        const [l] = await q.query(`SELECT COUNT(*)::int AS c FROM public.loans`);
+        borrowers = b?.[0]?.c || 0;
+        loans = l?.[0]?.c || 0;
+      }
     } catch {}
 
-    res.ok({
-      plan: { id: plan.id, code: plan.code, name: plan.name },
-      limits: plan.limits || {},
+    res.json({
+      plan: { id: effective.id, code: effective.code, name: effective.name },
+      limits: effective.limits || {},
       usage: { borrowers, loans },
     });
   } catch (e) {
-    res.fail(500, e.message || 'Failed to load limits');
+    res.status(500).json({ error: e.message || 'Failed to load limits' });
   }
 });
 
@@ -101,30 +135,43 @@ router.get('/entitlements', async (req, res) => {
   try {
     const models = getModels(req);
     const tp = await getTenantPlanInfo(models, req.headers['x-tenant-id'] || null);
-    const plan = await getPlanRecord(models, tp);
+    const planCode = normalizePlanCode(tp.planCode);
+    const plan = await getPlanRecord(models, { planCode, planId: tp.planId });
 
-    if (!plan) return res.ok({ modules: entKeysToModules([]), planCode: tp.planCode || 'basic', status: 'active' });
+    // If DB join exists, use it; otherwise synthesize from defaults
+    if (plan && models?.sequelize) {
+      try {
+        const [rows] = await models.sequelize.query(`
+          SELECT e.key
+          FROM public.plan_entitlements pe
+          JOIN public.entitlements e ON e.id = pe.entitlement_id
+          WHERE pe.plan_id = $1
+        `, { bind: [plan.id] });
+        return res.json({
+          modules: entKeysToModules(rows.map(r => r.key)),
+          planCode: plan.code,
+          status: 'active'
+        });
+      } catch (_) {}
+    }
 
-    let keys = [];
-    try {
-      const [rows] = await models.sequelize.query(`
-        SELECT e.key
-        FROM public.plan_entitlements pe
-        JOIN public.entitlements e ON e.id = pe.entitlement_id
-        WHERE pe.plan_id = $1
-      `, { bind: [plan.id] });
-      keys = rows.map(r => r.key);
-    } catch {}
-
-    res.ok({ modules: entKeysToModules(keys), planCode: plan.code, status: 'active' });
+    // Fallback: basic subset, pro/premium all
+    const keys = planCode === 'basic'
+      ? ENT_KEYS.filter(k => BASIC_KEYS.has(k))
+      : ENT_KEYS.slice();
+    res.json({
+      modules: entKeysToModules(keys),
+      planCode,
+      status: 'active'
+    });
   } catch (e) {
-    res.fail(500, e.message || 'Failed to load entitlements');
+    res.status(500).json({ error: e.message || 'Failed to load entitlements' });
   }
 });
 
-/** GET /api/org/invoices  (placeholder; real billing system can replace) */
+/** GET /api/org/invoices */
 router.get('/invoices', async (_req, res) => {
-  res.ok({ invoices: [] });
+  res.json({ invoices: [] });
 });
 
 module.exports = router;
