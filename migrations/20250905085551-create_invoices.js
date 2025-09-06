@@ -1,50 +1,34 @@
 'use strict';
+
 module.exports = {
   async up(queryInterface, Sequelize) {
-    await queryInterface.createTable(
-      { tableName: 'invoices', schema: 'public' },
-      {
-        id:         { type: Sequelize.UUID, primaryKey: true, allowNull: false, defaultValue: Sequelize.UUIDV4 },
-        tenant_id:  {
-          type: Sequelize.UUID, allowNull: false,
-          references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' },
-          onUpdate: 'CASCADE', onDelete: 'CASCADE',
-        },
-        number:       { type: Sequelize.STRING(64), allowNull: false },
-        currency:     { type: Sequelize.STRING(3),  allowNull: false, defaultValue: 'USD' },
-        amount_cents: { type: Sequelize.INTEGER,    allowNull: false },
-        status: {
-          type: Sequelize.ENUM('draft','open','past_due','paid','void'),
-          allowNull: false,
-          defaultValue: 'draft',
-        },
-        due_date:   { type: Sequelize.DATEONLY },
-        issued_at:  { type: Sequelize.DATE },
-        paid_at:    { type: Sequelize.DATE },
-        description:{ type: Sequelize.TEXT },
-        metadata:   { type: Sequelize.JSONB },
+    // create if missing
+    await queryInterface.createTable('invoices', {
+      id:          { type: Sequelize.UUID, primaryKey: true, defaultValue: Sequelize.literal('gen_random_uuid()') },
+      tenant_id:   { type: Sequelize.UUID, allowNull: false },
+      number:      { type: Sequelize.STRING(60), allowNull: false, unique: true },
+      amount_cents:{ type: Sequelize.INTEGER, allowNull: false },
+      currency:    { type: Sequelize.STRING(10), allowNull: false, defaultValue: 'USD' },
+      due_date:    { type: Sequelize.DATEONLY, allowNull: true },
+      status:      { type: Sequelize.STRING(30), allowNull: false, defaultValue: 'open' }, // open|paid|void
+      meta:        { type: Sequelize.JSONB, allowNull: true },
+      created_at:  { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.fn('NOW') },
+      updated_at:  { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.fn('NOW') },
+    });
+    await queryInterface.addIndex('invoices', ['tenant_id', 'status'], { name: 'invoices_tenant_status_idx' });
 
-        created_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.fn('now') },
-        updated_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.fn('now') },
-      }
-    );
-
-    await queryInterface.addIndex({ tableName: 'invoices', schema: 'public' }, ['tenant_id']);
-    await queryInterface.addIndex({ tableName: 'invoices', schema: 'public' }, ['tenant_id', 'status']);
-    await queryInterface.addConstraint(
-      { tableName: 'invoices', schema: 'public' },
-      { fields: ['tenant_id', 'number'], type: 'unique', name: 'invoices_tenant_number_uniq' }
-    );
+    // ensure feature_flags composite uniqueness if not already present
+    try {
+      await queryInterface.addConstraint('feature_flags', {
+        fields: ['tenant_id', 'key'],
+        type: 'unique',
+        name: 'feature_flags_tenant_key_uindex'
+      });
+    } catch {}
   },
 
   async down(queryInterface) {
-    await queryInterface.dropTable({ tableName: 'invoices', schema: 'public' });
-    await queryInterface.sequelize.query(`
-      DO $$
-      BEGIN
-        IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'enum_invoices_status') THEN
-          DROP TYPE "enum_invoices_status";
-        END IF;
-      END$$;`);
-  },
+    try { await queryInterface.removeIndex('invoices', 'invoices_tenant_status_idx'); } catch {}
+    await queryInterface.dropTable('invoices');
+  }
 };
