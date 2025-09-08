@@ -170,7 +170,6 @@ function makeTenantsFallbackRouter() {
   const r = express.Router();
   const MEM = new Map();
 
-  // Seed a couple of demo tenants so the UI isn't empty in dev
   function ensureSeed() {
     if (MEM.size) return;
     const now = new Date().toISOString();
@@ -194,7 +193,7 @@ function makeTenantsFallbackRouter() {
         name: 'Beta Microcredit',
         status: 'trial',
         plan_code: 'basic',
-        trial_ends_at: new Date(Date.now()+10*86400000).toISOString().slice(0,10),
+        trial_ends_at: new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10),
         auto_disable_overdue: false,
         grace_days: 7,
         billing_email: 'accounts@beta.test',
@@ -231,7 +230,7 @@ function makeTenantsFallbackRouter() {
   }
 
   const toApi = (t) => {
-    const today = new Date().toISOString().slice(0,10);
+    const today = new Date().toISOString().slice(0, 10);
     const trialLeft = t.trial_ends_at ? Math.ceil((Date.parse(t.trial_ends_at) - Date.parse(today)) / 86400000) : null;
     return {
       id: t.id,
@@ -251,7 +250,6 @@ function makeTenantsFallbackRouter() {
     };
   };
 
-  /* ---------- NEW: list so /api/tenants works in dev ---------- */
   r.get('/', (_req, res) => {
     ensureSeed();
     const list = Array.from(MEM.values()).map(toApi);
@@ -259,7 +257,6 @@ function makeTenantsFallbackRouter() {
     res.json(list);
   });
 
-  /* ---------- keep existing "self" endpoints ---------- */
   r.get('/me', (req, res) => {
     const id = req.headers['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000000';
     res.json(toApi(memTenant(id)));
@@ -282,24 +279,23 @@ function makeTenantsFallbackRouter() {
     res.json({ ok: true, tenant: toApi(t) });
   });
 
-  /* ---------- NEW: details/patch by id so Manage drawer Save works ---------- */
   r.get('/:id', (req, res) => {
     const t = memTenant(String(req.params.id));
     res.json(toApi(t));
   });
+
   r.patch('/:id', (req, res) => {
     const t = memTenant(String(req.params.id));
     const b = req.body || {};
     if (typeof b.planCode === 'string') t.plan_code = b.planCode.toLowerCase();
     if ('seats' in b && (b.seats === null || Number.isFinite(Number(b.seats)))) t.seats = b.seats === null ? null : Number(b.seats);
     if (typeof b.billingEmail === 'string') t.billing_email = b.billingEmail.trim();
-    if ('trialEndsAt' in b) t.trial_ends_at = b.trialEndsAt ? String(b.trialEndsAt).slice(0,10) : null;
+    if ('trialEndsAt' in b) t.trial_ends_at = b.trialEndsAt ? String(b.trialEndsAt).slice(0, 10) : null;
     if (typeof b.status === 'string') t.status = b.status.trim().toLowerCase();
     t.updated_at = new Date().toISOString();
     res.json({ ok: true, tenant: toApi(t) });
   });
 
-  /* ---------- NEW: stats + invoices endpoints used by the UI ---------- */
   r.get('/stats', (_req, res) => {
     ensureSeed();
     const arr = Array.from(MEM.values()).map(t => ({
@@ -325,6 +321,19 @@ function makeTenantsFallbackRouter() {
   });
 
   r.post('/admin/billing/cron-check', (_req, res) => res.json({ ok: true }));
+  return r;
+}
+
+/* -------- Tenants compat shim: only special endpoints (no "/" or "/:id") --- */
+function makeTenantsCompatRouter() {
+  const r = express.Router();
+  // stats for lists/summary cards
+  r.get('/stats', (_req, res) => res.json({ items: [] }));
+  // invoices display & sync
+  r.get('/:id/invoices', (_req, res) => res.json({ invoices: [] }));
+  r.post('/:id/invoices/sync', (_req, res) => res.json({ ok: true }));
+  // subscription (avoid 404s)
+  r.get('/:id/subscription', (_req, res) => res.json({ subscription: null }));
   return r;
 }
 
@@ -441,6 +450,9 @@ const accountingRoutes = safeLoadRoutes('./routes/accountingRoutes', makeDummyRo
 /* Tenants (real file if present; otherwise fallback keeps UI alive) */
 const tenantRoutes = safeLoadRoutes('./routes/tenantRoutes', makeTenantsFallbackRouter());
 
+/* ✅ NEW: Tenants compat shim (stats + invoices across multiple bases) */
+const tenantsCompatRoutes = safeLoadRoutes('./routes/tenantsCompatRoutes', makeTenantsCompatRouter());
+
 /* ✅ NEW: Organization (limits & invoices) */
 const orgRoutes = safeLoadRoutes('./routes/orgRoutes', makeOrgFallbackRouter());
 
@@ -510,6 +522,13 @@ app.use('/api/auth',   authRoutes);
 app.use('/api/login',  authRoutes);
 
 app.use('/api/account', accountRoutes);
+
+/* ✅ Compat shim mounts FIRST so it handles stats/invoices across bases */
+app.use('/api/tenants', tenantsCompatRoutes);
+app.use('/api/system/tenants', tenantsCompatRoutes);
+app.use('/api/orgs', tenantsCompatRoutes);
+app.use('/api/organizations', tenantsCompatRoutes);
+app.use('/api/admin/tenants', tenantsCompatRoutes); // for /admin/tenants/stats & invoices
 
 /* ✅ Single canonical tenants mount */
 app.use('/api/tenants', tenantRoutes);

@@ -6,9 +6,8 @@ const { sequelize } = require('../../models');
 const { QueryTypes } = require('sequelize');
 
 /* ----------------------------------------------------------------------------
-   Helpers: compatibility + column detection
+   Helpers
 ----------------------------------------------------------------------------- */
-
 const CACHE = { cols: null, ts: 0 };
 const ONE_MIN = 60 * 1000;
 
@@ -18,11 +17,9 @@ const isMissingTable = (e) =>
 async function getTenantColumns() {
   if (CACHE.cols && Date.now() - CACHE.ts < ONE_MIN) return CACHE.cols;
   const rows = await sequelize.query(
-    `
-    SELECT column_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = 'tenants'
-    `,
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema='public' AND table_name='tenants'`,
     { type: QueryTypes.SELECT }
   );
   CACHE.cols = new Set(rows.map(r => r.column_name));
@@ -73,8 +70,7 @@ function buildWhere(q, cols) {
   return { sql, repl };
 }
 
-function selectBase(cols) {
-  // created_at/updated_at assumed present in most schemas; if not, they’ll be NULL.
+function selectBase(cols, withStaff = true) {
   return `
     SELECT
       t.id,
@@ -86,15 +82,20 @@ function selectBase(cols) {
       ${col(cols, 'grace_days')},
       ${col(cols, 'billing_email')},
       ${col(cols, 'seats')},
-      COALESCE(${cols.has('staff_count') ? 't.staff_count' : 'NULL'}, tu.staff_count, 0)::int AS staff_count,
+      ${withStaff
+        ? `COALESCE(${cols.has('staff_count') ? 't.staff_count' : 'NULL'}, tu.staff_count, 0)::int AS staff_count`
+        : `0::int AS staff_count`
+      },
       ${col(cols, 'created_at')},
       ${col(cols, 'updated_at')}
     FROM public.tenants t
-    LEFT JOIN (
-      SELECT tenant_id, COUNT(*)::int AS staff_count
-      FROM public.tenant_users
-      GROUP BY tenant_id
-    ) tu ON tu.tenant_id = t.id
+    ${withStaff ? `
+      LEFT JOIN (
+        SELECT tenant_id, COUNT(*)::int AS staff_count
+        FROM public.tenant_users
+        GROUP BY tenant_id
+      ) tu ON tu.tenant_id = t.id
+    ` : ''}
   `;
 }
 
@@ -102,13 +103,12 @@ function selectBase(cols) {
    Routes
 ----------------------------------------------------------------------------- */
 
-/** GET /api/admin/tenants — list (with search & pagination) */
+/** GET /api/admin/tenants — list */
 router.get('/', async (req, res, next) => {
   try {
     const limit = Math.max(0, Math.min(200, Number(req.query.limit) || 50));
     const offset = Math.max(0, Number(req.query.offset) || 0);
     const cols = await getTenantColumns();
-
     const { sql: whereSql, repl } = buildWhere(req.query.q, cols);
 
     const [{ c: total }] = await sequelize.query(
@@ -116,68 +116,88 @@ router.get('/', async (req, res, next) => {
       { replacements: repl, type: QueryTypes.SELECT }
     );
 
-    const rows = await sequelize.query(
-      `
-      ${selectBase(cols)}
-      ${whereSql}
-      ORDER BY t.name ASC
-      LIMIT :limit OFFSET :offset
-      `,
-      { replacements: { ...repl, limit, offset }, type: QueryTypes.SELECT }
-    );
+    let rows;
+    try {
+      rows = await sequelize.query(
+        `${selectBase(cols, true)} ${whereSql} ORDER BY t.name ASC LIMIT :limit OFFSET :offset`,
+        { replacements: { ...repl, limit, offset }, type: QueryTypes.SELECT }
+      );
+    } catch (e) {
+      // If tenant_users table is missing, retry without the join
+      if (!isMissingTable(e)) throw e;
+      rows = await sequelize.query(
+        `${selectBase(cols, false)} ${whereSql} ORDER BY t.name ASC LIMIT :limit OFFSET :offset`,
+        { replacements: { ...repl, limit, offset }, type: QueryTypes.SELECT }
+      );
+    }
 
     res.setHeader('X-Total-Count', String(total));
     res.json(rows.map(toApi));
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-/** GET /api/admin/tenants/stats — summary for staff/seats widgets */
+/** GET /api/admin/tenants/stats — for top widgets */
 router.get('/stats', async (_req, res, next) => {
   try {
     const cols = await getTenantColumns();
-    const items = await sequelize.query(
-      `
-      SELECT
-        t.id,
-        COALESCE(${cols.has('staff_count') ? 't.staff_count' : 'NULL'}, tu.staff_count, 0)::int AS "staffCount",
-        ${cols.has('seats') ? 't.seats' : 'NULL'} AS seats
-      FROM public.tenants t
-      LEFT JOIN (
-        SELECT tenant_id, COUNT(*)::int AS staff_count
-        FROM public.tenant_users
-        GROUP BY tenant_id
-      ) tu ON tu.tenant_id = t.id
-      `,
-      { type: QueryTypes.SELECT }
-    );
+    let items;
+    try {
+      items = await sequelize.query(
+        `
+        SELECT
+          t.id,
+          COALESCE(${cols.has('staff_count') ? 't.staff_count' : 'NULL'}, tu.staff_count, 0)::int AS "staffCount",
+          ${cols.has('seats') ? 't.seats' : 'NULL'} AS "seats"
+        FROM public.tenants t
+        LEFT JOIN (
+          SELECT tenant_id, COUNT(*)::int AS staff_count
+          FROM public.tenant_users
+          GROUP BY tenant_id
+        ) tu ON tu.tenant_id = t.id
+        `,
+        { type: QueryTypes.SELECT }
+      );
+    } catch (e) {
+      if (!isMissingTable(e)) throw e;
+      // Fallback: no tenant_users table
+      items = await sequelize.query(
+        `
+        SELECT
+          t.id,
+          0::int AS "staffCount",
+          ${cols.has('seats') ? 't.seats' : 'NULL'} AS "seats"
+        FROM public.tenants t
+        `,
+        { type: QueryTypes.SELECT }
+      );
+    }
     res.json({ items });
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-/** GET /api/admin/tenants/:id — read one */
+/** GET /api/admin/tenants/:id — read */
 router.get('/:id', async (req, res, next) => {
   try {
     const cols = await getTenantColumns();
-    const [row] = await sequelize.query(
-      `
-      ${selectBase(cols)}
-      WHERE t.id = :id
-      LIMIT 1
-      `,
-      { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
-    );
+    let row;
+    try {
+      [row] = await sequelize.query(
+        `${selectBase(cols, true)} WHERE t.id = :id LIMIT 1`,
+        { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
+      );
+    } catch (e) {
+      if (!isMissingTable(e)) throw e;
+      [row] = await sequelize.query(
+        `${selectBase(cols, false)} WHERE t.id = :id LIMIT 1`,
+        { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
+      );
+    }
     if (!row) return res.status(404).json({ error: 'Tenant not found' });
     res.json(toApi(row));
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-/** PATCH /api/admin/tenants/:id — update fields used by Manage drawer */
+/** PATCH /api/admin/tenants/:id — update */
 router.patch('/:id', async (req, res, next) => {
   try {
     const cols = await getTenantColumns();
@@ -215,36 +235,35 @@ router.patch('/:id', async (req, res, next) => {
 
     if (sets.length) {
       await sequelize.query(
-        `
-        UPDATE public.tenants
-           SET ${sets.join(', ')}, updated_at = now()
-         WHERE id = :id
-        `,
+        `UPDATE public.tenants SET ${sets.join(', ')}, updated_at = now() WHERE id = :id`,
         { replacements: r, type: QueryTypes.UPDATE }
       );
     }
 
-    // return fresh row
-    const [row] = await sequelize.query(
-      `
-      ${selectBase(cols)}
-      WHERE t.id = :id
-      LIMIT 1
-      `,
-      { replacements: { id }, type: QueryTypes.SELECT }
-    );
-    if (!row) return res.status(404).json({ error: 'Tenant not found' });
+    // fresh read
+    let row;
+    try {
+      [row] = await sequelize.query(
+        `${selectBase(cols, true)} WHERE t.id = :id LIMIT 1`,
+        { replacements: { id }, type: QueryTypes.SELECT }
+      );
+    } catch (e) {
+      if (!isMissingTable(e)) throw e;
+      [row] = await sequelize.query(
+        `${selectBase(cols, false)} WHERE t.id = :id LIMIT 1`,
+        { replacements: { id }, type: QueryTypes.SELECT }
+      );
+    }
 
+    if (!row) return res.status(404).json({ error: 'Tenant not found' });
     res.json({ ok: true, tenant: toApi(row) });
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-/** GET /api/admin/tenants/:id/invoices — list invoices for a tenant */
+/** GET /api/admin/tenants/:id/invoices */
 router.get('/:id/invoices', async (req, res, next) => {
+  const id = req.params.id;
   try {
-    const id = req.params.id;
     try {
       const rows = await sequelize.query(
         `
@@ -261,15 +280,10 @@ router.get('/:id/invoices', async (req, res, next) => {
       if (isMissingTable(e)) return res.json({ invoices: [] });
       throw e;
     }
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-/** POST /api/admin/tenants/:id/invoices/sync — placeholder for billing sync */
-router.post('/:id/invoices/sync', async (_req, res) => {
-  // Hook your external billing sync here if needed
-  res.json({ ok: true });
-});
+/** POST /api/admin/tenants/:id/invoices/sync — placeholder */
+router.post('/:id/invoices/sync', async (_req, res) => res.json({ ok: true }));
 
 module.exports = router;
