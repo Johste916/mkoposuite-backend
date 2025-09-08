@@ -325,15 +325,225 @@ function makeTenantsFallbackRouter() {
 }
 
 /* -------- Tenants compat shim: only special endpoints (no "/" or "/:id") --- */
+const IMP_STATE = { tenantId: null, startedAt: null, by: null };
 function makeTenantsCompatRouter() {
   const r = express.Router();
-  // stats for lists/summary cards
+  // stats
   r.get('/stats', (_req, res) => res.json({ items: [] }));
-  // invoices display & sync
+  // invoices (view + sync)
   r.get('/:id/invoices', (_req, res) => res.json({ invoices: [] }));
   r.post('/:id/invoices/sync', (_req, res) => res.json({ ok: true }));
-  // subscription (avoid 404s)
-  r.get('/:id/subscription', (_req, res) => res.json({ subscription: null }));
+  // subscription viewer (avoid 404s)
+  r.get('/:id/subscription', (req, res) => {
+    res.json({
+      tenantId: String(req.params.id),
+      plan: 'basic',
+      status: 'trial',
+      seats: null,
+      renewsAt: null,
+      provider: 'fallback',
+    });
+  });
+  // impersonation via /admin/tenants/:id/impersonate (UI convenience)
+  r.post('/:id/impersonate', (req, res) => {
+    const id = String(req.params.id);
+    IMP_STATE.tenantId = id;
+    IMP_STATE.startedAt = new Date().toISOString();
+    IMP_STATE.by = req.user?.id || 'support';
+    res.json({ ok: true, token: `impersonate:${id}`, context: IMP_STATE });
+  });
+  return r;
+}
+
+/* ---------------- Support (tickets & flows) fallback router ---------------- */
+function makeSupportFallbackRouter() {
+  const r = express.Router();
+  const TICKETS = new Map(); // id -> ticket
+  let nextId = 1;
+
+  function filterTickets({ tenantId, status }) {
+    const all = Array.from(TICKETS.values());
+    return all.filter(t =>
+      (!tenantId || t.tenantId === tenantId) &&
+      (!status || t.status === status.toLowerCase())
+    );
+  }
+
+  // list tickets (optionally by tenant & status)
+  r.get('/tickets', (req, res) => {
+    const items = filterTickets({
+      tenantId: req.query.tenantId ? String(req.query.tenantId) : undefined,
+      status: req.query.status ? String(req.query.status).toLowerCase() : undefined,
+    });
+    res.setHeader('X-Total-Count', String(items.length));
+    res.json(items);
+  });
+
+  // create ticket
+  r.post('/tickets', (req, res) => {
+    const b = req.body || {};
+    const id = String(nextId++);
+    const now = new Date().toISOString();
+    const ticket = {
+      id,
+      tenantId: b.tenantId || null,
+      subject: b.subject || 'Support ticket',
+      status: 'open',
+      messages: b.body ? [{ from: 'requester', body: String(b.body), at: now }] : [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    TICKETS.set(id, ticket);
+    res.status(201).json(ticket);
+  });
+
+  // add message
+  r.post('/tickets/:id/messages', (req, res) => {
+    const t = TICKETS.get(String(req.params.id));
+    if (!t) return res.status(404).json({ error: 'Ticket not found' });
+    const b = req.body || {};
+    t.messages.push({ from: b.from || 'support', body: String(b.body || ''), at: new Date().toISOString() });
+    t.updatedAt = new Date().toISOString();
+    res.json(t);
+  });
+
+  // change status (direct)
+  r.patch('/tickets/:id', (req, res) => {
+    const t = TICKETS.get(String(req.params.id));
+    if (!t) return res.status(404).json({ error: 'Ticket not found' });
+    const status = req.body?.status ? String(req.body.status).toLowerCase() : null;
+    if (status && ['open','resolved','canceled'].includes(status)) t.status = status;
+    t.updatedAt = new Date().toISOString();
+    res.json(t);
+  });
+
+  // helpers for quick transitions
+  r.post('/tickets/:id/resolve', (req, res) => {
+    const t = TICKETS.get(String(req.params.id));
+    if (!t) return res.status(404).json({ error: 'Ticket not found' });
+    t.status = 'resolved'; t.updatedAt = new Date().toISOString(); res.json(t);
+  });
+  r.post('/tickets/:id/cancel', (req, res) => {
+    const t = TICKETS.get(String(req.params.id));
+    if (!t) return res.status(404).json({ error: 'Ticket not found' });
+    t.status = 'canceled'; t.updatedAt = new Date().toISOString(); res.json(t);
+  });
+  r.post('/tickets/:id/reopen', (req, res) => {
+    const t = TICKETS.get(String(req.params.id));
+    if (!t) return res.status(404).json({ error: 'Ticket not found' });
+    t.status = 'open'; t.updatedAt = new Date().toISOString(); res.json(t);
+  });
+
+  return r;
+}
+
+/* -------------------- Impersonation (start/end/session) -------------------- */
+function makeImpersonationFallbackRouter() {
+  const r = express.Router();
+  r.post('/tenants/:id/start', (req, res) => {
+    const id = String(req.params.id);
+    IMP_STATE.tenantId = id;
+    IMP_STATE.startedAt = new Date().toISOString();
+    IMP_STATE.by = req.user?.id || 'support';
+    res.json({ ok: true, token: `impersonate:${id}`, context: IMP_STATE });
+  });
+  r.get('/session', (_req, res) => res.json({ context: IMP_STATE }));
+  r.delete('/session', (_req, res) => {
+    IMP_STATE.tenantId = null; IMP_STATE.startedAt = null; IMP_STATE.by = null;
+    res.json({ ok: true });
+  });
+  return r;
+}
+
+/* --------------------------- System subscription API ----------------------- */
+function makeSubscriptionFallbackRouter() {
+  const r = express.Router();
+  r.get('/', (_req, res) => {
+    res.json({
+      plan: process.env.SYSTEM_PLAN || 'pro',
+      status: 'active',
+      provider: 'fallback',
+      seats: 'unlimited',
+      trialEndsAt: null,
+      renewsAt: null,
+      features: ['support-console','impersonation','tickets','sms','billing-by-phone','enrichment'],
+    });
+  });
+  return r;
+}
+
+/* ------------------------------ SMS endpoints ------------------------------ */
+function makeSmsFallbackRouter() {
+  const r = express.Router();
+  const LOG = [];
+  r.post('/send', (req, res) => {
+    const { to, message, from } = req.body || {};
+    if (!to || !message) return res.status(400).json({ error: 'to and message are required' });
+    const item = { id: Date.now(), to: String(to), from: from || 'MkopoSuite', message: String(message), at: new Date().toISOString(), status: 'queued' };
+    LOG.push(item);
+    res.json({ ok: true, messageId: item.id, status: item.status });
+  });
+  r.get('/logs', (_req, res) => res.json({ items: LOG.slice(-100) }));
+  return r;
+}
+
+/* ------------------------- Billing by phone endpoints ---------------------- */
+function makeBillingByPhoneFallbackRouter() {
+  const r = express.Router();
+  r.get('/lookup', (req, res) => {
+    const phone = String(req.query.phone || '').trim();
+    if (!phone) return res.status(400).json({ error: 'phone query is required' });
+    // Fake data for dev
+    res.json({
+      phone,
+      customerId: `CUS-${phone.slice(-6) || '000000'}`,
+      name: 'Demo Customer',
+      balance: 0,
+      invoicesCount: 0,
+      lastInvoiceAt: null,
+    });
+  });
+  return r;
+}
+
+/* ------------------------------ Enrichment API ----------------------------- */
+function makeEnrichmentFallbackRouter() {
+  const r = express.Router();
+  r.get('/phone', (req, res) => {
+    const phone = String(req.query.phone || '').trim();
+    if (!phone) return res.status(400).json({ error: 'phone query is required' });
+    res.json({
+      phone,
+      e164: phone.startsWith('+') ? phone : `+${phone}`,
+      countryHint: 'TZ',
+      carrierHint: 'Vodacom',
+      lineType: 'mobile',
+      risk: { disposable: false, recentPort: false, score: 0.1 },
+    });
+  });
+  r.get('/email', (req, res) => {
+    const email = String(req.query.email || '').trim();
+    if (!email) return res.status(400).json({ error: 'email query is required' });
+    const domain = email.includes('@') ? email.split('@')[1] : '';
+    res.json({
+      email,
+      domain,
+      deliverability: 'unknown',
+      mxPresent: true,
+      disposable: false,
+    });
+  });
+  r.get('/org', (req, res) => {
+    const name = String(req.query.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name query is required' });
+    res.json({
+      name,
+      industry: 'Microfinance',
+      size: '11-50',
+      website: null,
+      location: null,
+    });
+  });
   return r;
 }
 
@@ -450,7 +660,7 @@ const accountingRoutes = safeLoadRoutes('./routes/accountingRoutes', makeDummyRo
 /* Tenants (real file if present; otherwise fallback keeps UI alive) */
 const tenantRoutes = safeLoadRoutes('./routes/tenantRoutes', makeTenantsFallbackRouter());
 
-/* ✅ NEW: Tenants compat shim (stats + invoices across multiple bases) */
+/* ✅ NEW: Tenants compat shim (stats + invoices + subscription + impersonate) */
 const tenantsCompatRoutes = safeLoadRoutes('./routes/tenantsCompatRoutes', makeTenantsCompatRouter());
 
 /* ✅ NEW: Organization (limits & invoices) */
@@ -461,7 +671,14 @@ const adminTenantsRoutes = safeLoadRoutes('./routes/admin/tenantsRoutes', makeDu
 
 /* ✅ NEW: Plans + Support routes (additive, safe) */
 const plansRoutes   = safeLoadRoutes('./routes/plansRoutes', makeDummyRouter([{ code: 'basic', name: 'Basic' }]));
-const supportRoutes = safeLoadRoutes('./routes/supportRoutes', makeDummyRouter({ ok: true }));
+const supportRoutes = safeLoadRoutes('./routes/supportRoutes', makeSupportFallbackRouter());
+
+/* ✅ NEW: Impersonation, Subscription, SMS, Billing-by-phone, Enrichment */
+const impersonationRoutes = safeLoadRoutes('./routes/admin/impersonationRoutes', makeImpersonationFallbackRouter());
+const subscriptionRoutes  = safeLoadRoutes('./routes/subscriptionRoutes', makeSubscriptionFallbackRouter());
+const smsRoutes           = safeLoadRoutes('./routes/smsRoutes', makeSmsFallbackRouter());
+const billingPhoneRoutes  = safeLoadRoutes('./routes/billingPhoneRoutes', makeBillingByPhoneFallbackRouter());
+const enrichmentRoutes    = safeLoadRoutes('./routes/enrichmentRoutes', makeEnrichmentFallbackRouter());
 
 /* -------------------- Import guards safely (no hard crash) ----------------- */
 let authenticateUser, ensureTenantActive, requireEntitlement;
@@ -523,15 +740,32 @@ app.use('/api/login',  authRoutes);
 
 app.use('/api/account', accountRoutes);
 
-/* ✅ Compat shim mounts FIRST so it handles stats/invoices across bases */
+/* ✅ Compat shim mounts FIRST so it handles stats/invoices/etc across bases */
 app.use('/api/tenants', tenantsCompatRoutes);
 app.use('/api/system/tenants', tenantsCompatRoutes);
 app.use('/api/orgs', tenantsCompatRoutes);
 app.use('/api/organizations', tenantsCompatRoutes);
-app.use('/api/admin/tenants', tenantsCompatRoutes); // for /admin/tenants/stats & invoices
+app.use('/api/admin/tenants', tenantsCompatRoutes); // stats/invoices/subscription/impersonate
 
 /* ✅ Single canonical tenants mount */
 app.use('/api/tenants', tenantRoutes);
+
+/* ✅ NEW: Impersonation console (admin) */
+app.use('/api/admin/impersonation', ...auth, ...active, impersonationRoutes);
+
+/* ✅ NEW: System subscription (aliases included) */
+app.use('/api/subscription', ...auth, ...active, subscriptionRoutes);
+app.use('/api/system/subscription', ...auth, ...active, subscriptionRoutes);
+app.use('/api/admin/subscription', ...auth, ...active, subscriptionRoutes);
+
+/* ✅ NEW: SMS */
+app.use('/api/sms', ...auth, ...active, smsRoutes);
+
+/* ✅ NEW: Billing by phone (mount BEFORE generic /api/billing) */
+app.use('/api/billing/phone', ...auth, ...active, billingPhoneRoutes);
+
+/* ✅ NEW: Enrichment */
+app.use('/api/enrich', ...auth, ...active, enrichmentRoutes);
 
 /* ✅ NEW: Organization module (limits/invoices) */
 app.use('/api/org', ...auth, ...active, orgRoutes);
@@ -541,7 +775,7 @@ app.use('/api/admin/plans', plansRoutes);
 app.use('/api/billing/plans', plansRoutes);
 app.use('/api/plans', plansRoutes);
 
-/* ✅ NEW: Support endpoints */
+/* ✅ NEW: Support endpoints (tickets, etc.) */
 app.use('/api/support', ...auth, ...active, supportRoutes);
 
 /* Super-admin tenant console */
