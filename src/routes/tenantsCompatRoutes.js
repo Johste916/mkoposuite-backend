@@ -1,67 +1,74 @@
+// routes/tenantsCompatRoutes.js
 'use strict';
-
 const express = require('express');
 const router = express.Router();
-const { sequelize } = require('../models');
-const { QueryTypes } = require('sequelize');
 
-const isMissingTable = (e) =>
-  e?.original?.code === '42P01' || e?.parent?.code === '42P01';
+// Minimal in-memory states for fallback
+const IMP = { tenantId: null, startedAt: null, by: null };
 
-/** GET /stats — mirrors /api/admin/tenants/stats but tolerant */
-router.get('/stats', async (_req, res, next) => {
+router.get('/stats', async (req, res) => {
   try {
-    // Try with tenant_users; if missing, return seats + staffCount=0
-    try {
-      const items = await sequelize.query(
-        `
-        SELECT t.id,
-               COALESCE(tu.staff_count, 0)::int AS "staffCount",
-               t.seats
-        FROM public.tenants t
-        LEFT JOIN (
-          SELECT tenant_id, COUNT(*)::int AS staff_count
-          FROM public.tenant_users
-          GROUP BY tenant_id
-        ) tu ON tu.tenant_id = t.id
-        `,
-        { type: QueryTypes.SELECT }
-      );
-      return res.json({ items });
-    } catch (e) {
-      if (!isMissingTable(e)) throw e;
-      const items = await sequelize.query(
-        `SELECT id, 0::int AS "staffCount", seats FROM public.tenants`,
-        { type: QueryTypes.SELECT }
-      );
-      return res.json({ items });
+    const models = req.app.get('models');
+    if (models?.Tenant && typeof models.Tenant.count === 'function') {
+      // Try to build something real if you want (left minimal by design)
+      const total = await models.Tenant.count();
+      return res.ok({ items: [{ id: 'total', tenants: total }] });
     }
-  } catch (e) { next(e); }
+    return res.ok({ items: [] });
+  } catch (e) {
+    return res.fail(500, e.message);
+  }
 });
 
-/** GET /:id/invoices — tolerant (returns [] if invoices table missing) */
-router.get('/:id/invoices', async (req, res, next) => {
+router.get('/:id/invoices', async (req, res) => {
   try {
-    try {
-      const rows = await sequelize.query(
-        `
-        SELECT id, number, amount_cents, currency, status, due_date, issued_at, paid_at
-        FROM public.invoices
-        WHERE tenant_id = :id
-        ORDER BY COALESCE(issued_at, created_at) DESC
-        LIMIT 250
-        `,
-        { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
-      );
-      return res.json({ invoices: rows });
-    } catch (e) {
-      if (isMissingTable(e)) return res.json({ invoices: [] });
-      throw e;
+    const models = req.app.get('models');
+    const tenantId = String(req.params.id);
+    if (models?.Invoice && models?.Tenant) {
+      // Example: fetch invoices by tenantId (adapt to your schema)
+      const invoices = await models.Invoice.findAll({ where: { tenantId }, limit: 50, order: [['createdAt', 'DESC']] });
+      return res.ok({ invoices });
     }
-  } catch (e) { next(e); }
+    return res.ok({ invoices: [] });
+  } catch (e) {
+    return res.fail(500, e.message);
+  }
 });
 
-/** POST /:id/invoices/sync — always OK (UI button) */
-router.post('/:id/invoices/sync', (_req, res) => res.json({ ok: true }));
+router.post('/:id/invoices/sync', async (req, res) => {
+  // Hook your external provider sync here; currently a no-op
+  return res.ok({ ok: true });
+});
+
+router.get('/:id/subscription', async (req, res) => {
+  try {
+    const tenantId = String(req.params.id);
+    const models = req.app.get('models');
+    if (models?.Tenant) {
+      const t = await models.Tenant.findByPk(tenantId);
+      if (t) {
+        return res.ok({
+          tenantId,
+          plan: (t.plan_code || 'basic').toLowerCase(),
+          status: t.status || 'active',
+          seats: t.seats ?? null,
+          renewsAt: t.renews_at || null,
+          provider: t.billing_provider || 'internal',
+        });
+      }
+    }
+    return res.ok({ tenantId, plan: 'basic', status: 'trial', seats: null, renewsAt: null, provider: 'fallback' });
+  } catch (e) {
+    return res.fail(500, e.message);
+  }
+});
+
+router.post('/:id/impersonate', (req, res) => {
+  const tenantId = String(req.params.id);
+  IMP.tenantId = tenantId;
+  IMP.startedAt = new Date().toISOString();
+  IMP.by = req.user?.id || 'support';
+  return res.ok({ ok: true, token: `impersonate:${tenantId}`, context: IMP });
+});
 
 module.exports = router;

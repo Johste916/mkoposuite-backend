@@ -165,6 +165,10 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
   return dummyRouter;
 }
 
+/* --------------------- Shared in-memory stores for fallbacks --------------- */
+const SUPPORT_STORE = { TICKETS: new Map(), nextId: 1 }; // shared across routers
+const SMS_LOGS = []; // { id, tenantId?, to, message, from, at, status }
+
 /* ---------- Fallback tenants router (in-memory; keeps UI working) ---------- */
 function makeTenantsFallbackRouter() {
   const r = express.Router();
@@ -313,7 +317,9 @@ function makeTenantsFallbackRouter() {
     res.json({
       modules: {
         savings: true, loans: true, collections: true, accounting: true,
-        sms: false, esignatures: false, payroll: false, investors: true, assets: true, collateral: true,
+        sms: true, esignatures: false, payroll: false,
+        investors: true, assets: true, collateral: true,
+        support: true, impersonation: true, billingByPhone: true, enrichment: true,
       },
       planCode: 'basic',
       status: 'trial',
@@ -324,16 +330,13 @@ function makeTenantsFallbackRouter() {
   return r;
 }
 
-/* -------- Tenants compat shim: only special endpoints (no "/" or "/:id") --- */
+/* -------- Tenants compat shim: special endpoints (stats/invoices/subscription) */
 const IMP_STATE = { tenantId: null, startedAt: null, by: null };
 function makeTenantsCompatRouter() {
   const r = express.Router();
-  // stats
   r.get('/stats', (_req, res) => res.json({ items: [] }));
-  // invoices (view + sync)
   r.get('/:id/invoices', (_req, res) => res.json({ invoices: [] }));
   r.post('/:id/invoices/sync', (_req, res) => res.json({ ok: true }));
-  // subscription viewer (avoid 404s)
   r.get('/:id/subscription', (req, res) => {
     res.json({
       tenantId: String(req.params.id),
@@ -344,7 +347,6 @@ function makeTenantsCompatRouter() {
       provider: 'fallback',
     });
   });
-  // impersonation via /admin/tenants/:id/impersonate (UI convenience)
   r.post('/:id/impersonate', (req, res) => {
     const id = String(req.params.id);
     IMP_STATE.tenantId = id;
@@ -358,18 +360,15 @@ function makeTenantsCompatRouter() {
 /* ---------------- Support (tickets & flows) fallback router ---------------- */
 function makeSupportFallbackRouter() {
   const r = express.Router();
-  const TICKETS = new Map(); // id -> ticket
-  let nextId = 1;
 
   function filterTickets({ tenantId, status }) {
-    const all = Array.from(TICKETS.values());
+    const all = Array.from(SUPPORT_STORE.TICKETS.values());
     return all.filter(t =>
       (!tenantId || t.tenantId === tenantId) &&
       (!status || t.status === status.toLowerCase())
     );
   }
 
-  // list tickets (optionally by tenant & status)
   r.get('/tickets', (req, res) => {
     const items = filterTickets({
       tenantId: req.query.tenantId ? String(req.query.tenantId) : undefined,
@@ -379,10 +378,9 @@ function makeSupportFallbackRouter() {
     res.json(items);
   });
 
-  // create ticket
   r.post('/tickets', (req, res) => {
     const b = req.body || {};
-    const id = String(nextId++);
+    const id = String(SUPPORT_STORE.nextId++);
     const now = new Date().toISOString();
     const ticket = {
       id,
@@ -393,13 +391,12 @@ function makeSupportFallbackRouter() {
       createdAt: now,
       updatedAt: now,
     };
-    TICKETS.set(id, ticket);
+    SUPPORT_STORE.TICKETS.set(id, ticket);
     res.status(201).json(ticket);
   });
 
-  // add message
   r.post('/tickets/:id/messages', (req, res) => {
-    const t = TICKETS.get(String(req.params.id));
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t) return res.status(404).json({ error: 'Ticket not found' });
     const b = req.body || {};
     t.messages.push({ from: b.from || 'support', body: String(b.body || ''), at: new Date().toISOString() });
@@ -407,9 +404,8 @@ function makeSupportFallbackRouter() {
     res.json(t);
   });
 
-  // change status (direct)
   r.patch('/tickets/:id', (req, res) => {
-    const t = TICKETS.get(String(req.params.id));
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t) return res.status(404).json({ error: 'Ticket not found' });
     const status = req.body?.status ? String(req.body.status).toLowerCase() : null;
     if (status && ['open','resolved','canceled'].includes(status)) t.status = status;
@@ -417,19 +413,18 @@ function makeSupportFallbackRouter() {
     res.json(t);
   });
 
-  // helpers for quick transitions
   r.post('/tickets/:id/resolve', (req, res) => {
-    const t = TICKETS.get(String(req.params.id));
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t) return res.status(404).json({ error: 'Ticket not found' });
     t.status = 'resolved'; t.updatedAt = new Date().toISOString(); res.json(t);
   });
   r.post('/tickets/:id/cancel', (req, res) => {
-    const t = TICKETS.get(String(req.params.id));
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t) return res.status(404).json({ error: 'Ticket not found' });
     t.status = 'canceled'; t.updatedAt = new Date().toISOString(); res.json(t);
   });
   r.post('/tickets/:id/reopen', (req, res) => {
-    const t = TICKETS.get(String(req.params.id));
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t) return res.status(404).json({ error: 'Ticket not found' });
     t.status = 'open'; t.updatedAt = new Date().toISOString(); res.json(t);
   });
@@ -475,15 +470,22 @@ function makeSubscriptionFallbackRouter() {
 /* ------------------------------ SMS endpoints ------------------------------ */
 function makeSmsFallbackRouter() {
   const r = express.Router();
-  const LOG = [];
   r.post('/send', (req, res) => {
-    const { to, message, from } = req.body || {};
+    const { to, message, from, tenantId } = req.body || {};
     if (!to || !message) return res.status(400).json({ error: 'to and message are required' });
-    const item = { id: Date.now(), to: String(to), from: from || 'MkopoSuite', message: String(message), at: new Date().toISOString(), status: 'queued' };
-    LOG.push(item);
+    const item = {
+      id: Date.now(),
+      tenantId: tenantId || null,
+      to: String(to),
+      from: from || 'MkopoSuite',
+      message: String(message),
+      at: new Date().toISOString(),
+      status: 'queued'
+    };
+    SMS_LOGS.push(item);
     res.json({ ok: true, messageId: item.id, status: item.status });
   });
-  r.get('/logs', (_req, res) => res.json({ items: LOG.slice(-100) }));
+  r.get('/logs', (_req, res) => res.json({ items: SMS_LOGS.slice(-100) }));
   return r;
 }
 
@@ -493,7 +495,6 @@ function makeBillingByPhoneFallbackRouter() {
   r.get('/lookup', (req, res) => {
     const phone = String(req.query.phone || '').trim();
     if (!phone) return res.status(400).json({ error: 'phone query is required' });
-    // Fake data for dev
     res.json({
       phone,
       customerId: `CUS-${phone.slice(-6) || '000000'}`,
@@ -544,6 +545,156 @@ function makeEnrichmentFallbackRouter() {
       location: null,
     });
   });
+  return r;
+}
+
+/* -------- Tenant-scoped bridges: tickets, sms, billing phone, enrichment --- */
+function makeTenantFeatureBridgeRouter() {
+  const r = express.Router({ mergeParams: true });
+
+  // Tickets under /api/tenants/:tenantId/tickets (and alias /support/tickets)
+  r.get('/:tenantId/tickets', (req, res) => {
+    const tenantId = String(req.params.tenantId);
+    const items = Array.from(SUPPORT_STORE.TICKETS.values()).filter(t => t.tenantId === tenantId);
+    res.setHeader('X-Total-Count', String(items.length));
+    res.json(items);
+  });
+  r.post('/:tenantId/tickets', (req, res) => {
+    const tenantId = String(req.params.tenantId);
+    const b = req.body || {};
+    const id = String(SUPPORT_STORE.nextId++);
+    const now = new Date().toISOString();
+    const ticket = {
+      id,
+      tenantId,
+      subject: b.subject || 'Support ticket',
+      status: 'open',
+      messages: b.body ? [{ from: 'requester', body: String(b.body), at: now }] : [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    SUPPORT_STORE.TICKETS.set(id, ticket);
+    res.status(201).json(ticket);
+  });
+  r.post('/:tenantId/tickets/:id/messages', (req, res) => {
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
+    if (!t || t.tenantId !== String(req.params.tenantId)) return res.status(404).json({ error: 'Ticket not found' });
+    const b = req.body || {};
+    t.messages.push({ from: b.from || 'support', body: String(b.body || ''), at: new Date().toISOString() });
+    t.updatedAt = new Date().toISOString();
+    res.json(t);
+  });
+  r.patch('/:tenantId/tickets/:id', (req, res) => {
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
+    if (!t || t.tenantId !== String(req.params.tenantId)) return res.status(404).json({ error: 'Ticket not found' });
+    const status = req.body?.status ? String(req.body.status).toLowerCase() : null;
+    if (status && ['open','resolved','canceled'].includes(status)) t.status = status;
+    t.updatedAt = new Date().toISOString();
+    res.json(t);
+  });
+  r.post('/:tenantId/tickets/:id/resolve', (req, res) => {
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
+    if (!t || t.tenantId !== String(req.params.tenantId)) return res.status(404).json({ error: 'Ticket not found' });
+    t.status = 'resolved'; t.updatedAt = new Date().toISOString(); res.json(t);
+  });
+  r.post('/:tenantId/tickets/:id/cancel', (req, res) => {
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
+    if (!t || t.tenantId !== String(req.params.tenantId)) return res.status(404).json({ error: 'Ticket not found' });
+    t.status = 'canceled'; t.updatedAt = new Date().toISOString(); res.json(t);
+  });
+  r.post('/:tenantId/tickets/:id/reopen', (req, res) => {
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
+    if (!t || t.tenantId !== String(req.params.tenantId)) return res.status(404).json({ error: 'Ticket not found' });
+    t.status = 'open'; t.updatedAt = new Date().toISOString(); res.json(t);
+  });
+
+  // Alias: /api/tenants/:tenantId/support/tickets*
+  r.use('/:tenantId/support', (req, res, next) => next()); // namespace
+  r.get('/:tenantId/support/tickets', (req, res) => {
+    const tenantId = String(req.params.tenantId);
+    const items = Array.from(SUPPORT_STORE.TICKETS.values()).filter(t => t.tenantId === tenantId);
+    res.setHeader('X-Total-Count', String(items.length));
+    res.json(items);
+  });
+
+  // SMS under tenant scope (write tenantId into logs)
+  r.post('/:tenantId/sms/send', (req, res) => {
+    const tenantId = String(req.params.tenantId);
+    const { to, message, from } = req.body || {};
+    if (!to || !message) return res.status(400).json({ error: 'to and message are required' });
+    const item = {
+      id: Date.now(),
+      tenantId,
+      to: String(to),
+      from: from || 'MkopoSuite',
+      message: String(message),
+      at: new Date().toISOString(),
+      status: 'queued'
+    };
+    SMS_LOGS.push(item);
+    res.json({ ok: true, messageId: item.id, status: item.status });
+  });
+  r.get('/:tenantId/sms/logs', (req, res) => {
+    const tenantId = String(req.params.tenantId);
+    const items = SMS_LOGS.filter(x => x.tenantId === tenantId).slice(-100);
+    res.json({ items });
+  });
+
+  // Billing-by-phone under tenant
+  r.get('/:tenantId/billing/phone/lookup', (req, res) => {
+    const phone = String(req.query.phone || '').trim();
+    if (!phone) return res.status(400).json({ error: 'phone query is required' });
+    res.json({
+      tenantId: String(req.params.tenantId),
+      phone,
+      customerId: `CUS-${phone.slice(-6) || '000000'}`,
+      name: 'Demo Customer',
+      balance: 0,
+      invoicesCount: 0,
+      lastInvoiceAt: null,
+    });
+  });
+
+  // Enrichment under tenant
+  r.get('/:tenantId/enrich/phone', (req, res) => {
+    const phone = String(req.query.phone || '').trim();
+    if (!phone) return res.status(400).json({ error: 'phone query is required' });
+    res.json({
+      tenantId: String(req.params.tenantId),
+      phone,
+      e164: phone.startsWith('+') ? phone : `+${phone}`,
+      countryHint: 'TZ',
+      carrierHint: 'Vodacom',
+      lineType: 'mobile',
+      risk: { disposable: false, recentPort: false, score: 0.1 },
+    });
+  });
+  r.get('/:tenantId/enrich/email', (req, res) => {
+    const email = String(req.query.email || '').trim();
+    if (!email) return res.status(400).json({ error: 'email query is required' });
+    const domain = email.includes('@') ? email.split('@')[1] : '';
+    res.json({
+      tenantId: String(req.params.tenantId),
+      email,
+      domain,
+      deliverability: 'unknown',
+      mxPresent: true,
+      disposable: false,
+    });
+  });
+  r.get('/:tenantId/enrich/org', (req, res) => {
+    const name = String(req.query.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name query is required' });
+    res.json({
+      tenantId: String(req.params.tenantId),
+      name,
+      industry: 'Microfinance',
+      size: '11-50',
+      website: null,
+      location: null,
+    });
+  });
+
   return r;
 }
 
@@ -663,6 +814,9 @@ const tenantRoutes = safeLoadRoutes('./routes/tenantRoutes', makeTenantsFallback
 /* ✅ NEW: Tenants compat shim (stats + invoices + subscription + impersonate) */
 const tenantsCompatRoutes = safeLoadRoutes('./routes/tenantsCompatRoutes', makeTenantsCompatRouter());
 
+/* ✅ NEW: Tenant feature bridge (tickets/sms/billingByPhone/enrich under tenant) */
+const tenantFeatureRoutes = safeLoadRoutes('./routes/tenantFeatureRoutes', makeTenantFeatureBridgeRouter());
+
 /* ✅ NEW: Organization (limits & invoices) */
 const orgRoutes = safeLoadRoutes('./routes/orgRoutes', makeOrgFallbackRouter());
 
@@ -740,12 +894,15 @@ app.use('/api/login',  authRoutes);
 
 app.use('/api/account', accountRoutes);
 
-/* ✅ Compat shim mounts FIRST so it handles stats/invoices/etc across bases */
+/* ✅ Compat shim mounts FIRST so it handles special endpoints early */
 app.use('/api/tenants', tenantsCompatRoutes);
 app.use('/api/system/tenants', tenantsCompatRoutes);
 app.use('/api/orgs', tenantsCompatRoutes);
 app.use('/api/organizations', tenantsCompatRoutes);
 app.use('/api/admin/tenants', tenantsCompatRoutes); // stats/invoices/subscription/impersonate
+
+/* ✅ Tenant feature bridge BEFORE canonical tenants to avoid shadowing */
+app.use('/api/tenants', ...auth, ...active, tenantFeatureRoutes);
 
 /* ✅ Single canonical tenants mount */
 app.use('/api/tenants', tenantRoutes);
@@ -758,13 +915,13 @@ app.use('/api/subscription', ...auth, ...active, subscriptionRoutes);
 app.use('/api/system/subscription', ...auth, ...active, subscriptionRoutes);
 app.use('/api/admin/subscription', ...auth, ...active, subscriptionRoutes);
 
-/* ✅ NEW: SMS */
+/* ✅ NEW: SMS (global) */
 app.use('/api/sms', ...auth, ...active, smsRoutes);
 
-/* ✅ NEW: Billing by phone (mount BEFORE generic /api/billing) */
+/* ✅ NEW: Billing by phone (global; mount BEFORE generic /api/billing) */
 app.use('/api/billing/phone', ...auth, ...active, billingPhoneRoutes);
 
-/* ✅ NEW: Enrichment */
+/* ✅ NEW: Enrichment (global) */
 app.use('/api/enrich', ...auth, ...active, enrichmentRoutes);
 
 /* ✅ NEW: Organization module (limits/invoices) */
