@@ -1,7 +1,7 @@
+// server/middleware/tenantGuards.js
 'use strict';
 const { sequelize } = require('../models');
 const { QueryTypes } = require('sequelize');
-
 const isMissing = (e) => e?.original?.code === '42P01' || e?.parent?.code === '42P01';
 
 exports.ensureTenantActive = async (req, res, next) => {
@@ -12,7 +12,7 @@ exports.ensureTenantActive = async (req, res, next) => {
       `select status from public.tenants where id = :id limit 1`,
       { replacements: { id }, type: QueryTypes.SELECT }
     ).then(r => r[0]);
-    if (!row) return next(); // dev: allow if not found (fallback handles)
+    if (!row) return next();
     if (row.status === 'suspended') return res.status(402).json({ error: 'Tenant suspended for non-payment.' });
     next();
   } catch (e) { if (isMissing(e)) return next(); next(e); }

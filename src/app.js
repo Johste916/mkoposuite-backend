@@ -357,6 +357,10 @@ const orgRoutes = safeLoadRoutes('./routes/orgRoutes', makeOrgFallbackRouter());
 /* Super-admin: manage all tenants */
 const adminTenantsRoutes = safeLoadRoutes('./routes/admin/tenantsRoutes', makeDummyRouter([]));
 
+/* ✅ NEW: Plans + Support routes (additive, safe) */
+const plansRoutes   = safeLoadRoutes('./routes/plansRoutes', makeDummyRouter([{ code: 'basic', name: 'Basic' }]));
+const supportRoutes = safeLoadRoutes('./routes/supportRoutes', makeDummyRouter({ ok: true }));
+
 /* -------------------- Import guards safely (no hard crash) ----------------- */
 let authenticateUser, ensureTenantActive, requireEntitlement;
 try { ({ authenticateUser } = require('./middleware/authMiddleware')); } catch {}
@@ -422,6 +426,14 @@ app.use('/api/tenants', tenantRoutes);
 
 /* ✅ NEW: Organization module (limits/invoices) */
 app.use('/api/org', ...auth, ...active, orgRoutes);
+
+/* ✅ NEW: Plans endpoints (mounted in 3 places for tolerant clients) */
+app.use('/api/admin/plans', plansRoutes);
+app.use('/api/billing/plans', plansRoutes);
+app.use('/api/plans', plansRoutes);
+
+/* ✅ NEW: Support endpoints */
+app.use('/api/support', ...auth, ...active, supportRoutes);
 
 /* Super-admin tenant console */
 app.use('/api/admin/tenants', adminTenantsRoutes);
