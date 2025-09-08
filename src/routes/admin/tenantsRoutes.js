@@ -2,336 +2,274 @@
 
 const express = require('express');
 const router = express.Router();
-let sequelize, QueryTypes;
-try {
-  ({ sequelize } = require('../../models'));
-  ({ QueryTypes } = require('sequelize'));
-} catch {}
+const { sequelize } = require('../../models');
+const { QueryTypes } = require('sequelize');
 
-/* ------------------------------- Utilities -------------------------------- */
+/* ----------------------------------------------------------------------------
+   Helpers: compatibility + column detection
+----------------------------------------------------------------------------- */
 
-const isPgMissingTable = (e) =>
+const CACHE = { cols: null, ts: 0 };
+const ONE_MIN = 60 * 1000;
+
+const isMissingTable = (e) =>
   e?.original?.code === '42P01' || e?.parent?.code === '42P01';
 
-const toBool = (v) => {
-  if (typeof v === 'boolean') return v;
-  if (v == null) return undefined;
-  const s = String(v).toLowerCase();
-  if (['1','true','yes','on'].includes(s)) return true;
-  if (['0','false','no','off'].includes(s)) return false;
-  return undefined;
-};
+async function getTenantColumns() {
+  if (CACHE.cols && Date.now() - CACHE.ts < ONE_MIN) return CACHE.cols;
+  const rows = await sequelize.query(
+    `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'tenants'
+    `,
+    { type: QueryTypes.SELECT }
+  );
+  CACHE.cols = new Set(rows.map(r => r.column_name));
+  CACHE.ts = Date.now();
+  return CACHE.cols;
+}
 
-const parseIntSafe = (v, d) => {
-  const n = Number.parseInt(v, 10);
-  return Number.isFinite(n) && n >= 0 ? n : d;
-};
+function col(cols, name, alias = name) {
+  return cols.has(name) ? `t.${name}` : `NULL AS "${alias}"`;
+}
 
-const ALLOWED_SORT = new Set(['created_at','updated_at','name','status','plan_code']);
-const ALLOWED_STATUS = new Set(['active','suspended','trial','trialing','past_due']);
+function toApi(row) {
+  const today = new Date().toISOString().slice(0, 10);
+  const trialLeft = row.trial_ends_at
+    ? Math.ceil((Date.parse(row.trial_ends_at) - Date.parse(today)) / 86400000)
+    : null;
 
-/* ------------------------- Shape converters (DTO) ------------------------- */
-
-function toRowShape(t) {
-  if (!t) return null;
+  const planCode = (row.plan_code || 'basic').toLowerCase();
   return {
-    id: t.id,
-    name: t.name,
-    status: t.status,
-    planCode: (t.plan_code || 'basic').toLowerCase(),
-    planLabel: (t.plan_code || 'basic').toLowerCase(),
-    billingEmail: t.billing_email || null,
-    trialEndsAt: t.trial_ends_at || null,
-    autoDisableOverdue: !!t.auto_disable_overdue,
-    graceDays: Number.isFinite(Number(t.grace_days)) ? Number(t.grace_days) : null,
-    seats: t.seats ?? null,
-    staffCount: t.staff_count ?? null,
-    createdAt: t.created_at,
-    updatedAt: t.updated_at,
+    id: row.id,
+    name: row.name,
+    status: row.status || 'trial',
+    planCode,
+    planLabel: planCode,
+    trialEndsAt: row.trial_ends_at || null,
+    trialDaysLeft: trialLeft,
+    autoDisableOverdue: !!row.auto_disable_overdue,
+    graceDays: Number.isFinite(Number(row.grace_days)) ? Number(row.grace_days) : 7,
+    billingEmail: row.billing_email || '',
+    seats: row.seats == null ? null : Number(row.seats),
+    staffCount: row.staff_count == null ? 0 : Number(row.staff_count),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
-/* --------------------------------- LIST ----------------------------------- */
-/**
- * GET /api/admin/tenants
- * Query:
- *   q            - search by name or billing_email
- *   status       - filter by tenant status
- *   plan         - filter by plan_code
- *   limit, offset
- *   sort         - created_at|updated_at|name|status|plan_code
- *   order        - asc|desc
- */
+function buildWhere(q, cols) {
+  const where = [];
+  const repl = {};
+  if (q && String(q).trim()) {
+    const likeCols = ['name', 'plan_code', 'status'];
+    if (cols.has('billing_email')) likeCols.push('billing_email');
+    const parts = likeCols.map(c => `t.${c} ILIKE :q`);
+    where.push(`(${parts.join(' OR ')})`);
+    repl.q = `%${String(q).trim()}%`;
+  }
+  const sql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  return { sql, repl };
+}
+
+function selectBase(cols) {
+  // created_at/updated_at assumed present in most schemas; if not, they’ll be NULL.
+  return `
+    SELECT
+      t.id,
+      t.name,
+      ${col(cols, 'status')},
+      ${col(cols, 'plan_code')},
+      ${col(cols, 'trial_ends_at')},
+      ${col(cols, 'auto_disable_overdue')},
+      ${col(cols, 'grace_days')},
+      ${col(cols, 'billing_email')},
+      ${col(cols, 'seats')},
+      COALESCE(${cols.has('staff_count') ? 't.staff_count' : 'NULL'}, tu.staff_count, 0)::int AS staff_count,
+      ${col(cols, 'created_at')},
+      ${col(cols, 'updated_at')}
+    FROM public.tenants t
+    LEFT JOIN (
+      SELECT tenant_id, COUNT(*)::int AS staff_count
+      FROM public.tenant_users
+      GROUP BY tenant_id
+    ) tu ON tu.tenant_id = t.id
+  `;
+}
+
+/* ----------------------------------------------------------------------------
+   Routes
+----------------------------------------------------------------------------- */
+
+/** GET /api/admin/tenants — list (with search & pagination) */
 router.get('/', async (req, res, next) => {
-  const limit  = Math.min(parseIntSafe(req.query.limit, 50), 200);
-  const offset = parseIntSafe(req.query.offset, 0);
-  const order  = String(req.query.order || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
-  const sort   = ALLOWED_SORT.has(String(req.query.sort || '').toLowerCase())
-    ? String(req.query.sort).toLowerCase()
-    : 'created_at';
-
-  const q = (req.query.q || '').trim();
-  const status = (req.query.status || '').toLowerCase();
-  const plan   = (req.query.plan || '').toLowerCase();
-
   try {
-    if (!sequelize) {
-      res.setHeader('X-Total-Count', '0');
-      return res.json([]);
-    }
+    const limit = Math.max(0, Math.min(200, Number(req.query.limit) || 50));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const cols = await getTenantColumns();
 
-    const where = [];
-    const repl  = { limit, offset };
+    const { sql: whereSql, repl } = buildWhere(req.query.q, cols);
 
-    if (q) {
-      where.push(`(name ILIKE :q OR billing_email ILIKE :q)`);
-      repl.q = `%${q}%`;
-    }
-    if (status && ALLOWED_STATUS.has(status)) {
-      where.push(`status = :status`);
-      repl.status = status;
-    }
-    if (plan) {
-      where.push(`LOWER(plan_code) = :plan`);
-      repl.plan = plan;
-    }
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-
-    const [{ total }] = await sequelize.query(
-      `SELECT COUNT(1) AS total FROM public.tenants ${whereSql};`,
+    const [{ c: total }] = await sequelize.query(
+      `SELECT COUNT(*)::int AS c FROM public.tenants t ${whereSql}`,
       { replacements: repl, type: QueryTypes.SELECT }
     );
 
     const rows = await sequelize.query(
       `
-      SELECT id, name, status, plan_code, billing_email, trial_ends_at,
-             auto_disable_overdue, grace_days, seats, staff_count,
-             created_at, updated_at
-        FROM public.tenants
-        ${whereSql}
-        ORDER BY ${sort} ${order}
-        LIMIT :limit OFFSET :offset;
+      ${selectBase(cols)}
+      ${whereSql}
+      ORDER BY t.name ASC
+      LIMIT :limit OFFSET :offset
       `,
-      { replacements: repl, type: QueryTypes.SELECT }
+      { replacements: { ...repl, limit, offset }, type: QueryTypes.SELECT }
     );
 
-    res.setHeader('X-Total-Count', String(total || 0));
-    return res.json(rows.map(toRowShape));
+    res.setHeader('X-Total-Count', String(total));
+    res.json(rows.map(toApi));
   } catch (e) {
-    if (isPgMissingTable(e)) {
-      res.setHeader('X-Total-Count', '0');
-      return res.json([]);
-    }
-    return next(e);
+    next(e);
   }
 });
 
-/* --------------------------------- READ ----------------------------------- */
+/** GET /api/admin/tenants/stats — summary for staff/seats widgets */
+router.get('/stats', async (_req, res, next) => {
+  try {
+    const cols = await getTenantColumns();
+    const items = await sequelize.query(
+      `
+      SELECT
+        t.id,
+        COALESCE(${cols.has('staff_count') ? 't.staff_count' : 'NULL'}, tu.staff_count, 0)::int AS "staffCount",
+        ${cols.has('seats') ? 't.seats' : 'NULL'} AS seats
+      FROM public.tenants t
+      LEFT JOIN (
+        SELECT tenant_id, COUNT(*)::int AS staff_count
+        FROM public.tenant_users
+        GROUP BY tenant_id
+      ) tu ON tu.tenant_id = t.id
+      `,
+      { type: QueryTypes.SELECT }
+    );
+    res.json({ items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** GET /api/admin/tenants/:id — read one */
 router.get('/:id', async (req, res, next) => {
   try {
-    if (!sequelize) return res.status(404).json({ error: 'Not found' });
-    const rows = await sequelize.query(
+    const cols = await getTenantColumns();
+    const [row] = await sequelize.query(
       `
-      SELECT id, name, status, plan_code, billing_email, trial_ends_at,
-             auto_disable_overdue, grace_days, seats, staff_count,
-             created_at, updated_at
-        FROM public.tenants
-       WHERE id = :id
-       LIMIT 1;
+      ${selectBase(cols)}
+      WHERE t.id = :id
+      LIMIT 1
       `,
       { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
     );
-    const row = rows[0];
-    if (!row) return res.status(404).json({ error: 'Not found' });
-    return res.json(toRowShape(row));
+    if (!row) return res.status(404).json({ error: 'Tenant not found' });
+    res.json(toApi(row));
   } catch (e) {
-    if (isPgMissingTable(e)) return res.status(404).json({ error: 'Not found' });
-    return next(e);
+    next(e);
   }
 });
 
-/* --------------------------------- PATCH ---------------------------------- */
+/** PATCH /api/admin/tenants/:id — update fields used by Manage drawer */
 router.patch('/:id', async (req, res, next) => {
-  const body = req.body || {};
-  const sets = [];
-  const rep  = { id: req.params.id };
+  try {
+    const cols = await getTenantColumns();
+    const id = req.params.id;
+    const b = req.body || {};
 
-  if (typeof body.name === 'string')               { sets.push(`name = :name`); rep.name = body.name.trim(); }
-  if (typeof body.status === 'string')             { sets.push(`status = :status`); rep.status = body.status.trim().toLowerCase(); }
-  if (typeof body.planCode === 'string')           { sets.push(`plan_code = :plan_code`); rep.plan_code = body.planCode.trim().toLowerCase(); }
-  if (typeof body.billingEmail === 'string')       { sets.push(`billing_email = :billing_email`); rep.billing_email = body.billingEmail.trim(); }
-  if ('autoDisableOverdue' in body) {
-    const v = toBool(body.autoDisableOverdue);
-    if (typeof v === 'boolean') { sets.push(`auto_disable_overdue = :ado`); rep.ado = v; }
-  }
-  if ('graceDays' in body && Number.isFinite(Number(body.graceDays))) {
-    sets.push(`grace_days = :grace_days`); rep.grace_days = Math.max(0, Math.min(90, Number(body.graceDays)));
-  }
-  if ('seats' in body && (body.seats === null || Number.isFinite(Number(body.seats)))) {
-    sets.push(`seats = :seats`); rep.seats = body.seats === null ? null : Number(body.seats);
-  }
-  if ('trialEndsAt' in body) {
-    if (body.trialEndsAt === null || body.trialEndsAt === '') {
-      sets.push(`trial_ends_at = NULL`);
-    } else if (typeof body.trialEndsAt === 'string') {
-      sets.push(`trial_ends_at = :trial_ends_at`); rep.trial_ends_at = body.trialEndsAt.slice(0,10);
+    const sets = [];
+    const r = { id };
+
+    if (typeof b.name === 'string' && cols.has('name')) {
+      sets.push('name = :name'); r.name = b.name.trim();
     }
-  }
+    if (typeof b.planCode === 'string' && cols.has('plan_code')) {
+      sets.push('plan_code = :plan_code'); r.plan_code = b.planCode.toLowerCase();
+    }
+    if (typeof b.status === 'string' && cols.has('status')) {
+      sets.push('status = :status'); r.status = b.status.trim().toLowerCase();
+    }
+    if ('trialEndsAt' in b && cols.has('trial_ends_at')) {
+      sets.push('trial_ends_at = :trial_ends_at');
+      r.trial_ends_at = b.trialEndsAt ? String(b.trialEndsAt).slice(0, 10) : null;
+    }
+    if (typeof b.billingEmail === 'string' && cols.has('billing_email')) {
+      sets.push('billing_email = :billing_email'); r.billing_email = b.billingEmail.trim();
+    }
+    if ('seats' in b && cols.has('seats') && (b.seats === null || Number.isFinite(Number(b.seats)))) {
+      sets.push('seats = :seats'); r.seats = b.seats === null ? null : Number(b.seats);
+    }
+    if (typeof b.autoDisableOverdue === 'boolean' && cols.has('auto_disable_overdue')) {
+      sets.push('auto_disable_overdue = :auto_disable_overdue'); r.auto_disable_overdue = b.autoDisableOverdue;
+    }
+    if (Number.isFinite(Number(b.graceDays)) && cols.has('grace_days')) {
+      sets.push('grace_days = :grace_days'); r.grace_days = Math.max(0, Math.min(90, Number(b.graceDays)));
+    }
 
-  if (!sets.length) return res.json({ ok: true });
+    if (sets.length) {
+      await sequelize.query(
+        `
+        UPDATE public.tenants
+           SET ${sets.join(', ')}, updated_at = now()
+         WHERE id = :id
+        `,
+        { replacements: r, type: QueryTypes.UPDATE }
+      );
+    }
 
-  try {
-    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
-    await sequelize.query(
+    // return fresh row
+    const [row] = await sequelize.query(
       `
-      UPDATE public.tenants
-         SET ${sets.join(', ')}, updated_at = NOW()
-       WHERE id = :id;
+      ${selectBase(cols)}
+      WHERE t.id = :id
+      LIMIT 1
       `,
-      { replacements: rep }
+      { replacements: { id }, type: QueryTypes.SELECT }
     );
-    const rows = await sequelize.query(
-      `
-      SELECT id, name, status, plan_code, billing_email, trial_ends_at,
-             auto_disable_overdue, grace_days, seats, staff_count,
-             created_at, updated_at
-        FROM public.tenants
-       WHERE id = :id
-       LIMIT 1;
-      `,
-      { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
-    );
-    return res.json({ ok: true, tenant: toRowShape(rows[0]) });
+    if (!row) return res.status(404).json({ error: 'Tenant not found' });
+
+    res.json({ ok: true, tenant: toApi(row) });
   } catch (e) {
-    if (isPgMissingTable(e)) return res.status(503).json({ error: 'Tenants table missing' });
-    return next(e);
+    next(e);
   }
 });
 
-/* --------------------------- Suspend / Resume ------------------------------ */
-router.post('/:id/suspend', async (req, res, next) => {
-  try {
-    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
-    await sequelize.query(
-      `UPDATE public.tenants SET status='suspended', updated_at=NOW() WHERE id=:id;`,
-      { replacements: { id: req.params.id } }
-    );
-    return res.json({ ok: true });
-  } catch (e) {
-    if (isPgMissingTable(e)) return res.status(503).json({ error: 'Tenants table missing' });
-    return next(e);
-  }
-});
-
-router.post('/:id/resume', async (req, res, next) => {
-  try {
-    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
-    await sequelize.query(
-      `UPDATE public.tenants SET status='active', updated_at=NOW() WHERE id=:id;`,
-      { replacements: { id: req.params.id } }
-    );
-    return res.json({ ok: true });
-  } catch (e) {
-    if (isPgMissingTable(e)) return res.status(503).json({ error: 'Tenants table missing' });
-    return next(e);
-  }
-});
-
-/* --------------------------------- Features -------------------------------- */
-router.post('/:id/features', async (req, res, next) => {
-  try {
-    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
-    const id = req.params.id;
-    const flags = req.body && typeof req.body === 'object' ? req.body : {};
-    const entries = Object.entries(flags);
-    if (!entries.length) return res.json({ ok: true });
-
-    await sequelize.transaction(async (t) => {
-      for (const [key, enabled] of entries) {
-        await sequelize.query(
-          `
-          INSERT INTO public.feature_flags (tenant_id, key, enabled, created_at, updated_at)
-          VALUES (:id, :key, :enabled, NOW(), NOW())
-          ON CONFLICT (tenant_id, key) DO UPDATE
-            SET enabled = EXCLUDED.enabled,
-                updated_at = NOW();
-          `,
-          { transaction: t, type: QueryTypes.INSERT, replacements: { id, key, enabled: !!enabled } }
-        );
-      }
-    });
-    return res.json({ ok: true });
-  } catch (e) {
-    if (isPgMissingTable(e)) return res.status(503).json({ error: 'feature_flags table missing' });
-    return next(e);
-  }
-});
-
-/* ---------------------------------- Limits --------------------------------- */
-router.post('/:id/limits', async (req, res, next) => {
-  try {
-    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
-    const id = req.params.id;
-    const limits = req.body && typeof req.body === 'object' ? req.body : {};
-    const entries = Object.entries(limits);
-    if (!entries.length) return res.json({ ok: true });
-
-    await sequelize.transaction(async (t) => {
-      for (const [key, val] of entries) {
-        let vi = null, vn = null, vt = null, vj = null;
-        if (typeof val === 'number' && Number.isFinite(val)) {
-          if (Number.isInteger(val)) vi = val; else vn = val;
-        } else if (typeof val === 'string') {
-          vt = val;
-        } else {
-          vj = JSON.stringify(val);
-        }
-        await sequelize.query(
-          `
-          INSERT INTO public.tenant_limits
-            (tenant_id, key, value_int, value_numeric, value_text, value_json, created_at, updated_at)
-          VALUES
-            (:id, :key, :vi, :vn, :vt, :vj, NOW(), NOW())
-          ON CONFLICT (tenant_id, key) DO UPDATE SET
-            value_int     = EXCLUDED.value_int,
-            value_numeric = EXCLUDED.value_numeric,
-            value_text    = EXCLUDED.value_text,
-            value_json    = EXCLUDED.value_json,
-            updated_at    = NOW();
-          `,
-          { transaction: t, type: QueryTypes.INSERT,
-            replacements: { id, key, vi, vn, vt, vj } }
-        );
-      }
-    });
-
-    return res.json({ ok: true });
-  } catch (e) {
-    if (isPgMissingTable(e)) return res.status(503).json({ error: 'tenant_limits table missing' });
-    return next(e);
-  }
-});
-
-/* -------------------------------- Invoices -------------------------------- */
+/** GET /api/admin/tenants/:id/invoices — list invoices for a tenant */
 router.get('/:id/invoices', async (req, res, next) => {
   try {
-    if (!sequelize) { res.setHeader('X-Total-Count', '0'); return res.json([]); }
-    const rows = await sequelize.query(
-      `
-      SELECT id, number, amount_cents, currency, status, due_date, issued_at, paid_at
+    const id = req.params.id;
+    try {
+      const rows = await sequelize.query(
+        `
+        SELECT id, number, amount_cents, currency, status, due_date, issued_at, paid_at
         FROM public.invoices
-       WHERE tenant_id = :id
-       ORDER BY COALESCE(issued_at, created_at) DESC
-       LIMIT 250;
-      `,
-      { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
-    );
-    res.setHeader('X-Total-Count', String(rows.length || 0));
-    return res.json(rows);
+        WHERE tenant_id = :id
+        ORDER BY COALESCE(issued_at, created_at) DESC
+        LIMIT 250
+        `,
+        { replacements: { id }, type: QueryTypes.SELECT }
+      );
+      return res.json({ invoices: rows });
+    } catch (e) {
+      if (isMissingTable(e)) return res.json({ invoices: [] });
+      throw e;
+    }
   } catch (e) {
-    if (isPgMissingTable(e)) { res.setHeader('X-Total-Count', '0'); return res.json([]); }
-    return next(e);
+    next(e);
   }
+});
+
+/** POST /api/admin/tenants/:id/invoices/sync — placeholder for billing sync */
+router.post('/:id/invoices/sync', async (_req, res) => {
+  // Hook your external billing sync here if needed
+  res.json({ ok: true });
 });
 
 module.exports = router;
