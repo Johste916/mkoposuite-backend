@@ -168,10 +168,51 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
 /* ---------- Fallback tenants router (in-memory; keeps UI working) ---------- */
 function makeTenantsFallbackRouter() {
   const r = express.Router();
-  const MEM = {};
+  const MEM = new Map();
+
+  // Seed a couple of demo tenants so the UI isn't empty in dev
+  function ensureSeed() {
+    if (MEM.size) return;
+    const now = new Date().toISOString();
+    const demo = [
+      {
+        id: '11111111-1111-1111-1111-111111111111',
+        name: 'Acme Finance',
+        status: 'active',
+        plan_code: 'pro',
+        trial_ends_at: null,
+        auto_disable_overdue: false,
+        grace_days: 7,
+        billing_email: 'billing@acme.test',
+        seats: 15,
+        staff_count: 7,
+        created_at: now,
+        updated_at: now,
+      },
+      {
+        id: '22222222-2222-2222-2222-222222222222',
+        name: 'Beta Microcredit',
+        status: 'trial',
+        plan_code: 'basic',
+        trial_ends_at: new Date(Date.now()+10*86400000).toISOString().slice(0,10),
+        auto_disable_overdue: false,
+        grace_days: 7,
+        billing_email: 'accounts@beta.test',
+        seats: 5,
+        staff_count: 3,
+        created_at: now,
+        updated_at: now,
+      },
+    ];
+    demo.forEach(t => MEM.set(t.id, t));
+  }
+
   function memTenant(id) {
-    if (!MEM[id]) {
-      MEM[id] = {
+    ensureSeed();
+    if (!id) id = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000000';
+    if (!MEM.has(id)) {
+      const now = new Date().toISOString();
+      MEM.set(id, {
         id,
         name: 'Organization',
         status: 'trial',
@@ -180,31 +221,48 @@ function makeTenantsFallbackRouter() {
         auto_disable_overdue: false,
         grace_days: 7,
         billing_email: '',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+        seats: null,
+        staff_count: null,
+        created_at: now,
+        updated_at: now,
+      });
     }
-    return MEM[id];
+    return MEM.get(id);
   }
 
-  r.get('/me', (req, res) => {
-    const id = req.headers['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000000';
-    const t = memTenant(id);
-    const today = new Date().toISOString().slice(0, 10);
+  const toApi = (t) => {
+    const today = new Date().toISOString().slice(0,10);
     const trialLeft = t.trial_ends_at ? Math.ceil((Date.parse(t.trial_ends_at) - Date.parse(today)) / 86400000) : null;
-    res.json({
+    return {
       id: t.id,
       name: t.name,
       status: t.status,
       planCode: (t.plan_code || 'basic').toLowerCase(),
+      planLabel: (t.plan_code || 'basic').toLowerCase(),
       trialEndsAt: t.trial_ends_at,
       trialDaysLeft: trialLeft,
       autoDisableOverdue: !!t.auto_disable_overdue,
       graceDays: t.grace_days,
       billingEmail: t.billing_email,
+      seats: t.seats ?? null,
+      staffCount: t.staff_count ?? null,
       createdAt: t.created_at,
       updatedAt: t.updated_at,
-    });
+    };
+  };
+
+  /* ---------- NEW: list so /api/tenants works in dev ---------- */
+  r.get('/', (_req, res) => {
+    ensureSeed();
+    const list = Array.from(MEM.values()).map(toApi);
+    res.setHeader('X-Total-Count', String(list.length));
+    res.json(list);
+  });
+
+  /* ---------- keep existing "self" endpoints ---------- */
+  r.get('/me', (req, res) => {
+    const id = req.headers['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000000';
+    res.json(toApi(memTenant(id)));
   });
 
   r.patch('/me', (req, res) => {
@@ -219,9 +277,41 @@ function makeTenantsFallbackRouter() {
     if (typeof b.autoDisableOverdue === 'boolean') t.auto_disable_overdue = b.autoDisableOverdue;
     if (!Number.isNaN(Number(b.graceDays))) t.grace_days = Math.max(0, Math.min(90, Number(b.graceDays)));
     if (typeof b.billingEmail === 'string') t.billing_email = b.billingEmail.trim();
+    if ('seats' in b && (b.seats === null || Number.isFinite(Number(b.seats)))) t.seats = b.seats === null ? null : Number(b.seats);
     t.updated_at = new Date().toISOString();
-    res.json({ ok: true, tenant: t });
+    res.json({ ok: true, tenant: toApi(t) });
   });
+
+  /* ---------- NEW: details/patch by id so Manage drawer Save works ---------- */
+  r.get('/:id', (req, res) => {
+    const t = memTenant(String(req.params.id));
+    res.json(toApi(t));
+  });
+  r.patch('/:id', (req, res) => {
+    const t = memTenant(String(req.params.id));
+    const b = req.body || {};
+    if (typeof b.planCode === 'string') t.plan_code = b.planCode.toLowerCase();
+    if ('seats' in b && (b.seats === null || Number.isFinite(Number(b.seats)))) t.seats = b.seats === null ? null : Number(b.seats);
+    if (typeof b.billingEmail === 'string') t.billing_email = b.billingEmail.trim();
+    if ('trialEndsAt' in b) t.trial_ends_at = b.trialEndsAt ? String(b.trialEndsAt).slice(0,10) : null;
+    if (typeof b.status === 'string') t.status = b.status.trim().toLowerCase();
+    t.updated_at = new Date().toISOString();
+    res.json({ ok: true, tenant: toApi(t) });
+  });
+
+  /* ---------- NEW: stats + invoices endpoints used by the UI ---------- */
+  r.get('/stats', (_req, res) => {
+    ensureSeed();
+    const arr = Array.from(MEM.values()).map(t => ({
+      id: t.id,
+      staffCount: t.staff_count ?? 0,
+      seats: t.seats ?? null,
+    }));
+    res.json({ items: arr });
+  });
+
+  r.get('/:id/invoices', (_req, res) => res.json({ invoices: [] }));
+  r.post('/:id/invoices/sync', (_req, res) => res.json({ ok: true }));
 
   r.get('/me/entitlements', (_req, res) => {
     res.json({

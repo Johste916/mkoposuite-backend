@@ -39,10 +39,13 @@ function toRowShape(t) {
     name: t.name,
     status: t.status,
     planCode: (t.plan_code || 'basic').toLowerCase(),
+    planLabel: (t.plan_code || 'basic').toLowerCase(),
     billingEmail: t.billing_email || null,
     trialEndsAt: t.trial_ends_at || null,
     autoDisableOverdue: !!t.auto_disable_overdue,
     graceDays: Number.isFinite(Number(t.grace_days)) ? Number(t.grace_days) : null,
+    seats: t.seats ?? null,
+    staffCount: t.staff_count ?? null,
     createdAt: t.created_at,
     updatedAt: t.updated_at,
   };
@@ -56,11 +59,10 @@ function toRowShape(t) {
  *   status       - filter by tenant status
  *   plan         - filter by plan_code
  *   limit, offset
- *   sort         - one of created_at, updated_at, name, status, plan_code
+ *   sort         - created_at|updated_at|name|status|plan_code
  *   order        - asc|desc
  */
 router.get('/', async (req, res, next) => {
-  // Always return an array so the UI never logs "No list returned"
   const limit  = Math.min(parseIntSafe(req.query.limit, 50), 200);
   const offset = parseIntSafe(req.query.offset, 0);
   const order  = String(req.query.order || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
@@ -74,7 +76,6 @@ router.get('/', async (req, res, next) => {
 
   try {
     if (!sequelize) {
-      // No DB module available; return empty list with a correct header
       res.setHeader('X-Total-Count', '0');
       return res.json([]);
     }
@@ -96,17 +97,16 @@ router.get('/', async (req, res, next) => {
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const [[{ total }]] = await Promise.all([
-      sequelize.query(
-        `SELECT COUNT(1) AS total FROM public.tenants ${whereSql};`,
-        { replacements: repl, type: QueryTypes.SELECT }
-      ),
-    ]);
+    const [{ total }] = await sequelize.query(
+      `SELECT COUNT(1) AS total FROM public.tenants ${whereSql};`,
+      { replacements: repl, type: QueryTypes.SELECT }
+    );
 
     const rows = await sequelize.query(
       `
       SELECT id, name, status, plan_code, billing_email, trial_ends_at,
-             auto_disable_overdue, grace_days, created_at, updated_at
+             auto_disable_overdue, grace_days, seats, staff_count,
+             created_at, updated_at
         FROM public.tenants
         ${whereSql}
         ORDER BY ${sort} ${order}
@@ -119,7 +119,6 @@ router.get('/', async (req, res, next) => {
     return res.json(rows.map(toRowShape));
   } catch (e) {
     if (isPgMissingTable(e)) {
-      // tenants table not migrated yet — degrade to empty list (UI stays functional)
       res.setHeader('X-Total-Count', '0');
       return res.json([]);
     }
@@ -128,14 +127,14 @@ router.get('/', async (req, res, next) => {
 });
 
 /* --------------------------------- READ ----------------------------------- */
-// GET /api/admin/tenants/:id
 router.get('/:id', async (req, res, next) => {
   try {
     if (!sequelize) return res.status(404).json({ error: 'Not found' });
     const rows = await sequelize.query(
       `
       SELECT id, name, status, plan_code, billing_email, trial_ends_at,
-             auto_disable_overdue, grace_days, created_at, updated_at
+             auto_disable_overdue, grace_days, seats, staff_count,
+             created_at, updated_at
         FROM public.tenants
        WHERE id = :id
        LIMIT 1;
@@ -152,7 +151,6 @@ router.get('/:id', async (req, res, next) => {
 });
 
 /* --------------------------------- PATCH ---------------------------------- */
-// PATCH /api/admin/tenants/:id
 router.patch('/:id', async (req, res, next) => {
   const body = req.body || {};
   const sets = [];
@@ -168,6 +166,9 @@ router.patch('/:id', async (req, res, next) => {
   }
   if ('graceDays' in body && Number.isFinite(Number(body.graceDays))) {
     sets.push(`grace_days = :grace_days`); rep.grace_days = Math.max(0, Math.min(90, Number(body.graceDays)));
+  }
+  if ('seats' in body && (body.seats === null || Number.isFinite(Number(body.seats)))) {
+    sets.push(`seats = :seats`); rep.seats = body.seats === null ? null : Number(body.seats);
   }
   if ('trialEndsAt' in body) {
     if (body.trialEndsAt === null || body.trialEndsAt === '') {
@@ -192,7 +193,8 @@ router.patch('/:id', async (req, res, next) => {
     const rows = await sequelize.query(
       `
       SELECT id, name, status, plan_code, billing_email, trial_ends_at,
-             auto_disable_overdue, grace_days, created_at, updated_at
+             auto_disable_overdue, grace_days, seats, staff_count,
+             created_at, updated_at
         FROM public.tenants
        WHERE id = :id
        LIMIT 1;
@@ -207,7 +209,6 @@ router.patch('/:id', async (req, res, next) => {
 });
 
 /* --------------------------- Suspend / Resume ------------------------------ */
-// POST /api/admin/tenants/:id/suspend
 router.post('/:id/suspend', async (req, res, next) => {
   try {
     if (!sequelize) return res.status(503).json({ error: 'DB not available' });
@@ -222,11 +223,9 @@ router.post('/:id/suspend', async (req, res, next) => {
   }
 });
 
-// POST /api/admin/tenants/:id/resume
 router.post('/:id/resume', async (req, res, next) => {
   try {
     if (!sequelize) return res.status(503).json({ error: 'DB not available' });
-    // You can add invoice checks here if needed
     await sequelize.query(
       `UPDATE public.tenants SET status='active', updated_at=NOW() WHERE id=:id;`,
       { replacements: { id: req.params.id } }
@@ -238,15 +237,13 @@ router.post('/:id/resume', async (req, res, next) => {
   }
 });
 
-/* ------------------------------- Features --------------------------------- */
-// POST /api/admin/tenants/:id/features  { key:enabled, ... }
+/* --------------------------------- Features -------------------------------- */
 router.post('/:id/features', async (req, res, next) => {
   try {
     if (!sequelize) return res.status(503).json({ error: 'DB not available' });
     const id = req.params.id;
     const flags = req.body && typeof req.body === 'object' ? req.body : {};
     const entries = Object.entries(flags);
-
     if (!entries.length) return res.json({ ok: true });
 
     await sequelize.transaction(async (t) => {
@@ -263,7 +260,6 @@ router.post('/:id/features', async (req, res, next) => {
         );
       }
     });
-
     return res.json({ ok: true });
   } catch (e) {
     if (isPgMissingTable(e)) return res.status(503).json({ error: 'feature_flags table missing' });
@@ -271,8 +267,7 @@ router.post('/:id/features', async (req, res, next) => {
   }
 });
 
-/* --------------------------------- Limits --------------------------------- */
-// POST /api/admin/tenants/:id/limits  { key: value, ... }
+/* ---------------------------------- Limits --------------------------------- */
 router.post('/:id/limits', async (req, res, next) => {
   try {
     if (!sequelize) return res.status(503).json({ error: 'DB not available' });
@@ -318,7 +313,6 @@ router.post('/:id/limits', async (req, res, next) => {
 });
 
 /* -------------------------------- Invoices -------------------------------- */
-// GET /api/admin/tenants/:id/invoices
 router.get('/:id/invoices', async (req, res, next) => {
   try {
     if (!sequelize) { res.setHeader('X-Total-Count', '0'); return res.json([]); }
