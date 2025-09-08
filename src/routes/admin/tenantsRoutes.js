@@ -1,355 +1,343 @@
 'use strict';
+
 const express = require('express');
 const router = express.Router();
+let sequelize, QueryTypes;
+try {
+  ({ sequelize } = require('../../models'));
+  ({ QueryTypes } = require('sequelize'));
+} catch {}
 
-const { authenticateUser, authorizeRoles } = require('../../middleware/authMiddleware');
+/* ------------------------------- Utilities -------------------------------- */
 
-function getModels(req) {
-  try { return req.app.get('models') || require('../../models'); }
-  catch { return null; }
-}
+const isPgMissingTable = (e) =>
+  e?.original?.code === '42P01' || e?.parent?.code === '42P01';
 
-const ADMIN_ROLES = ['super_admin', 'system_admin', 'developer', 'admin']; // keep 'admin' optional if you wish
+const toBool = (v) => {
+  if (typeof v === 'boolean') return v;
+  if (v == null) return undefined;
+  const s = String(v).toLowerCase();
+  if (['1','true','yes','on'].includes(s)) return true;
+  if (['0','false','no','off'].includes(s)) return false;
+  return undefined;
+};
 
-// Helper: safe single row
-async function one(q, sql, bind = []) {
-  const [rows] = await q.query(sql, { bind });
-  return rows?.[0] || null;
-}
-async function many(q, sql, bind = []) {
-  const [rows] = await q.query(sql, { bind });
-  return rows || [];
-}
+const parseIntSafe = (v, d) => {
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) && n >= 0 ? n : d;
+};
 
-// Convert entitlement keys array -> {module: bool}
-function entKeysToModules(keys) {
-  const on = new Set(keys || []);
-  const has = (k) => on.has(k);
+const ALLOWED_SORT = new Set(['created_at','updated_at','name','status','plan_code']);
+const ALLOWED_STATUS = new Set(['active','suspended','trial','trialing','past_due']);
+
+/* ------------------------- Shape converters (DTO) ------------------------- */
+
+function toRowShape(t) {
+  if (!t) return null;
   return {
-    savings:      has('savings.view'),
-    accounting:   has('accounting.view'),
-    payroll:      has('payroll.view'),
-    collateral:   has('collateral.view'),
-    loans:        has('loans.view'),
-    sms:          has('sms.send'),
-    investors:    has('investors.view'),
-    collections:  has('collections.view'),
-    esignatures:  has('esign.view'),
-    assets:       has('assets.view'),
-    reports:      has('reports.view'),
+    id: t.id,
+    name: t.name,
+    status: t.status,
+    planCode: (t.plan_code || 'basic').toLowerCase(),
+    billingEmail: t.billing_email || null,
+    trialEndsAt: t.trial_ends_at || null,
+    autoDisableOverdue: !!t.auto_disable_overdue,
+    graceDays: Number.isFinite(Number(t.grace_days)) ? Number(t.grace_days) : null,
+    createdAt: t.created_at,
+    updatedAt: t.updated_at,
   };
 }
 
-// GET /api/admin/tenants  (list + basic search)
-router.get('/',
-  authenticateUser,
-  authorizeRoles(...ADMIN_ROLES),
-  async (req, res) => {
-    try {
-      const m = getModels(req);
-      if (!m?.sequelize) return res.status(500).json({ error: 'DB unavailable' });
+/* --------------------------------- LIST ----------------------------------- */
+/**
+ * GET /api/admin/tenants
+ * Query:
+ *   q            - search by name or billing_email
+ *   status       - filter by tenant status
+ *   plan         - filter by plan_code
+ *   limit, offset
+ *   sort         - one of created_at, updated_at, name, status, plan_code
+ *   order        - asc|desc
+ */
+router.get('/', async (req, res, next) => {
+  // Always return an array so the UI never logs "No list returned"
+  const limit  = Math.min(parseIntSafe(req.query.limit, 50), 200);
+  const offset = parseIntSafe(req.query.offset, 0);
+  const order  = String(req.query.order || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+  const sort   = ALLOWED_SORT.has(String(req.query.sort || '').toLowerCase())
+    ? String(req.query.sort).toLowerCase()
+    : 'created_at';
 
-      const q = m.sequelize;
-      const search = (req.query.q || req.query.search || '').trim();
-      const limit  = Math.min(Number(req.query.limit) || 25, 100);
-      const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const q = (req.query.q || '').trim();
+  const status = (req.query.status || '').toLowerCase();
+  const plan   = (req.query.plan || '').toLowerCase();
 
-      const where = search
-        ? `WHERE (LOWER(name) LIKE LOWER('%' || $1 || '%')
-                 OR LOWER(slug) LIKE LOWER('%' || $1 || '%')
-                 OR id::text LIKE LOWER('%' || $1 || '%'))`
-        : '';
-      const bind = search ? [search, limit, offset] : [limit, offset];
+  try {
+    if (!sequelize) {
+      // No DB module available; return empty list with a correct header
+      res.setHeader('X-Total-Count', '0');
+      return res.json([]);
+    }
 
-      const rows = await many(q, `
-        SELECT id, name, slug, status, plan_code, plan_id,
-               trial_ends_at, grace_days, auto_disable_overdue, billing_email,
-               created_at, updated_at
+    const where = [];
+    const repl  = { limit, offset };
+
+    if (q) {
+      where.push(`(name ILIKE :q OR billing_email ILIKE :q)`);
+      repl.q = `%${q}%`;
+    }
+    if (status && ALLOWED_STATUS.has(status)) {
+      where.push(`status = :status`);
+      repl.status = status;
+    }
+    if (plan) {
+      where.push(`LOWER(plan_code) = :plan`);
+      repl.plan = plan;
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const [[{ total }]] = await Promise.all([
+      sequelize.query(
+        `SELECT COUNT(1) AS total FROM public.tenants ${whereSql};`,
+        { replacements: repl, type: QueryTypes.SELECT }
+      ),
+    ]);
+
+    const rows = await sequelize.query(
+      `
+      SELECT id, name, status, plan_code, billing_email, trial_ends_at,
+             auto_disable_overdue, grace_days, created_at, updated_at
         FROM public.tenants
-        ${where}
-        ORDER BY created_at DESC
-        LIMIT $${bind.length - 1} OFFSET $${bind.length}
-      `, bind);
+        ${whereSql}
+        ORDER BY ${sort} ${order}
+        LIMIT :limit OFFSET :offset;
+      `,
+      { replacements: repl, type: QueryTypes.SELECT }
+    );
 
-      const [{ count }] = await many(q, `
-        SELECT COUNT(*)::int AS count
-        FROM public.tenants ${where}
-      `, search ? [search] : []);
-
-      res.setHeader('X-Total-Count', String(count));
-      return res.json(rows);
-    } catch (e) {
-      return res.status(500).json({ error: e.message });
+    res.setHeader('X-Total-Count', String(total || 0));
+    return res.json(rows.map(toRowShape));
+  } catch (e) {
+    if (isPgMissingTable(e)) {
+      // tenants table not migrated yet — degrade to empty list (UI stays functional)
+      res.setHeader('X-Total-Count', '0');
+      return res.json([]);
     }
+    return next(e);
   }
-);
+});
 
-// GET /api/admin/tenants/:id  (full overview)
-router.get('/:id',
-  authenticateUser,
-  authorizeRoles(...ADMIN_ROLES),
-  async (req, res) => {
-    try {
-      const m = getModels(req);
-      const q = m?.sequelize;
-      if (!q) return res.status(500).json({ error: 'DB unavailable' });
-
-      const id = req.params.id;
-
-      const t = await one(q, `
-        SELECT id, name, slug, status, plan_code, plan_id,
-               trial_ends_at, grace_days, auto_disable_overdue, billing_email,
-               created_at, updated_at
+/* --------------------------------- READ ----------------------------------- */
+// GET /api/admin/tenants/:id
+router.get('/:id', async (req, res, next) => {
+  try {
+    if (!sequelize) return res.status(404).json({ error: 'Not found' });
+    const rows = await sequelize.query(
+      `
+      SELECT id, name, status, plan_code, billing_email, trial_ends_at,
+             auto_disable_overdue, grace_days, created_at, updated_at
         FROM public.tenants
-        WHERE id = $1
-      `, [id]);
-      if (!t) return res.status(404).json({ error: 'Tenant not found' });
+       WHERE id = :id
+       LIMIT 1;
+      `,
+      { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
+    );
+    const row = rows[0];
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    return res.json(toRowShape(row));
+  } catch (e) {
+    if (isPgMissingTable(e)) return res.status(404).json({ error: 'Not found' });
+    return next(e);
+  }
+});
 
-      // plan row (limits)
-      let plan = null;
-      if (t.plan_id) {
-        plan = await one(q, `SELECT id, code, name, limits FROM public.plans WHERE id = $1`, [t.plan_id]);
-      } else if (t.plan_code) {
-        plan = await one(q, `SELECT id, code, name, limits FROM public.plans WHERE LOWER(code)=LOWER($1)`, [t.plan_code]);
+/* --------------------------------- PATCH ---------------------------------- */
+// PATCH /api/admin/tenants/:id
+router.patch('/:id', async (req, res, next) => {
+  const body = req.body || {};
+  const sets = [];
+  const rep  = { id: req.params.id };
+
+  if (typeof body.name === 'string')               { sets.push(`name = :name`); rep.name = body.name.trim(); }
+  if (typeof body.status === 'string')             { sets.push(`status = :status`); rep.status = body.status.trim().toLowerCase(); }
+  if (typeof body.planCode === 'string')           { sets.push(`plan_code = :plan_code`); rep.plan_code = body.planCode.trim().toLowerCase(); }
+  if (typeof body.billingEmail === 'string')       { sets.push(`billing_email = :billing_email`); rep.billing_email = body.billingEmail.trim(); }
+  if ('autoDisableOverdue' in body) {
+    const v = toBool(body.autoDisableOverdue);
+    if (typeof v === 'boolean') { sets.push(`auto_disable_overdue = :ado`); rep.ado = v; }
+  }
+  if ('graceDays' in body && Number.isFinite(Number(body.graceDays))) {
+    sets.push(`grace_days = :grace_days`); rep.grace_days = Math.max(0, Math.min(90, Number(body.graceDays)));
+  }
+  if ('trialEndsAt' in body) {
+    if (body.trialEndsAt === null || body.trialEndsAt === '') {
+      sets.push(`trial_ends_at = NULL`);
+    } else if (typeof body.trialEndsAt === 'string') {
+      sets.push(`trial_ends_at = :trial_ends_at`); rep.trial_ends_at = body.trialEndsAt.slice(0,10);
+    }
+  }
+
+  if (!sets.length) return res.json({ ok: true });
+
+  try {
+    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
+    await sequelize.query(
+      `
+      UPDATE public.tenants
+         SET ${sets.join(', ')}, updated_at = NOW()
+       WHERE id = :id;
+      `,
+      { replacements: rep }
+    );
+    const rows = await sequelize.query(
+      `
+      SELECT id, name, status, plan_code, billing_email, trial_ends_at,
+             auto_disable_overdue, grace_days, created_at, updated_at
+        FROM public.tenants
+       WHERE id = :id
+       LIMIT 1;
+      `,
+      { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
+    );
+    return res.json({ ok: true, tenant: toRowShape(rows[0]) });
+  } catch (e) {
+    if (isPgMissingTable(e)) return res.status(503).json({ error: 'Tenants table missing' });
+    return next(e);
+  }
+});
+
+/* --------------------------- Suspend / Resume ------------------------------ */
+// POST /api/admin/tenants/:id/suspend
+router.post('/:id/suspend', async (req, res, next) => {
+  try {
+    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
+    await sequelize.query(
+      `UPDATE public.tenants SET status='suspended', updated_at=NOW() WHERE id=:id;`,
+      { replacements: { id: req.params.id } }
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    if (isPgMissingTable(e)) return res.status(503).json({ error: 'Tenants table missing' });
+    return next(e);
+  }
+});
+
+// POST /api/admin/tenants/:id/resume
+router.post('/:id/resume', async (req, res, next) => {
+  try {
+    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
+    // You can add invoice checks here if needed
+    await sequelize.query(
+      `UPDATE public.tenants SET status='active', updated_at=NOW() WHERE id=:id;`,
+      { replacements: { id: req.params.id } }
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    if (isPgMissingTable(e)) return res.status(503).json({ error: 'Tenants table missing' });
+    return next(e);
+  }
+});
+
+/* ------------------------------- Features --------------------------------- */
+// POST /api/admin/tenants/:id/features  { key:enabled, ... }
+router.post('/:id/features', async (req, res, next) => {
+  try {
+    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
+    const id = req.params.id;
+    const flags = req.body && typeof req.body === 'object' ? req.body : {};
+    const entries = Object.entries(flags);
+
+    if (!entries.length) return res.json({ ok: true });
+
+    await sequelize.transaction(async (t) => {
+      for (const [key, enabled] of entries) {
+        await sequelize.query(
+          `
+          INSERT INTO public.feature_flags (tenant_id, key, enabled, created_at, updated_at)
+          VALUES (:id, :key, :enabled, NOW(), NOW())
+          ON CONFLICT (tenant_id, key) DO UPDATE
+            SET enabled = EXCLUDED.enabled,
+                updated_at = NOW();
+          `,
+          { transaction: t, type: QueryTypes.INSERT, replacements: { id, key, enabled: !!enabled } }
+        );
       }
+    });
 
-      // effective entitlements (plan map + overrides)
-      let keys = [];
-      try {
-        if (plan?.id) {
-          const rows = await many(q, `
-            SELECT e.key
-            FROM public.plan_entitlements pe
-            JOIN public.entitlements e ON e.id = pe.entitlement_id
-            WHERE pe.plan_id = $1
-          `, [plan.id]);
-          keys = rows.map(r => r.key);
+    return res.json({ ok: true });
+  } catch (e) {
+    if (isPgMissingTable(e)) return res.status(503).json({ error: 'feature_flags table missing' });
+    return next(e);
+  }
+});
+
+/* --------------------------------- Limits --------------------------------- */
+// POST /api/admin/tenants/:id/limits  { key: value, ... }
+router.post('/:id/limits', async (req, res, next) => {
+  try {
+    if (!sequelize) return res.status(503).json({ error: 'DB not available' });
+    const id = req.params.id;
+    const limits = req.body && typeof req.body === 'object' ? req.body : {};
+    const entries = Object.entries(limits);
+    if (!entries.length) return res.json({ ok: true });
+
+    await sequelize.transaction(async (t) => {
+      for (const [key, val] of entries) {
+        let vi = null, vn = null, vt = null, vj = null;
+        if (typeof val === 'number' && Number.isFinite(val)) {
+          if (Number.isInteger(val)) vi = val; else vn = val;
+        } else if (typeof val === 'string') {
+          vt = val;
+        } else {
+          vj = JSON.stringify(val);
         }
-      } catch {}
-
-      // overrides from feature_flags
-      let overrides = {};
-      try {
-        const rows = await many(q, `
-          SELECT key, enabled::boolean AS enabled
-          FROM public.feature_flags
-          WHERE tenant_id = $1
-        `, [id]);
-        overrides = Object.fromEntries(rows.map(r => [r.key, !!r.enabled]));
-      } catch {}
-
-      // calculate effective modules (plan keys + overrides)
-      const baseMods = entKeysToModules(keys);
-      for (const [k, v] of Object.entries(overrides)) {
-        // translate override keys to module names (only those we know)
-        if (k.endsWith('.view') || k === 'sms.send' || k === 'esign.view') {
-          const map = {
-            'savings.view': 'savings',
-            'accounting.view': 'accounting',
-            'payroll.view': 'payroll',
-            'collateral.view': 'collateral',
-            'loans.view': 'loans',
-            'sms.send': 'sms',
-            'investors.view': 'investors',
-            'collections.view': 'collections',
-            'esign.view': 'esignatures',
-            'assets.view': 'assets',
-            'reports.view': 'reports',
-          };
-          const mod = map[k];
-          if (mod) baseMods[mod] = !!v;
-        }
+        await sequelize.query(
+          `
+          INSERT INTO public.tenant_limits
+            (tenant_id, key, value_int, value_numeric, value_text, value_json, created_at, updated_at)
+          VALUES
+            (:id, :key, :vi, :vn, :vt, :vj, NOW(), NOW())
+          ON CONFLICT (tenant_id, key) DO UPDATE SET
+            value_int     = EXCLUDED.value_int,
+            value_numeric = EXCLUDED.value_numeric,
+            value_text    = EXCLUDED.value_text,
+            value_json    = EXCLUDED.value_json,
+            updated_at    = NOW();
+          `,
+          { transaction: t, type: QueryTypes.INSERT,
+            replacements: { id, key, vi, vn, vt, vj } }
+        );
       }
+    });
 
-      // invoices (if table exists)
-      let invoices = [];
-      try {
-        invoices = await many(q, `
-          SELECT id, number, amount_cents, currency, due_date, status, meta, created_at
-          FROM public.invoices
-          WHERE tenant_id = $1
-          ORDER BY created_at DESC
-        `, [id]);
-      } catch {}
-
-      res.json({
-        tenant: t,
-        plan: plan || null,
-        modules: baseMods,
-        overrides,
-        invoices,
-      });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
+    return res.json({ ok: true });
+  } catch (e) {
+    if (isPgMissingTable(e)) return res.status(503).json({ error: 'tenant_limits table missing' });
+    return next(e);
   }
-);
+});
 
-// PATCH /api/admin/tenants/:id (basic updates + planCode)
-router.patch('/:id',
-  authenticateUser,
-  authorizeRoles(...ADMIN_ROLES),
-  async (req, res) => {
-    try {
-      const m = getModels(req);
-      const q = m?.sequelize;
-      if (!q) return res.status(500).json({ error: 'DB unavailable' });
-
-      const id = req.params.id;
-      const b = req.body || {};
-
-      // Update columns if they exist
-      const fields = [];
-      const bind = [];
-      const push = (col, val) => { fields.push(`${col} = $${bind.length + 1}`); bind.push(val); };
-
-      if (typeof b.name === 'string') push('name', b.name.trim());
-      if (typeof b.status === 'string') push('status', b.status.trim());
-      if (typeof b.planCode === 'string') push('plan_code', b.planCode.toLowerCase());
-      if (typeof b.trialEndsAt !== 'undefined') push('trial_ends_at', b.trialEndsAt ? String(b.trialEndsAt).slice(0,10) : null);
-      if (typeof b.graceDays !== 'undefined') push('grace_days', Math.max(0, Math.min(90, Number(b.graceDays || 0))));
-      if (typeof b.autoDisableOverdue === 'boolean') push('auto_disable_overdue', b.autoDisableOverdue);
-      if (typeof b.billingEmail === 'string') push('billing_email', b.billingEmail.trim());
-
-      if (fields.length === 0) return res.json({ ok: true, updated: 0 });
-
-      bind.push(id);
-      const row = await one(q, `
-        UPDATE public.tenants SET ${fields.join(', ')}, updated_at = NOW()
-        WHERE id = $${bind.length}
-        RETURNING id, name, slug, status, plan_code, plan_id, trial_ends_at, grace_days, auto_disable_overdue, billing_email, updated_at
-      `, bind);
-
-      return res.json({ ok: true, tenant: row });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
+/* -------------------------------- Invoices -------------------------------- */
+// GET /api/admin/tenants/:id/invoices
+router.get('/:id/invoices', async (req, res, next) => {
+  try {
+    if (!sequelize) { res.setHeader('X-Total-Count', '0'); return res.json([]); }
+    const rows = await sequelize.query(
+      `
+      SELECT id, number, amount_cents, currency, status, due_date, issued_at, paid_at
+        FROM public.invoices
+       WHERE tenant_id = :id
+       ORDER BY COALESCE(issued_at, created_at) DESC
+       LIMIT 250;
+      `,
+      { replacements: { id: req.params.id }, type: QueryTypes.SELECT }
+    );
+    res.setHeader('X-Total-Count', String(rows.length || 0));
+    return res.json(rows);
+  } catch (e) {
+    if (isPgMissingTable(e)) { res.setHeader('X-Total-Count', '0'); return res.json([]); }
+    return next(e);
   }
-);
-
-// POST /api/admin/tenants/:id/entitlements (upsert override)
-// body: { key: 'loans.view'|'sms.send'|..., enabled: true|false }
-router.post('/:id/entitlements',
-  authenticateUser,
-  authorizeRoles(...ADMIN_ROLES),
-  async (req, res) => {
-    try {
-      const m = getModels(req);
-      const q = m?.sequelize;
-      if (!q) return res.status(500).json({ error: 'DB unavailable' });
-      const id = req.params.id;
-      const { key, enabled } = req.body || {};
-      if (!key || typeof enabled !== 'boolean') {
-        return res.status(400).json({ error: 'key and enabled are required' });
-      }
-
-      await q.query(`
-        INSERT INTO public.feature_flags (tenant_id, key, enabled, created_at, updated_at)
-        VALUES ($1,$2,$3,NOW(),NOW())
-        ON CONFLICT (tenant_id, key)
-        DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = NOW()
-      `, { bind: [id, key, !!enabled] });
-
-      return res.json({ ok: true });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  }
-);
-
-// DELETE /api/admin/tenants/:id/entitlements/:key (remove override)
-router.delete('/:id/entitlements/:key',
-  authenticateUser,
-  authorizeRoles(...ADMIN_ROLES),
-  async (req, res) => {
-    try {
-      const m = getModels(req);
-      const q = m?.sequelize;
-      if (!q) return res.status(500).json({ error: 'DB unavailable' });
-      await q.query(`DELETE FROM public.feature_flags WHERE tenant_id = $1 AND key = $2`, {
-        bind: [req.params.id, req.params.key]
-      });
-      return res.status(204).end();
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  }
-);
-
-// POST /api/admin/tenants/:id/invoices  (create placeholder)
-router.post('/:id/invoices',
-  authenticateUser,
-  authorizeRoles(...ADMIN_ROLES),
-  async (req, res) => {
-    try {
-      const m = getModels(req);
-      const q = m?.sequelize;
-      if (!q) return res.status(500).json({ error: 'DB unavailable' });
-
-      const { amountCents, currency = 'USD', dueDate } = req.body || {};
-      if (!Number.isInteger(amountCents) || amountCents <= 0) return res.status(400).json({ error: 'amountCents must be positive integer' });
-
-      const row = await one(q, `
-        INSERT INTO public.invoices (tenant_id, number, amount_cents, currency, due_date, status, created_at, updated_at)
-        VALUES ($1, CONCAT('INV-', TO_CHAR(NOW(), 'YYYYMMDDHH24MISS')), $2, $3, $4, 'open', NOW(), NOW())
-        RETURNING id, number, amount_cents, currency, due_date, status, created_at
-      `, [req.params.id, amountCents, currency, dueDate || null]);
-
-      res.status(201).json(row);
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  }
-);
-
-// POST /api/admin/tenants/:id/invoices/:invId/pay  (mark paid)
-router.post('/:id/invoices/:invId/pay',
-  authenticateUser,
-  authorizeRoles(...ADMIN_ROLES),
-  async (req, res) => {
-    try {
-      const m = getModels(req);
-      const q = m?.sequelize;
-      if (!q) return res.status(500).json({ error: 'DB unavailable' });
-
-      const row = await one(q, `
-        UPDATE public.invoices SET status='paid', updated_at=NOW()
-        WHERE id = $1 AND tenant_id = $2
-        RETURNING id, number, amount_cents, currency, due_date, status, created_at
-      `, [req.params.invId, req.params.id]);
-      if (!row) return res.status(404).json({ error: 'Invoice not found' });
-      res.json(row);
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  }
-);
-
-// POST /api/admin/tenants/:id/impersonate  → returns one-time JWT for the tenant
-router.post('/:id/impersonate',
-  authenticateUser,
-  authorizeRoles(...ADMIN_ROLES),
-  async (req, res) => {
-    try {
-      const jwt = require('jsonwebtoken');
-      const secret = process.env.JWT_SECRET || process.env.JWT_KEY;
-      if (!secret) return res.status(500).json({ error: 'JWT secret not configured' });
-
-      // the token only needs a minimal payload to sign in the tenant app;
-      // your login guard already accepts id/email/name/roles if present.
-      const payload = {
-        sub: req.user?.id,
-        act_as_tenant: req.params.id,
-        // keep a short lifetime
-        exp: Math.floor(Date.now()/1000) + 60 * 5, // 5 minutes
-        sudo: true,
-      };
-      const token = jwt.sign(payload, secret);
-      return res.json({ token, expiresInSeconds: 300 });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  }
-);
+});
 
 module.exports = router;
