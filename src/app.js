@@ -166,8 +166,8 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
 }
 
 /* --------------------- Shared in-memory stores for fallbacks --------------- */
-const SUPPORT_STORE = { TICKETS: new Map(), nextId: 1 }; // shared across routers
-const SMS_LOGS = []; // { id, tenantId?, to, message, from, at, status }
+const SUPPORT_STORE = { TICKETS: new Map(), nextId: 1 };
+const SMS_LOGS = [];
 
 /* ---------- Fallback tenants router (in-memory; keeps UI working) ---------- */
 function makeTenantsFallbackRouter() {
@@ -756,6 +756,9 @@ const adminReportSubRoutes  = safeLoadRoutes('./routes/admin/reportSubscriptionR
 const adminTypesRoutes      = safeLoadRoutes('./routes/admin/typesRoutes', makeDummyRouter([]));
 const adminTemplatesRoutes  = safeLoadRoutes('./routes/admin/templatesRoutes', makeDummyRouter([]));
 
+/* 🆕 Public signup (self-service) */
+const publicSignupRoutes    = safeLoadRoutes('./routes/publicSignupRoutes', makeDummyRouter({ error: 'Signup disabled' }));
+
 /* New modules — optional/dummy-friendly */
 const collateralRoutes = safeLoadRoutes('./routes/collateralRoutes', makeDummyRouter([
   { id: 1, borrower: 'John Doe', item: 'Laptop', model: 'Dell', status: 'Active' },
@@ -888,6 +891,9 @@ if (sequelize && !FORCE_REAL) {
 
 /* --------------------------------- Mounting -------------------------------- */
 app.use('/api/borrowers/search', borrowerSearchRoutes);
+
+/* 🆕 Public self-service signup (no auth) */
+app.use('/api/signup', publicSignupRoutes);
 
 app.use('/api/auth',   authRoutes);
 app.use('/api/login',  authRoutes);
