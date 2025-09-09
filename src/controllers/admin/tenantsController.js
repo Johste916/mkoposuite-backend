@@ -7,13 +7,22 @@ try { jwt = require('jsonwebtoken'); } catch {}
 const { sequelize } = require('../../models');
 const { QueryTypes } = require('sequelize');
 
-const isMissing = (e) => e?.original?.code === '42P01' || e?.parent?.code === '42P01';
+// Tolerate "table missing" across common dialects
+const isMissing = (e) => {
+  const code = e?.original?.code || e?.parent?.code;
+  const msg  = e?.original?.message || e?.parent?.message || e?.message || '';
+  return (
+    code === '42P01' ||                              // Postgres: undefined_table
+    code === 'SQLITE_ERROR' && /no such table/i.test(msg) || // SQLite
+    code === 'ER_NO_SUCH_TABLE'                      // MySQL
+  );
+};
 
 const pick = (o, keys) => Object.fromEntries(keys.filter(k => k in o).map(k => [k, o[k]]));
 
 function sanitizeCore(body = {}) {
   const out = {};
-  if (typeof body.planCode === 'string') out.planCode = body.planCode.toLowerCase();
+  if (typeof body.planCode === 'string') out.planCode = body.planCode.toLowerCase().trim();
   if (Number.isFinite(Number(body.seats))) out.seats = Number(body.seats);
   if (typeof body.billingEmail === 'string') out.billingEmail = body.billingEmail.trim();
   if (typeof body.status === 'string') out.status = body.status.trim().toLowerCase();
@@ -41,6 +50,9 @@ exports.list = async (req, res, next) => {
        order by t.created_at desc
        limit 500
     `, { bind: [q], type: QueryTypes.SELECT });
+
+    // Helpful header; does not change payload shape
+    res.setHeader('X-Total-Count', String(rows.length));
     return res.json(rows);
   } catch (e) {
     if (isMissing(e)) return res.json([]); // tolerate missing tables
@@ -49,40 +61,55 @@ exports.list = async (req, res, next) => {
 };
 
 exports.read = async (req, res, next) => {
-  const id = req.params.id;
+  const id = String(req.params.id || '');
   try {
-    const rows = await sequelize.query(`select * from public.tenants where id = :id limit 1`,
-      { replacements: { id }, type: QueryTypes.SELECT });
+    const rows = await sequelize.query(
+      `select * from public.tenants where id = :id limit 1`,
+      { replacements: { id }, type: QueryTypes.SELECT }
+    );
     return res.json(rows[0] || null);
-  } catch (e) { if (isMissing(e)) return res.json(null); next(e); }
+  } catch (e) {
+    if (isMissing(e)) return res.json(null);
+    next(e);
+  }
 };
 
 /* -------------------------- Update subscription/core ------------------------- */
 exports.updateCore = async (req, res, next) => {
-  const id = req.params.id;
+  const id = String(req.params.id || '');
   const body = sanitizeCore(req.body || {});
   if (!Object.keys(body).length) return res.json({ ok: true });
 
   try {
     const setParts = [];
     const rep = { id };
-    if ('planCode' in body) { setParts.push(`plan_code = :planCode`); rep.planCode = body.planCode; }
-    if ('seats' in body) { setParts.push(`seats = :seats`); rep.seats = body.seats; }
-    if ('billingEmail' in body) { setParts.push(`billing_email = :billingEmail`); rep.billingEmail = body.billingEmail; }
-    if ('trialEndsAt' in body) { setParts.push(`trial_ends_at = :trialEndsAt`); rep.trialEndsAt = body.trialEndsAt; }
-    if ('status' in body) { setParts.push(`status = :status`); rep.status = body.status; }
+    if ('planCode' in body)      { setParts.push(`plan_code = :planCode`); rep.planCode = body.planCode; }
+    if ('seats' in body)         { setParts.push(`seats = :seats`); rep.seats = body.seats; }
+    if ('billingEmail' in body)  { setParts.push(`billing_email = :billingEmail`); rep.billingEmail = body.billingEmail; }
+    if ('trialEndsAt' in body)   { setParts.push(`trial_ends_at = :trialEndsAt`); rep.trialEndsAt = body.trialEndsAt; }
+    if ('status' in body)        { setParts.push(`status = :status`); rep.status = body.status; }
 
-    await sequelize.query(`update public.tenants set ${setParts.join(', ')}, updated_at = now() where id = :id`, { replacements: rep });
+    if (!setParts.length) return res.json({ ok: true });
 
-    const rows = await sequelize.query(`select * from public.tenants where id = :id limit 1`,
-      { replacements: { id }, type: QueryTypes.SELECT });
+    await sequelize.query(
+      `update public.tenants set ${setParts.join(', ')}, updated_at = now() where id = :id`,
+      { replacements: rep }
+    );
+
+    const rows = await sequelize.query(
+      `select * from public.tenants where id = :id limit 1`,
+      { replacements: { id }, type: QueryTypes.SELECT }
+    );
     return res.json({ ok: true, tenant: rows[0] || null });
-  } catch (e) { if (isMissing(e)) return res.json({ ok: true }); next(e); }
+  } catch (e) {
+    if (isMissing(e)) return res.json({ ok: true });
+    next(e);
+  }
 };
 
 /* -------------------------------- Entitlements -------------------------------- */
 exports.setEntitlements = async (req, res, next) => {
-  const id = req.params.id;
+  const id = String(req.params.id || '');
   const body = req.body || {};
   // Supports { modules: { loans:true, savings:false, … } } OR { entitlements: ['loans.view', …] }
   let modules = body.modules && typeof body.modules === 'object' ? body.modules : null;
@@ -110,18 +137,21 @@ exports.setEntitlements = async (req, res, next) => {
       }
     });
     res.json({ ok: true });
-  } catch (e) { if (isMissing(e)) return res.json({ ok: true }); next(e); }
+  } catch (e) {
+    if (isMissing(e)) return res.json({ ok: true });
+    next(e);
+  }
 };
 
 /* ---------------------------------- Limits ---------------------------------- */
 exports.setLimits = async (req, res, next) => {
-  const id = req.params.id;
+  const id = String(req.params.id || '');
   // Supports {limits:{...}} or flat object
   const limits = req.body?.limits && typeof req.body.limits === 'object' ? req.body.limits : (req.body || {});
   try {
     await sequelize.transaction(async (t) => {
       for (const [key, val] of Object.entries(limits)) {
-        let vi=null, vn=null, vt=null, vj=null;
+        let vi = null, vn = null, vt = null, vj = null;
         if (typeof val === 'number' && Number.isFinite(val)) {
           if (Number.isInteger(val)) vi = val; else vn = val;
         } else if (typeof val === 'string') vt = val;
@@ -141,12 +171,15 @@ exports.setLimits = async (req, res, next) => {
       }
     });
     res.json({ ok: true });
-  } catch (e) { if (isMissing(e)) return res.json({ ok: true }); next(e); }
+  } catch (e) {
+    if (isMissing(e)) return res.json({ ok: true });
+    next(e);
+  }
 };
 
 /* --------------------------------- Invoices --------------------------------- */
 exports.listInvoices = async (req, res, next) => {
-  const id = req.params.id;
+  const id = String(req.params.id || '');
   try {
     const rows = await sequelize.query(`
       select id, number, amount_cents, currency, status, due_date, issued_at as created_at, pdf_url
@@ -155,12 +188,16 @@ exports.listInvoices = async (req, res, next) => {
        order by coalesce(issued_at, created_at) desc
        limit 250
     `, { replacements: { id }, type: QueryTypes.SELECT });
+    res.setHeader('X-Total-Count', String(rows.length));
     res.json(rows);
-  } catch (e) { if (isMissing(e)) return res.json([]); next(e); }
+  } catch (e) {
+    if (isMissing(e)) return res.json([]);
+    next(e);
+  }
 };
 
 exports.createInvoice = async (req, res, next) => {
-  const id = req.params.id;
+  const id = String(req.params.id || '');
   const b = req.body || {};
   const amountCents = Number.isFinite(Number(b.amountCents)) ? Number(b.amountCents)
     : (Number.isFinite(Number(b.amount)) ? Math.round(Number(b.amount) * 100) : 0);
@@ -170,28 +207,51 @@ exports.createInvoice = async (req, res, next) => {
   const number = `INV-${Date.now().toString(36).toUpperCase()}`;
 
   try {
-    const rows = await sequelize.query(`
+    const result = await sequelize.query(`
       insert into public.invoices (tenant_id, number, amount_cents, currency, status, due_date, issued_at, created_at, updated_at)
       values (:id, :number, :amount, :currency, 'open', :due, now(), now(), now())
       returning id
     `, { replacements: { id, number, amount: amountCents, currency, due: dueDate }, type: QueryTypes.INSERT });
-    const invId = rows?.[0]?.[0]?.id || null;
+
+    // Dialect-friendly extraction
+    const invId =
+      result?.[0]?.[0]?.id ?? // pg on some sequelize versions
+      result?.[0]?.id ??      // alternative shape
+      null;
+
     res.status(201).json({ id: invId, number, amount_cents: amountCents, currency, status: 'open', due_date: dueDate });
-  } catch (e) { if (isMissing(e)) return res.status(201).json({ id: crypto.randomUUID?.() || Date.now(), number, amount_cents: amountCents, currency, status: 'open', due_date: dueDate }); next(e); }
+  } catch (e) {
+    if (isMissing(e)) {
+      return res.status(201).json({
+        id: crypto.randomUUID?.() || Date.now(),
+        number,
+        amount_cents: amountCents,
+        currency,
+        status: 'open',
+        due_date: dueDate
+      });
+    }
+    next(e);
+  }
 };
 
 exports.markPaid = async (req, res, next) => {
-  const { id, invoiceId } = req.params;
+  const { id, invoiceId } = { id: String(req.params.id || ''), invoiceId: String(req.params.invoiceId || '') };
   try {
-    await sequelize.query(`update public.invoices set status='paid', paid_at=now(), updated_at=now() where id = :invoiceId and tenant_id = :id`,
-      { replacements: { id, invoiceId } });
+    await sequelize.query(
+      `update public.invoices set status='paid', paid_at=now(), updated_at=now() where id = :invoiceId and tenant_id = :id`,
+      { replacements: { id, invoiceId } }
+    );
     res.json({ ok: true });
-  } catch (e) { if (isMissing(e)) return res.json({ ok: true }); next(e); }
+  } catch (e) {
+    if (isMissing(e)) return res.json({ ok: true });
+    next(e);
+  }
 };
 
 exports.resendInvoice = async (_req, res) => {
   // Hook your email/sms bus here
-  res.json({ ok: true });
+  res.json({ ok: true, queued: true });
 };
 
 exports.syncInvoices = async (_req, res) => {
@@ -201,13 +261,13 @@ exports.syncInvoices = async (_req, res) => {
 
 /* ------------------------------- Comms & Ops -------------------------------- */
 exports.notify = async (req, res) => {
-  // You can push to email/in-app here. We just accept the payload.
+  // Accept any payload and echo back
   const payload = pick(req.body || {}, ['subject', 'message', 'channels']);
   res.json({ ok: true, delivered: true, payload });
 };
 
 exports.impersonate = async (req, res) => {
-  const tenantId = req.params.id;
+  const tenantId = String(req.params.id || '');
   const userId = req.user?.id || 'admin';
   const claims = { sub: userId, tenantId, iat: Math.floor(Date.now()/1000) };
   if (jwt && process.env.JWT_SECRET) {

@@ -894,12 +894,12 @@ app.use('/api/login',  authRoutes);
 
 app.use('/api/account', accountRoutes);
 
-/* ✅ Compat shim mounts FIRST so it handles special endpoints early */
+/* ✅ Compat shim mounts FIRST (for /api/tenants base + aliases) */
 app.use('/api/tenants', tenantsCompatRoutes);
 app.use('/api/system/tenants', tenantsCompatRoutes);
 app.use('/api/orgs', tenantsCompatRoutes);
 app.use('/api/organizations', tenantsCompatRoutes);
-app.use('/api/admin/tenants', tenantsCompatRoutes); // stats/invoices/subscription/impersonate
+/* ⛳️ CHANGED: removed early '/api/admin/tenants' compat mount here to avoid shadowing */
 
 /* ✅ Tenant feature bridge BEFORE canonical tenants to avoid shadowing */
 app.use('/api/tenants', ...auth, ...active, tenantFeatureRoutes);
@@ -935,8 +935,10 @@ app.use('/api/plans', plansRoutes);
 /* ✅ NEW: Support endpoints (tickets, etc.) */
 app.use('/api/support', ...auth, ...active, supportRoutes);
 
-/* Super-admin tenant console */
+/* Super-admin tenant console — mount REAL routes first */
 app.use('/api/admin/tenants', adminTenantsRoutes);
+/* ⛳️ CHANGED: mount compat AFTER so it only catches gaps */
+app.use('/api/admin/tenants', tenantsCompatRoutes);
 
 /* Feature modules with guards (no-op if guards missing) */
 app.use('/api/borrowers',      ...auth, ...active, borrowerRoutes);

@@ -3,144 +3,264 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 
-// Fallback stores when no DB/services exist
+/* -------------------------- Safe helpers (no-op if app already adds) -------------------------- */
+router.use((req, res, next) => {
+  if (!res.ok)   res.ok   = (data, extra = {}) => {
+    if (typeof extra.total === 'number') res.setHeader('X-Total-Count', String(extra.total));
+    if (extra.filename) res.setHeader('Content-Disposition', `attachment; filename="${extra.filename}"`);
+    return res.json(data);
+  };
+  if (!res.fail) res.fail = (status, message, extra = {}) => res.status(status).json({ error: message, ...extra });
+  next();
+});
+
+const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+const qInt  = (v, d) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+
+const getModels = (req) => {
+  const m = req.app.get('models');
+  return m && typeof m === 'object' ? m : null;
+};
+
+/* ------------------------------ In-memory fallback stores ------------------------------ */
 const mem = {
   tickets: new Map(), // id -> ticket
   nextId: 1,
   smsLogs: [],
 };
 
-function hasModels(req) {
-  const m = req.app.get('models');
-  return m && typeof m === 'object' ? m : null;
-}
+/* ==================================== Tickets ==================================== */
 
-/* ------------------------------- Tickets ---------------------------------- */
-// List tenant tickets
+/** GET /:tenantId/tickets  (supports ?status=&q=&limit=&offset=) */
 router.get('/:tenantId/tickets', async (req, res) => {
   const tenantId = String(req.params.tenantId);
-  const models = hasModels(req);
+  const status = req.query.status ? String(req.query.status).toLowerCase() : null;
+  const q = (req.query.q || '').toString().trim().toLowerCase();
+  const limit = clamp(qInt(req.query.limit, 50), 1, 200);
+  const offset = clamp(qInt(req.query.offset, 0), 0, 50_000);
+
+  const models = getModels(req);
   try {
     if (models?.SupportTicket) {
-      const items = await models.SupportTicket.findAll({
-        where: { tenantId }, order: [['updatedAt', 'DESC']], limit: 100,
+      const where = { tenantId };
+      if (status && ['open', 'resolved', 'canceled'].includes(status)) where.status = status;
+
+      const { rows, count } = await models.SupportTicket.findAndCountAll({
+        where,
+        order: [['updatedAt', 'DESC']],
+        limit,
+        offset,
       });
-      return res.ok(items);
+
+      // Optional "q" client-side filter to avoid dialect-specific ILIKE in fallback mode
+      const filtered = q
+        ? rows.filter(t => String(t.subject || '').toLowerCase().includes(q))
+        : rows;
+
+      res.setHeader('X-Total-Count', String(q ? filtered.length : count));
+      return res.ok(filtered);
     }
-    const items = Array.from(mem.tickets.values()).filter(t => t.tenantId === tenantId);
-    res.setHeader('X-Total-Count', String(items.length));
+
+    // Fallback: in-memory
+    let items = Array.from(mem.tickets.values()).filter(t => t.tenantId === tenantId);
+    if (status && ['open','resolved','canceled'].includes(status)) items = items.filter(t => t.status === status);
+    if (q) items = items.filter(t => String(t.subject || '').toLowerCase().includes(q));
+    const total = items.length;
+    items = items.sort((a,b) => (b.updatedAt||'').localeCompare(a.updatedAt||'')).slice(offset, offset + limit);
+    res.setHeader('X-Total-Count', String(total));
     return res.ok(items);
-  } catch (e) { return res.fail(500, e.message); }
+  } catch (e) {
+    return res.fail(500, e.message || 'Failed to list tickets');
+  }
 });
 
-// Create ticket
+/** POST /:tenantId/tickets  body: { subject?, body? } */
 router.post('/:tenantId/tickets', async (req, res) => {
   const tenantId = String(req.params.tenantId);
   const b = req.body || {};
-  const models = hasModels(req);
+  const subject = typeof b.subject === 'string' && b.subject.trim() ? b.subject.trim() : 'Support ticket';
+  const models = getModels(req);
+
   try {
     if (models?.SupportTicket) {
       const created = await models.SupportTicket.create({
-        tenantId, subject: b.subject || 'Support ticket', status: 'open',
+        tenantId,
+        subject,
+        status: 'open',
         body: b.body || null,
       });
       return res.status(201).json(created);
     }
+
+    // Fallback
     const id = String(mem.nextId++);
     const now = new Date().toISOString();
-    const t = { id, tenantId, subject: b.subject || 'Support ticket', status: 'open', messages: b.body ? [{ from: 'requester', body: String(b.body), at: now }] : [], createdAt: now, updatedAt: now };
+    const t = {
+      id, tenantId, subject, status: 'open',
+      messages: b.body ? [{ from: 'requester', body: String(b.body), at: now }] : [],
+      createdAt: now, updatedAt: now
+    };
     mem.tickets.set(id, t);
     return res.status(201).json(t);
-  } catch (e) { return res.fail(500, e.message); }
+  } catch (e) {
+    return res.fail(500, e.message || 'Failed to create ticket');
+  }
 });
 
-// Add message
+/** helper: load & mutate status consistently */
+async function setTicketStatus(models, { id, tenantId, status }) {
+  if (models?.SupportTicket) {
+    const t = await models.SupportTicket.findOne({ where: { id, tenantId } });
+    if (!t) return null;
+    await t.update({ status });
+    return t;
+  }
+  const t = mem.tickets.get(String(id));
+  if (!t || t.tenantId !== tenantId) return null;
+  t.status = status;
+  t.updatedAt = new Date().toISOString();
+  return t;
+}
+
+/** POST /:tenantId/tickets/:id/messages  body: { from?, body } */
 router.post('/:tenantId/tickets/:id/messages', async (req, res) => {
   const tenantId = String(req.params.tenantId);
   const id = String(req.params.id);
   const b = req.body || {};
-  const models = hasModels(req);
+  const from = b.from || 'support';
+  const body = String(b.body || '');
+  const models = getModels(req);
+
   try {
     if (models?.SupportMessage && models?.SupportTicket) {
       const ticket = await models.SupportTicket.findOne({ where: { id, tenantId } });
       if (!ticket) return res.fail(404, 'Ticket not found');
-      await models.SupportMessage.create({ ticketId: ticket.id, from: b.from || 'support', body: String(b.body || '') });
+      await models.SupportMessage.create({ ticketId: ticket.id, from, body });
       await ticket.update({ updatedAt: new Date() });
-      const reload = await models.SupportTicket.findByPk(ticket.id, { include: [{ model: models.SupportMessage, as: 'messages', order: [['createdAt', 'ASC']] }] });
+
+      // Reload with messages in ASC order
+      const reload = await models.SupportTicket.findByPk(ticket.id, {
+        include: [{ model: models.SupportMessage, as: 'messages' }],
+        order: [[{ model: models.SupportMessage, as: 'messages' }, 'createdAt', 'ASC']],
+      });
       return res.ok(reload);
     }
+
+    // Fallback
     const t = mem.tickets.get(id);
     if (!t || t.tenantId !== tenantId) return res.fail(404, 'Ticket not found');
-    t.messages.push({ from: b.from || 'support', body: String(b.body || ''), at: new Date().toISOString() });
+    t.messages.push({ from, body, at: new Date().toISOString() });
     t.updatedAt = new Date().toISOString();
     return res.ok(t);
-  } catch (e) { return res.fail(500, e.message); }
+  } catch (e) {
+    return res.fail(500, e.message || 'Failed to add message');
+  }
 });
 
-// Change status
+/** PATCH /:tenantId/tickets/:id  body: { status } */
 router.patch('/:tenantId/tickets/:id', async (req, res) => {
   const tenantId = String(req.params.tenantId);
   const id = String(req.params.id);
   const status = req.body?.status ? String(req.body.status).toLowerCase() : null;
   if (!status || !['open', 'resolved', 'canceled'].includes(status)) return res.fail(400, 'Invalid status');
-  const models = hasModels(req);
+
+  const models = getModels(req);
   try {
-    if (models?.SupportTicket) {
-      const t = await models.SupportTicket.findOne({ where: { id, tenantId } });
-      if (!t) return res.fail(404, 'Ticket not found');
-      await t.update({ status });
-      return res.ok(t);
-    }
-    const t = mem.tickets.get(id);
-    if (!t || t.tenantId !== tenantId) return res.fail(404, 'Ticket not found');
-    t.status = status; t.updatedAt = new Date().toISOString(); return res.ok(t);
-  } catch (e) { return res.fail(500, e.message); }
+    const t = await setTicketStatus(models, { id, tenantId, status });
+    if (!t) return res.fail(404, 'Ticket not found');
+    return res.ok(t);
+  } catch (e) {
+    return res.fail(500, e.message || 'Failed to update ticket');
+  }
 });
 
+/** POST aliases: resolve/cancel/reopen (no body required) */
 for (const toStatus of ['resolve', 'cancel', 'reopen']) {
+  const target = { resolve: 'resolved', cancel: 'canceled', reopen: 'open' }[toStatus];
   router.post(`/:tenantId/tickets/:id/${toStatus}`, async (req, res) => {
-    const map = { resolve: 'resolved', cancel: 'canceled', reopen: 'open' };
-    req.body = { status: map[toStatus] };
-    return router.handle(req, res);
+    const tenantId = String(req.params.tenantId);
+    const id = String(req.params.id);
+    try {
+      const t = await setTicketStatus(getModels(req), { id, tenantId, status: target });
+      if (!t) return res.fail(404, 'Ticket not found');
+      return res.ok(t);
+    } catch (e) {
+      return res.fail(500, e.message || 'Failed to change ticket status');
+    }
   });
 }
 
-/* --------------------------------- SMS ------------------------------------ */
+/* ===================================== SMS ===================================== */
+
+/** POST /:tenantId/sms/send  body: { to, message, from? } */
 router.post('/:tenantId/sms/send', async (req, res) => {
   const tenantId = String(req.params.tenantId);
-  const { to, message, from } = req.body || {};
+  const { to, message } = req.body || {};
+  const from = (req.body?.from || 'MkopoSuite');
+
   if (!to || !message) return res.fail(400, 'to and message are required');
-  const models = hasModels(req);
+
+  const models = getModels(req);
   try {
-    // If you have an SMS adapter, plug it here
     if (models?.SmsLog) {
-      const created = await models.SmsLog.create({ tenantId, to, message, from: from || 'MkopoSuite', status: 'queued' });
+      const created = await models.SmsLog.create({ tenantId, to: String(to), message: String(message), from, status: 'queued' });
       return res.ok({ ok: true, messageId: created.id, status: created.status });
     }
-    const item = { id: Date.now(), tenantId, to: String(to), from: from || 'MkopoSuite', message: String(message), at: new Date().toISOString(), status: 'queued' };
+
+    // Fallback
+    const item = {
+      id: Date.now(),
+      tenantId,
+      to: String(to),
+      from,
+      message: String(message),
+      at: new Date().toISOString(),
+      status: 'queued'
+    };
     mem.smsLogs.push(item);
     return res.ok({ ok: true, messageId: item.id, status: item.status });
-  } catch (e) { return res.fail(500, e.message); }
+  } catch (e) {
+    return res.fail(500, e.message || 'Failed to queue SMS');
+  }
 });
 
+/** GET /:tenantId/sms/logs  (supports ?limit=&offset=) */
 router.get('/:tenantId/sms/logs', async (req, res) => {
   const tenantId = String(req.params.tenantId);
-  const models = hasModels(req);
+  const limit = clamp(qInt(req.query.limit, 100), 1, 200);
+  const offset = clamp(qInt(req.query.offset, 0), 0, 50_000);
+
+  const models = getModels(req);
   try {
     if (models?.SmsLog) {
-      const items = await models.SmsLog.findAll({ where: { tenantId }, limit: 100, order: [['createdAt', 'DESC']] });
-      return res.ok({ items });
+      const { rows, count } = await models.SmsLog.findAndCountAll({
+        where: { tenantId },
+        order: [['createdAt', 'DESC']],
+        limit, offset
+      });
+      res.setHeader('X-Total-Count', String(count));
+      return res.ok({ items: rows });
     }
-    const items = mem.smsLogs.filter(x => x.tenantId === tenantId).slice(-100);
+
+    // Fallback
+    const all = mem.smsLogs.filter(x => x.tenantId === tenantId).sort((a,b) => (b.at||'').localeCompare(a.at||''));
+    const items = all.slice(offset, offset + limit);
+    res.setHeader('X-Total-Count', String(all.length));
     return res.ok({ items });
-  } catch (e) { return res.fail(500, e.message); }
+  } catch (e) {
+    return res.fail(500, e.message || 'Failed to load SMS logs');
+  }
 });
 
-/* --------------------------- Billing by phone ------------------------------ */
+/* ============================ Billing by phone (lookup) ============================ */
+
 router.get('/:tenantId/billing/phone/lookup', async (req, res) => {
   const phone = String(req.query.phone || '').trim();
   if (!phone) return res.fail(400, 'phone query is required');
-  // Hook: use billing provider if available
+  // Hook a real provider here if available; leaving structure intact
   return res.ok({
     tenantId: String(req.params.tenantId),
     phone,
@@ -152,7 +272,8 @@ router.get('/:tenantId/billing/phone/lookup', async (req, res) => {
   });
 });
 
-/* ------------------------------- Enrichment -------------------------------- */
+/* ================================== Enrichment ================================== */
+
 router.get('/:tenantId/enrich/phone', (req, res) => {
   const phone = String(req.query.phone || '').trim();
   if (!phone) return res.fail(400, 'phone query is required');
