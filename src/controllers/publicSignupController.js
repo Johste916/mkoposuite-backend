@@ -1,197 +1,212 @@
 'use strict';
-const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
+let bcrypt;
+try { bcrypt = require('bcryptjs'); } catch {}
+const { Op } = require('sequelize');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
-const SELF_SIGNUP_ENABLED = process.env.SELF_SIGNUP_ENABLED === '1';
-const DEFAULT_TRIAL_DAYS = Number(process.env.DEFAULT_TRIAL_DAYS || 14);
+// normalize string
+const s = v => (typeof v === 'string' ? v.trim() : '');
+const slugify = (txt) =>
+  s(txt).toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)+/g, '')
+    .slice(0, 60);
 
-// pick first non-empty string from aliases
-function pick(obj, aliases = []) {
-  for (const key of aliases) {
-    const v = obj?.[key];
-    if (typeof v === 'string' && v.trim().length) return v.trim();
-  }
-  return undefined;
-}
+// Read models if available
+let db;
+try { db = require('../models'); } catch { try { db = require('../../models'); } catch {} }
 
-// allow bodies wrapped in {payload:{...}} or {user:{...}}
-function normalizeBody(body) {
-  const b = body || {};
-  return (b.payload && typeof b.payload === 'object') ? b.payload
-       : (b.user && typeof b.user === 'object') ? b.user
-       : b;
-}
+const getEnvBool = (val) => {
+  if (val === true) return true;
+  const str = String(val || '').toLowerCase().trim();
+  return ['1','true','yes','on'].includes(str);
+};
 
-async function getTenantIdForUser(models, userId) {
-  const { TenantUser } = models || {};
-  if (!TenantUser) return null;
-  const link = await TenantUser.findOne({
-    where: { user_id: userId },
-    order: [['createdAt', 'ASC']]
-  });
-  return link ? link.tenant_id : null;
-}
+exports.selfCheck = async (req, res) => {
+  const env = {
+    SELF_SIGNUP_ENABLED: getEnvBool(process.env.SELF_SIGNUP_ENABLED),
+    JWT_SECRET_set: !!process.env.JWT_SECRET,
+    JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '7d',
+    NODE_ENV: process.env.NODE_ENV || 'development',
+    FRONTEND_URL: process.env.FRONTEND_URL || null,
+  };
 
-exports.selfcheck = async (req, res) => {
-  try {
-    const models = req.app.get('models') || {};
-    const { sequelize, User, Tenant, TenantUser } = models;
-    const dbOk = !!sequelize && (await sequelize.authenticate().then(() => true).catch(() => false));
+  let dbOk = false;
+  try { await db?.sequelize?.authenticate(); dbOk = true; } catch {}
 
-    let usersCols = null, tenantsCols = null, tusersCols = null;
-    if (dbOk) {
-      const [u] = await sequelize.query(`
+  const models = {
+    loaded: !!db,
+    hasUser: !!db?.User,
+    hasTenant: !!db?.Tenant,
+    hasTenantUser: !!db?.TenantUser,
+  };
+
+  const schema = {};
+  if (dbOk) {
+    try {
+      const [userCols] = await db.sequelize.query(`
         SELECT column_name FROM information_schema.columns
-        WHERE table_schema='public' AND table_name='Users' ORDER BY ordinal_position
+        WHERE table_schema='public' AND table_name='Users'
+        ORDER BY ordinal_position
       `);
-      usersCols = u.map(r => r.column_name);
-
-      const [t] = await sequelize.query(`
+      schema.Users = userCols.map(c => c.column_name);
+    } catch {}
+    try {
+      const [tenCols] = await db.sequelize.query(`
         SELECT column_name FROM information_schema.columns
-        WHERE table_schema='public' AND table_name='tenants' ORDER BY ordinal_position
-      `).catch(() => [null]);
-      tenantsCols = t ? t.map(r => r.column_name) : null;
-
-      const [tu] = await sequelize.query(`
+        WHERE table_schema='public' AND table_name='tenants'
+        ORDER BY ordinal_position
+      `);
+      schema.tenants = tenCols.map(c => c.column_name);
+    } catch {}
+    try {
+      const [tuCols] = await db.sequelize.query(`
         SELECT column_name FROM information_schema.columns
-        WHERE table_schema='public' AND table_name='tenant_users' ORDER BY ordinal_position
-      `).catch(() => [null]);
-      tusersCols = tu ? tu.map(r => r.column_name) : null;
-    }
-
-    return res.json({
-      env: {
-        SELF_SIGNUP_ENABLED,
-        JWT_SECRET_set: !!process.env.JWT_SECRET,
-        JWT_EXPIRES_IN,
-        NODE_ENV: process.env.NODE_ENV,
-        FRONTEND_URL: process.env.FRONTEND_URL,
-      },
-      db: { ok: dbOk },
-      models: {
-        loaded: !!models && Object.keys(models).length > 0,
-        hasUser: !!User,
-        hasTenant: !!Tenant,
-        hasTenantUser: !!TenantUser,
-      },
-      schema: { Users: usersCols, tenants: tenantsCols, tenant_users: tusersCols },
-    });
-  } catch (e) {
-    console.error('[SIGNUP:_selfcheck] error', e);
-    return res.status(500).json({ error: 'selfcheck failed' });
+        WHERE table_schema='public' AND table_name='tenant_users'
+        ORDER BY ordinal_position
+      `);
+      schema.tenant_users = tuCols.map(c => c.column_name);
+    } catch {}
   }
+
+  res.json({ env, db: { ok: dbOk }, models, schema });
+};
+
+const pickBody = (req) => {
+  // Accept JSON and multipart/form-data
+  const b = req.body || {};
+  // tolerate both camel & snake casing
+  const companyName = s(b.companyName || b.company_name || b.org || b.organization);
+  const adminName   = s(b.adminName   || b.admin_name   || b.name || b.fullname);
+  const email       = s(b.email);
+  const phone       = s(b.phone || b.phoneNumber || '');
+  const password    = s(b.password || b.pass);
+  const planCode    = s(b.planCode || b.plan_code || 'basic').toLowerCase();
+  return { companyName, adminName, email, phone, password, planCode };
+};
+
+const validate = ({ companyName, adminName, email, password, planCode }) => {
+  const errors = {};
+  if (!companyName || companyName.length < 3) errors.companyName = 'Company name is required (min 3 chars).';
+  if (!adminName || adminName.length < 3) errors.adminName = 'Admin name is required (min 3 chars).';
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) errors.email = 'Valid email is required.';
+  if (!password || password.length < 6) errors.password = 'Password must be at least 6 characters.';
+  if (!planCode) errors.planCode = 'Plan code is required.';
+  return errors;
 };
 
 exports.signup = async (req, res) => {
   try {
-    if (!SELF_SIGNUP_ENABLED) {
-      return res.status(403).json({ error: 'Self-signup is disabled' });
+    if (!getEnvBool(process.env.SELF_SIGNUP_ENABLED)) {
+      return res.status(403).json({ error: 'Signup is disabled on this environment.' });
+    }
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ error: 'JWT_SECRET is not set on the server.' });
+    }
+    if (!db?.User) {
+      return res.status(500).json({ error: 'User model is unavailable.' });
     }
 
-    const models = req.app.get('models') || {};
-    const { sequelize, User, Tenant, TenantUser } = models;
-
-    const raw = normalizeBody(req.body);
-
-    // 🔑 Accept your current keys & old ones:
-    // name: adminName | name | fullName | username | ownerName
-    // org : companyName | orgName | organization | company | tenantName
-    // plan: planCode | plan | plan_code
-    // phone optional
-    const name     = pick(raw, ['adminName', 'name', 'fullName', 'username', 'ownerName']);
-    const email    = pick(raw, ['email', 'emailAddress']);
-    const password = pick(raw, ['password', 'pass', 'pwd']);
-    const orgName  = pick(raw, ['companyName', 'orgName', 'organization', 'company', 'tenantName']) || 'Organization';
-    const phone    = pick(raw, ['phone', 'phoneNumber', 'mobile']); // ignored unless you add a column
-    const planCode = (pick(raw, ['planCode', 'plan', 'plan_code']) || 'basic').toLowerCase();
-
-    const missing = [];
-    if (!name) missing.push('name/adminName');
-    if (!email) missing.push('email');
-    if (!password) missing.push('password');
-    if (missing.length) {
-      return res.status(400).json({ error: 'Missing required fields', missing });
+    const body = pickBody(req);
+    const errors = validate(body);
+    if (Object.keys(errors).length) {
+      return res.status(400).json({ error: 'Validation failed', fields: errors });
     }
 
-    const userModel = User.scope ? User.scope('withSensitive') : User;
+    const { companyName, adminName, email, phone, password, planCode } = body;
 
-    const exists = await userModel.findOne({ where: { email } });
-    if (exists) return res.status(409).json({ error: 'Email already in use' });
+    // Check for existing user
+    const existing = await db.User.findOne({ where: { email: { [Op.iLike]: email } } });
+    if (existing) {
+      return res.status(409).json({ error: 'Email already registered.' });
+    }
 
-    const password_hash = await bcrypt.hash(password, 10);
+    // Hash password → password_hash column
+    const hash = bcrypt ? await bcrypt.hash(password, 10)
+                        : (crypto.createHash('sha256').update(password).digest('hex')); // fallback
 
-    // If we have full tenant stack, create tenant + user + link in one TX
-    if (sequelize && Tenant && TenantUser) {
-      const created = await sequelize.transaction(async (t) => {
-        const tenant = await Tenant.create({
-          id: uuidv4(),
-          name: orgName,
+    const t = await db.sequelize.transaction();
+
+    try {
+      // Create (or pick) tenant if tenant table exists; otherwise proceed without it
+      let tenant = null;
+      if (db.Tenant) {
+        let slug = slugify(companyName);
+        if (!slug) slug = crypto.randomUUID().slice(0, 8);
+
+        // ensure slug uniqueness if there is a slug column
+        const hasSlugCol = !!db.Tenant.rawAttributes.slug || Object.values(db.Tenant.rawAttributes).some(a => a.field === 'slug');
+        if (hasSlugCol) {
+          let candidate = slug, i = 1;
+          while (true) {
+            const exists = await db.Tenant.findOne({ where: { slug: candidate } });
+            if (!exists) { slug = candidate; break; }
+            i += 1;
+            candidate = `${slug}-${i}`;
+            if (candidate.length > 64) candidate = `${slug.slice(0, 64 - String(i).length - 1)}-${i}`;
+          }
+        }
+
+        tenant = await db.Tenant.create({
+          name: companyName,
           status: 'trial',
-          plan_code: planCode,
-          trial_ends_at: new Date(Date.now() + DEFAULT_TRIAL_DAYS * 86400000).toISOString().slice(0, 10),
+          plan_code: planCode || 'basic',
+          trial_ends_at: process.env.DEFAULT_TRIAL_DAYS
+            ? new Date(Date.now() + Number(process.env.DEFAULT_TRIAL_DAYS) * 86400000)
+            : null,
+          billing_email: email,
+          auto_disable_overdue: false,
+          grace_days: 7,
+          ...(hasSlugCol ? { slug } : {}),
         }, { transaction: t });
+      }
 
-        // NOTE: Users table has no 'phone' column in your schema -> we ignore it safely.
-        const user = await userModel.create({
-          id: uuidv4(),
-          name,
-          email,
-          password_hash,
-          role: 'owner',
-          branchId: null,
-        }, { transaction: t });
+      // Create user
+      const user = await db.User.create({
+        name: adminName,
+        email,
+        password_hash: hash,
+        role: 'owner',
+        branchId: null,
+      }, { transaction: t });
 
-        await TenantUser.create({
-          id: uuidv4(),
+      // Link user to tenant if table exists
+      if (tenant && db.TenantUser) {
+        await db.TenantUser.create({
           tenant_id: tenant.id,
           user_id: user.id,
           role: 'owner',
         }, { transaction: t });
+      }
 
-        return { user, tenant };
-      });
+      await t.commit();
 
+      // JWT
       const token = jwt.sign(
-        { id: created.user.id, email: created.user.email, tenantId: created.tenant.id },
-        JWT_SECRET,
-        { expiresIn: JWT_EXPIRES_IN }
+        { id: user.id, email: user.email, role: user.role, tenantId: tenant ? tenant.id : null },
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
       );
 
       return res.status(201).json({
         ok: true,
         token,
-        user: created.user.toJSON(),
-        tenant: created.tenant,
+        user,
+        tenant: tenant || null,
+        note: tenant ? undefined : 'Tenant linkage skipped (tenant model/table not available).',
       });
+    } catch (err) {
+      await t.rollback();
+
+      // Unique constraint handling
+      const code = err?.original?.code || err?.parent?.code || err?.code;
+      if (code === '23505') {
+        return res.status(409).json({ error: 'Conflict: duplicate value (email or slug).' });
+      }
+      return res.status(500).json({ error: err.message || 'Signup failed.' });
     }
-
-    // Fallback: only user (if tenant models/tables unavailable)
-    const user = await userModel.create({
-      id: uuidv4(),
-      name, email, password_hash, role: 'owner', branchId: null,
-    });
-    const tId = await getTenantIdForUser(models, user.id);
-    const token = jwt.sign(
-      { id: user.id, email: user.email, tenantId: tId },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
-
-    return res.status(201).json({
-      ok: true,
-      token,
-      user: user.toJSON(),
-      tenant: tId ? { id: tId } : null,
-      note: 'Tenant linkage skipped (tenant models/tables not found).',
-    });
-
-  } catch (err) {
-    const code = err?.original?.code || err?.parent?.code;
-    if (code === '23505') return res.status(409).json({ error: 'Email already in use' });
-    console.error('[SIGNUP] error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || 'Internal error.' });
   }
 };
