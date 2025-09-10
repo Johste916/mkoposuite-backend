@@ -32,6 +32,10 @@ function getActorId(req) {
   return null;
 }
 
+function looksLikeBcrypt(s) {
+  return typeof s === 'string' && /^\$2[aby]\$/.test(s);
+}
+
 /* ------------------------------ LOGIN ------------------------------ */
 
 exports.login = async (req, res) => {
@@ -45,10 +49,11 @@ exports.login = async (req, res) => {
   }
 
   try {
+    // Keep your existing table/columns, but also fetch legacy 'password'
     const rows = await sequelize.query(
-      `SELECT id, name, email, role, password_hash
+      `SELECT id, name, email, role, password_hash, password
        FROM "Users"
-       WHERE email = :email
+       WHERE LOWER(email) = LOWER(:email)
        LIMIT 1`,
       {
         replacements: { email },
@@ -62,7 +67,18 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    const isMatch = await bcrypt.compare(String(password), String(user.password_hash || ''));
+    // Prefer bcrypt in password_hash; fall back to plain legacy 'password' if present
+    const hash = user.password_hash;
+    const legacyPlain = user.password;
+
+    let isMatch = false;
+    if (hash && looksLikeBcrypt(hash)) {
+      isMatch = await bcrypt.compare(String(password), String(hash));
+    } else if (!hash && legacyPlain) {
+      // Only used to let already-created "bad rows" log in until you migrate them
+      isMatch = String(password) === String(legacyPlain);
+    }
+
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid email or password' });
     }

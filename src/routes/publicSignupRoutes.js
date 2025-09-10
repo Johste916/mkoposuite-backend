@@ -3,7 +3,8 @@
 
 const express = require('express');
 const crypto = require('crypto');
-let jwt; try { jwt = require('jsonwebtoken'); } catch {}
+let jwt;      try { jwt = require('jsonwebtoken'); } catch {}
+let bcrypt;   try { bcrypt = require('bcryptjs'); } catch {}
 
 const router = express.Router();
 
@@ -20,8 +21,8 @@ const REQUIRE_EMAIL_VERIFICATION =
   String(process.env.REQUIRE_EMAIL_VERIFICATION || '0').toLowerCase() === '1' ||
   String(process.env.REQUIRE_EMAIL_VERIFICATION || 'false').toLowerCase() === 'true';
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-const JWT_SECRET = process.env.JWT_SECRET || null;
+const FRONTEND_URL   = process.env.FRONTEND_URL || 'http://localhost:5173';
+const JWT_SECRET     = process.env.JWT_SECRET || null;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
 /* ───────────────────────────── Utilities / helpers ───────────────────────── */
@@ -30,36 +31,41 @@ function ok(res, data, extra = {}) {
   if (typeof extra.total === 'number') res.setHeader('X-Total-Count', String(extra.total));
   return res.json(data);
 }
-
 function fail(res, code, message, extra = {}) {
   if (res.fail) return res.fail(code, message, extra);
   return res.status(code).json({ error: message, ...extra });
 }
-
 function normalizeEmail(e) {
   return String(e || '').trim().toLowerCase();
 }
-
 function validEmail(e) {
   const s = normalizeEmail(e);
   return !!s && s.includes('@') && s.includes('.') && s.length <= 254;
 }
-
 function validPassword(p) {
   return typeof p === 'string' && p.length >= 8;
 }
+function trialEndsAt(days) {
+  const d = new Date(Date.now() + Math.max(0, days) * 86400000);
+  return d; // Sequelize DATE
+}
 
-// Hash with Node's scrypt (no external deps). Format: s2$<salt>$<hash>
-function hashPassword(password) {
+/** scrypt (legacy fallback) -> returns string like: s2$<salt>$<hash> */
+function scryptHash(password) {
   const salt = crypto.randomBytes(16);
-  const hash = crypto.scryptSync(password, salt, 64);
+  const hash = crypto.scryptSync(String(password), salt, 64);
   return `s2$${salt.toString('base64url')}$${hash.toString('base64url')}`;
 }
 
-function trialEndsAt(days) {
-  const d = new Date(Date.now() + Math.max(0, days) * 86400000);
-  // Prefer Date instance for Sequelize DATE columns
-  return d;
+/** Prefer bcrypt for DB (matches login controller); fallback to scrypt if bcrypt missing */
+function hashPasswordSync(password) {
+  if (bcrypt?.hashSync) return bcrypt.hashSync(String(password), 10);
+  return scryptHash(password);
+}
+async function hashPassword(password) {
+  if (bcrypt?.hash) return await bcrypt.hash(String(password), 10);
+  // async-compatible fallback
+  return scryptHash(password);
 }
 
 /* ───────────────────────────── Local memory fallback ─────────────────────── */
@@ -92,7 +98,8 @@ function memCreateTenantAndOwner({ companyName, email, password, adminName, phon
     name: adminName || email.split('@')[0],
     email,
     phone: phone || null,
-    password_hash: hashPassword(password),
+    // Use bcrypt if available so even memory users match login semantics
+    password_hash: hashPasswordSync(password),
     created_at: now,
     updated_at: now,
   };
@@ -103,7 +110,6 @@ function memCreateTenantAndOwner({ companyName, email, password, adminName, phon
 }
 
 /* ───────────────────────────── Route: status (public) ────────────────────── */
-/** Small helper for the frontend to know if signup is enabled and settings */
 router.get('/status', (req, res) => {
   return ok(res, {
     enabled: !!SELF_SIGNUP_ENABLED,
@@ -141,17 +147,15 @@ router.post('/', async (req, res) => {
   if (!validEmail(email)) return fail(res, 400, 'Valid email is required.');
   if (!validPassword(password)) return fail(res, 400, 'Password must be at least 8 characters.');
 
-  // If models exist, create in DB, else fallback to memory.
   const models = req.app.get('models');
   const haveTenant = !!(models && models.Tenant && typeof models.Tenant.create === 'function');
-  const haveUser = !!(models && models.User && typeof models.User.create === 'function');
+  const haveUser   = !!(models && models.User   && typeof models.User.create   === 'function');
 
-  // Check email uniqueness if we can
+  // Email uniqueness
   if (haveUser) {
     const existing = await models.User.findOne({ where: { email } }).catch(() => null);
     if (existing) return fail(res, 409, 'An account with that email already exists.');
   } else {
-    // memory check
     for (const u of MEM.users.values()) {
       if (u.email === email) return fail(res, 409, 'An account with that email already exists.');
     }
@@ -171,14 +175,23 @@ router.post('/', async (req, res) => {
           seats: null,
         }, { transaction: t });
 
+        // Hash with bcrypt (preferred) so login controller's bcrypt.compare works
+        const passHash = await hashPassword(password);
+
         // User (owner)
-        const user = await models.User.create({
+        const userPayload = {
           name: adminName || companyName + ' Admin',
           email,
           phone: phone || null,
-          password_hash: hashPassword(password),
-          // any other columns in your schema can be added here safely
-        }, { transaction: t });
+          password_hash: passHash,
+        };
+
+        // If a legacy 'password' column exists on the model, populate it (hashed) to satisfy NOT NULL
+        const hasLegacyPassword =
+          !!(models.User?.rawAttributes && models.User.rawAttributes.password);
+        if (hasLegacyPassword) userPayload.password = passHash;
+
+        const user = await models.User.create(userPayload, { transaction: t });
 
         // Link (TenantUser) if model exists
         if (models.TenantUser?.create) {
@@ -201,19 +214,14 @@ router.post('/', async (req, res) => {
         return { tenant, user };
       });
 
-      // Email verification (optional) — here you could generate token & send email.
+      // Email verification (optional)
       let verification = null;
       if (REQUIRE_EMAIL_VERIFICATION) {
-        // Generate ephemeral verify token (opaque)
-        verification = Buffer.from(JSON.stringify({
-          email,
-          t: Date.now(),
-        })).toString('base64url');
-        // You can email this link:
-        // `${FRONTEND_URL}/verify?token=${verification}`
+        verification = Buffer.from(JSON.stringify({ email, t: Date.now() }))
+          .toString('base64url');
       }
 
-      // Issue JWT so new user can land in the app immediately (if you want)
+      // JWT for immediate entry (if verification not required)
       let token = null;
       if (jwt && JWT_SECRET && !REQUIRE_EMAIL_VERIFICATION) {
         token = jwt.sign(
@@ -239,7 +247,7 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Memory fallback
+    // Memory fallback (also uses bcrypt if available)
     const r = memCreateTenantAndOwner({ companyName, email, password, adminName, phone, planCode });
 
     let token = null;
@@ -259,7 +267,6 @@ router.post('/', async (req, res) => {
       next: { loginUrl: `${FRONTEND_URL}/login?email=${encodeURIComponent(email)}` }
     });
   } catch (e) {
-    // Unique/constraint errors
     const pgCode = e?.original?.code || e?.parent?.code;
     if (pgCode === '23505') return fail(res, 409, 'A record already exists with those details.');
     return fail(res, 500, e.message || 'Failed to create tenant.');
@@ -267,23 +274,16 @@ router.post('/', async (req, res) => {
 });
 
 /* ─────────────────────────── Route: POST /verify-email ───────────────────── */
-/**
- * Very lightweight stub to complete the flow when REQUIRE_EMAIL_VERIFICATION=1.
- * In production, you should:
- *  1) Store verification tokens server-side (DB).
- *  2) Mark user as verified upon correct token.
- */
 router.post('/verify-email', (req, res) => {
   if (!REQUIRE_EMAIL_VERIFICATION) return ok(res, { ok: true, message: 'Email verification not required.' });
 
   const token = String(req.body?.token || '');
   if (!token) return fail(res, 400, 'token is required');
 
-  // Minimal opaque token check (stateless demo). Replace with real lookup.
   try {
     const decoded = JSON.parse(Buffer.from(token, 'base64url').toString('utf8'));
     if (!decoded?.email) return fail(res, 400, 'Invalid token');
-    // Here you would mark the user as verified in DB.
+    // In a real impl. you would mark the user as verified here.
     return ok(res, { ok: true, verified: true, email: decoded.email });
   } catch {
     return fail(res, 400, 'Invalid token');
