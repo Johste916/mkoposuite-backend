@@ -1,149 +1,179 @@
 'use strict';
-
 const bcrypt = require('bcryptjs');
-const { sequelize } = require('../models');
-const { QueryTypes } = require('sequelize');
+const jwt = require('jsonwebtoken');
+const { v4: uuidv4 } = require('uuid');
 
-const SELF_SIGNUP_ENABLED = (process.env.SELF_SIGNUP_ENABLED || '0') === '1';
+/** Env */
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const SELF_SIGNUP_ENABLED = process.env.SELF_SIGNUP_ENABLED === '1';
 const DEFAULT_TRIAL_DAYS = Number(process.env.DEFAULT_TRIAL_DAYS || 14);
 
-exports.status = async (_req, res) => {
-  return res.json({
-    enabled: SELF_SIGNUP_ENABLED,
-    defaultTrialDays: DEFAULT_TRIAL_DAYS,
-    requireEmailVerification: (process.env.REQUIRE_EMAIL_VERIFICATION || '0') === '1'
-  });
+/** Small helper: pick first tenant for a user (if joined) */
+async function getTenantIdForUser(models, userId) {
+  const { TenantUser } = models || {};
+  if (!TenantUser) return null;
+  const link = await TenantUser.findOne({ where: { user_id: userId }, order: [['createdAt', 'ASC']] });
+  return link ? link.tenant_id : null;
+}
+
+/** GET /api/signup/_selfcheck */
+exports.selfcheck = async (req, res) => {
+  try {
+    const models = req.app.get('models') || {};
+    const { sequelize, User, Tenant, TenantUser } = models;
+
+    const dbOk = !!sequelize && (await sequelize.authenticate().then(() => true).catch(() => false));
+
+    let usersCols = null;
+    let tenantsCols = null;
+    let tusersCols = null;
+
+    if (dbOk) {
+      const [u] = await sequelize.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='Users' ORDER BY ordinal_position
+      `);
+      usersCols = u.map(r => r.column_name);
+
+      const [t] = await sequelize.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='tenants' ORDER BY ordinal_position
+      `).catch(() => [null]);
+      tenantsCols = t ? t.map(r => r.column_name) : null;
+
+      const [tu] = await sequelize.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='tenant_users' ORDER BY ordinal_position
+      `).catch(() => [null]);
+      tusersCols = tu ? tu.map(r => r.column_name) : null;
+    }
+
+    return res.json({
+      env: {
+        SELF_SIGNUP_ENABLED,
+        JWT_SECRET_set: !!process.env.JWT_SECRET,
+        JWT_EXPIRES_IN,
+        NODE_ENV: process.env.NODE_ENV,
+        FRONTEND_URL: process.env.FRONTEND_URL,
+      },
+      db: { ok: dbOk },
+      models: {
+        loaded: !!models && Object.keys(models).length > 0,
+        hasUser: !!User,
+        hasTenant: !!Tenant,
+        hasTenantUser: !!TenantUser,
+      },
+      schema: {
+        Users: usersCols,
+        tenants: tenantsCols,
+        tenant_users: tusersCols,
+      },
+    });
+  } catch (e) {
+    console.error('[SIGNUP:_selfcheck] error', e);
+    return res.status(500).json({ error: 'selfcheck failed' });
+  }
 };
 
-async function usersTableName() {
-  // Prefer the existing "Users" table (Sequelize default), else fallback to lowercased users
-  const q = `
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema='public'
-      AND table_name IN ('Users','users')
-    ORDER BY CASE WHEN table_name='Users' THEN 0 ELSE 1 END
-    LIMIT 1;
-  `;
-  const rows = await sequelize.query(q, { type: QueryTypes.SELECT });
-  return rows[0]?.table_name || 'Users';
-}
-
-async function tableColumns(table) {
-  const rows = await sequelize.query(
-    `
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_schema='public' AND table_name=:t
-    `,
-    { type: QueryTypes.SELECT, replacements: { t: table } }
-  );
-  return new Set(rows.map(r => r.column_name));
-}
-
-/**
- * Insert a user safely:
- * - Always write bcrypt hash to password_hash if it exists
- * - If a legacy 'password' column exists AND is NOT NULL constrained, we can write the same hashed value,
- *   otherwise omit it.
- */
-async function insertUser({ name, email, role, phone, password }) {
-  const table = await usersTableName();
-  const cols = await tableColumns(table);
-
-  // Hash the password correctly for new signups
-  const passwordHash = await bcrypt.hash(String(password), 10);
-
-  // Decide which columns to include
-  const now = new Date();
-  const toInsert = {};
-  if (cols.has('name')) toInsert.name = name || null;
-  if (cols.has('email')) toInsert.email = email;
-  if (cols.has('role')) toInsert.role = role || 'user';
-  if (cols.has('phone')) toInsert.phone = phone || null;
-  if (cols.has('password_hash')) toInsert.password_hash = passwordHash;
-
-  // If there's a legacy `password` column, write the same (hashed) value just to satisfy NOT NULL, if any.
-  if (cols.has('password') && !cols.has('password_hash')) {
-    toInsert.password = passwordHash;
-  } else if (cols.has('password')) {
-    // write null if allowed; if it explodes, your schema requires a value and we can fall back to the hash
-    toInsert.password = null;
-  }
-
-  if (cols.has('createdAt')) toInsert.createdAt = now;
-  if (cols.has('updatedAt')) toInsert.updatedAt = now;
-  if (cols.has('created_at')) toInsert.created_at = now;
-  if (cols.has('updated_at')) toInsert.updated_at = now;
-
-  const fields = Object.keys(toInsert);
-  const params = fields.map((f, i) => `:v${i}`);
-
-  const sql = `INSERT INTO "${table}" (${fields.map(f => `"${f}"`).join(',')})
-               VALUES (${params.join(',')})
-               RETURNING id, name, email, role`;
-  const replacements = {};
-  fields.forEach((f, i) => { replacements[`v${i}`] = toInsert[f]; });
-
-  const rows = await sequelize.query(sql, { type: QueryTypes.INSERT, replacements, returning: true });
-  // Sequelize returns [resultRows, metadata]; normalize
-  const ret = Array.isArray(rows) ? (rows[0]?.[0] || rows[0]) : rows;
-  return ret || { id: undefined, name, email, role };
-}
-
+/** POST /api/signup */
 exports.signup = async (req, res) => {
   try {
     if (!SELF_SIGNUP_ENABLED) {
-      return res.status(403).json({ error: 'Self-signup is disabled.' });
+      return res.status(403).json({ error: 'Self-signup is disabled' });
     }
 
-    const b = req.body || {};
-    const companyName = (b.companyName || '').toString().trim();
-    const adminName = (b.adminName || '').toString().trim();
-    const email = (b.email || '').toString().trim().toLowerCase();
-    const phone = (b.phone || '').toString().trim();
-    const password = (b.password || '').toString();
-    const planCode = (b.planCode || 'basic').toString().toLowerCase();
+    const models = req.app.get('models') || {};
+    const { sequelize, User, Tenant, TenantUser } = models;
 
-    if (!companyName || !email || !password) {
-      return res.status(400).json({ error: 'companyName, email and password are required' });
-    }
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    const { name, email, password, orgName } = req.body || {};
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'name, email and password are required' });
     }
 
-    // Ensure email unique
-    const table = await usersTableName();
-    const existing = await sequelize.query(
-      `SELECT 1 FROM "${table}" WHERE LOWER(email)=LOWER(:email) LIMIT 1`,
-      { type: QueryTypes.SELECT, replacements: { email } }
-    );
-    if (existing && existing[0]) {
-      return res.status(409).json({ error: 'Email already in use' });
+    // Make sure we can use password_hash even if defaultScope hides it
+    const userModel = User.scope ? User.scope('withSensitive') : User;
+
+    // Uniqueness check
+    const existing = await userModel.findOne({ where: { email } });
+    if (existing) return res.status(409).json({ error: 'Email already in use' });
+
+    const password_hash = await bcrypt.hash(password, 10);
+
+    // If we have Sequelize + both tenant models, do a full 3-step inside a single tx
+    if (sequelize && Tenant && TenantUser) {
+      const created = await sequelize.transaction(async (t) => {
+        const tenant = await Tenant.create({
+          id: uuidv4(),
+          name: orgName || 'Organization',
+          status: 'trial',
+          plan_code: 'basic',
+          trial_ends_at: new Date(Date.now() + DEFAULT_TRIAL_DAYS * 86400000).toISOString().slice(0, 10),
+        }, { transaction: t });
+
+        const user = await userModel.create({
+          id: uuidv4(),
+          name,
+          email,
+          password_hash,
+          role: 'owner',
+          branchId: null,
+        }, { transaction: t });
+
+        await TenantUser.create({
+          id: uuidv4(),
+          tenant_id: tenant.id,
+          user_id: user.id,
+          role: 'owner',
+        }, { transaction: t });
+
+        return { user, tenant };
+      });
+
+      const token = jwt.sign(
+        { id: created.user.id, email: created.user.email, tenantId: created.tenant.id },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRES_IN }
+      );
+
+      return res.status(201).json({
+        ok: true,
+        token,
+        user: created.user.toJSON(),
+        tenant: created.tenant,
+      });
     }
 
-    // Create the user with a proper bcrypt hash in password_hash
-    const user = await insertUser({
-      name: adminName || companyName,
+    // 🔻 Graceful fallback: if Tenants aren’t wired yet, at least create the user
+    const userOnly = await userModel.create({
+      id: uuidv4(),
+      name,
       email,
-      role: 'admin',
-      phone,
-      password,
+      password_hash,
+      role: 'owner',
+      branchId: null,
     });
 
-    // (Optional) create a tenant/org if your schema expects it — kept no-op to avoid breaking anything.
-    // If you already have a tenants table+controller wired, it will continue to work as before.
+    const tId = await getTenantIdForUser(models, userOnly.id);
+
+    const token = jwt.sign(
+      { id: userOnly.id, email: userOnly.email, tenantId: tId },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN }
+    );
 
     return res.status(201).json({
       ok: true,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
-      trialDays: DEFAULT_TRIAL_DAYS,
-      plan: planCode,
-      requireEmailVerification: (process.env.REQUIRE_EMAIL_VERIFICATION || '0') === '1',
-      next: { loginUrl: '/login' },
+      token,
+      user: userOnly.toJSON(),
+      tenant: tId ? { id: tId } : null,
+      note: 'Tenant linkage skipped (tenant models/tables not found).',
     });
-  } catch (e) {
-    console.error('Signup error:', e);
-    return res.status(500).json({ error: e?.message || 'Failed to create account' });
+  } catch (err) {
+    // Map common PG errors cleanly
+    const code = err?.original?.code || err?.parent?.code;
+    if (code === '23505') return res.status(409).json({ error: 'Email already in use' });
+    console.error('[SIGNUP] error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 };
