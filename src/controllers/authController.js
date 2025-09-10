@@ -3,6 +3,7 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const speakeasy = require('speakeasy');
+const crypto = require('crypto');
 const { sequelize, Setting } = require('../models');
 const { QueryTypes } = require('sequelize');
 require('dotenv').config();
@@ -32,8 +33,20 @@ function getActorId(req) {
   return null;
 }
 
-function looksLikeBcrypt(s) {
-  return typeof s === 'string' && /^\$2[aby]\$/.test(s);
+/** Supports legacy scrypt format: s2$<saltB64url>$<hashB64url> */
+function isScryptHash(str) {
+  return typeof str === 'string' && str.startsWith('s2$') && str.split('$').length === 3;
+}
+function verifyScryptHash(hashed, password) {
+  try {
+    const [, saltB64, hashB64] = String(hashed).split('$');
+    const salt = Buffer.from(saltB64, 'base64url');
+    const expect = Buffer.from(hashB64, 'base64url').toString('base64url');
+    const calc = crypto.scryptSync(String(password), salt, 64).toString('base64url');
+    return calc === expect;
+  } catch {
+    return false;
+  }
 }
 
 /* ------------------------------ LOGIN ------------------------------ */
@@ -49,9 +62,9 @@ exports.login = async (req, res) => {
   }
 
   try {
-    // Keep your existing table/columns, but also fetch legacy 'password'
+    // Only select columns that certainly exist
     const rows = await sequelize.query(
-      `SELECT id, name, email, role, password_hash, password
+      `SELECT id, name, email, role, password_hash
        FROM "Users"
        WHERE LOWER(email) = LOWER(:email)
        LIMIT 1`,
@@ -63,25 +76,25 @@ exports.login = async (req, res) => {
 
     const user = rows && rows[0];
 
-    if (!user) {
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
+    // Uniform auth error to avoid leaking which field failed
+    const authFail = () => res.status(401).json({ message: 'Invalid email or password' });
 
-    // Prefer bcrypt in password_hash; fall back to plain legacy 'password' if present
-    const hash = user.password_hash;
-    const legacyPlain = user.password;
+    if (!user) return authFail();
 
+    const stored = String(user.password_hash || '');
     let isMatch = false;
-    if (hash && looksLikeBcrypt(hash)) {
-      isMatch = await bcrypt.compare(String(password), String(hash));
-    } else if (!hash && legacyPlain) {
-      // Only used to let already-created "bad rows" log in until you migrate them
-      isMatch = String(password) === String(legacyPlain);
+
+    if (stored) {
+      if (isScryptHash(stored)) {
+        // Legacy scrypt record (from earlier signups) — still allow login
+        isMatch = verifyScryptHash(stored, password);
+      } else {
+        // Normal bcrypt hash
+        isMatch = await bcrypt.compare(String(password), stored);
+      }
     }
 
-    if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
+    if (!isMatch) return authFail();
 
     const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
@@ -101,6 +114,18 @@ exports.login = async (req, res) => {
     });
   } catch (error) {
     console.error('Login error:', error);
+    // Friendly message for missing columns/tables in dev
+    const pgCode = error?.original?.code || error?.parent?.code;
+    if (pgCode === '42P01') {
+      return res.status(500).json({
+        message: 'Users table missing. Run DB migrations (e.g. `npx sequelize-cli db:migrate`).'
+      });
+    }
+    if (pgCode === '42703') {
+      return res.status(500).json({
+        message: 'A required column is missing on Users. Ensure migrations are up to date.'
+      });
+    }
     return res.status(500).json({ message: 'Server error' });
   }
 };
