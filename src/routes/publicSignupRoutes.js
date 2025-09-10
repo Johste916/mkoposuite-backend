@@ -1,10 +1,8 @@
-// server/routes/publicSignupRoutes.js
 'use strict';
 
 const express = require('express');
 const crypto = require('crypto');
-let jwt;      try { jwt = require('jsonwebtoken'); } catch {}
-let bcrypt;   try { bcrypt = require('bcryptjs'); } catch {}
+let jwt; try { jwt = require('jsonwebtoken'); } catch {}
 
 const router = express.Router();
 
@@ -21,8 +19,8 @@ const REQUIRE_EMAIL_VERIFICATION =
   String(process.env.REQUIRE_EMAIL_VERIFICATION || '0').toLowerCase() === '1' ||
   String(process.env.REQUIRE_EMAIL_VERIFICATION || 'false').toLowerCase() === 'true';
 
-const FRONTEND_URL   = process.env.FRONTEND_URL || 'http://localhost:5173';
-const JWT_SECRET     = process.env.JWT_SECRET || null;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const JWT_SECRET = process.env.JWT_SECRET || null;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
 /* ───────────────────────────── Utilities / helpers ───────────────────────── */
@@ -35,50 +33,30 @@ function fail(res, code, message, extra = {}) {
   if (res.fail) return res.fail(code, message, extra);
   return res.status(code).json({ error: message, ...extra });
 }
-function normalizeEmail(e) {
-  return String(e || '').trim().toLowerCase();
-}
-function validEmail(e) {
-  const s = normalizeEmail(e);
-  return !!s && s.includes('@') && s.includes('.') && s.length <= 254;
-}
-function validPassword(p) {
-  return typeof p === 'string' && p.length >= 8;
-}
-function trialEndsAt(days) {
-  const d = new Date(Date.now() + Math.max(0, days) * 86400000);
-  return d; // Sequelize DATE
-}
+function normalizeEmail(e) { return String(e || '').trim().toLowerCase(); }
+function validEmail(e) { const s = normalizeEmail(e); return !!s && s.includes('@') && s.includes('.') && s.length <= 254; }
+function validPassword(p) { return typeof p === 'string' && p.length >= 8; }
 
-/** scrypt (legacy fallback) -> returns string like: s2$<salt>$<hash> */
-function scryptHash(password) {
+function hashPassword(password) {
   const salt = crypto.randomBytes(16);
-  const hash = crypto.scryptSync(String(password), salt, 64);
+  const hash = crypto.scryptSync(password, salt, 64);
   return `s2$${salt.toString('base64url')}$${hash.toString('base64url')}`;
 }
-
-/** Prefer bcrypt for DB (matches login controller); fallback to scrypt if bcrypt missing */
-function hashPasswordSync(password) {
-  if (bcrypt?.hashSync) return bcrypt.hashSync(String(password), 10);
-  return scryptHash(password);
-}
-async function hashPassword(password) {
-  if (bcrypt?.hash) return await bcrypt.hash(String(password), 10);
-  // async-compatible fallback
-  return scryptHash(password);
+function trialEndsAt(days) {
+  return new Date(Date.now() + Math.max(0, days) * 86400000);
 }
 
 /* ───────────────────────────── Local memory fallback ─────────────────────── */
 const MEM = {
-  tenants: new Map(),   // id -> { ... }
-  users: new Map(),     // id -> { ... }
-  tenantUsers: new Map()// `${tenantId}:${userId}` -> role
+  tenants: new Map(),
+  users: new Map(),
+  tenantUsers: new Map()
 };
 
 function memCreateTenantAndOwner({ companyName, email, password, adminName, phone, planCode }) {
   const tenantId = crypto.randomUUID?.() || String(Date.now()) + '-t';
   const userId   = crypto.randomUUID?.() || String(Date.now()) + '-u';
-  const now = new Date().toISOString();
+  const nowIso = new Date().toISOString();
 
   const t = {
     id: tenantId,
@@ -88,8 +66,8 @@ function memCreateTenantAndOwner({ companyName, email, password, adminName, phon
     billing_email: email,
     trial_ends_at: trialEndsAt(DEFAULT_TRIAL_DAYS).toISOString().slice(0, 10),
     seats: null,
-    created_at: now,
-    updated_at: now,
+    created_at: nowIso,
+    updated_at: nowIso,
   };
   MEM.tenants.set(tenantId, t);
 
@@ -98,10 +76,10 @@ function memCreateTenantAndOwner({ companyName, email, password, adminName, phon
     name: adminName || email.split('@')[0],
     email,
     phone: phone || null,
-    // Use bcrypt if available so even memory users match login semantics
-    password_hash: hashPasswordSync(password),
-    created_at: now,
-    updated_at: now,
+    password_hash: hashPassword(password),
+    role: 'owner',
+    created_at: nowIso,
+    updated_at: nowIso,
   };
   MEM.users.set(userId, u);
   MEM.tenantUsers.set(`${tenantId}:${userId}`, 'owner');
@@ -109,7 +87,7 @@ function memCreateTenantAndOwner({ companyName, email, password, adminName, phon
   return { tenantId, userId, tenant: t, user: u };
 }
 
-/* ───────────────────────────── Route: status (public) ────────────────────── */
+/* ───────────────────────────── /status (public) ──────────────────────────── */
 router.get('/status', (req, res) => {
   return ok(res, {
     enabled: !!SELF_SIGNUP_ENABLED,
@@ -118,22 +96,9 @@ router.get('/status', (req, res) => {
   });
 });
 
-/* ───────────────────────────── Route: POST / (public signup) ─────────────── */
-/**
- * Body:
- * {
- *   companyName: string (required)
- *   email: string (required, admin login)
- *   password: string (required, min 8)
- *   adminName?: string
- *   phone?: string
- *   planCode?: 'basic' | 'pro' | string
- * }
- */
+/* ───────────────────────────── POST / (signup) ───────────────────────────── */
 router.post('/', async (req, res) => {
-  if (!SELF_SIGNUP_ENABLED) {
-    return fail(res, 403, 'Self-service signup is disabled.');
-  }
+  if (!SELF_SIGNUP_ENABLED) return fail(res, 403, 'Self-service signup is disabled.');
 
   const b = req.body || {};
   const companyName = String(b.companyName || '').trim();
@@ -149,9 +114,9 @@ router.post('/', async (req, res) => {
 
   const models = req.app.get('models');
   const haveTenant = !!(models && models.Tenant && typeof models.Tenant.create === 'function');
-  const haveUser   = !!(models && models.User   && typeof models.User.create   === 'function');
+  const haveUser = !!(models && models.User && typeof models.User.create === 'function');
 
-  // Email uniqueness
+  // Uniqueness
   if (haveUser) {
     const existing = await models.User.findOne({ where: { email } }).catch(() => null);
     if (existing) return fail(res, 409, 'An account with that email already exists.');
@@ -161,74 +126,73 @@ router.post('/', async (req, res) => {
     }
   }
 
-  // Create records
   try {
     if (haveTenant && haveUser && models.sequelize?.transaction) {
       const out = await models.sequelize.transaction(async (t) => {
-        // Tenant
-        const tenant = await models.Tenant.create({
-          name: companyName,
-          status: 'trial',
-          plan_code: planCode,
-          trial_ends_at: trialEndsAt(DEFAULT_TRIAL_DAYS),
-          billing_email: email,
-          seats: null,
-        }, { transaction: t });
+        const tenant = await models.Tenant.create(
+          {
+            name: companyName,
+            status: 'trial',
+            plan_code: planCode,
+            trial_ends_at: trialEndsAt(DEFAULT_TRIAL_DAYS),
+            billing_email: email,
+            seats: null,
+          },
+          { transaction: t }
+        );
 
-        // Hash with bcrypt (preferred) so login controller's bcrypt.compare works
-        const passHash = await hashPassword(password);
-
-        // User (owner)
         const userPayload = {
           name: adminName || companyName + ' Admin',
           email,
           phone: phone || null,
-          password_hash: passHash,
+          password_hash: hashPassword(password),
+          role: 'owner',
+          // write-through if model defines them (ignored otherwise)
+          tenantId: tenant.id,
+          is_active: true,
+          status: 'active',
         };
-
-        // If a legacy 'password' column exists on the model, populate it (hashed) to satisfy NOT NULL
-        const hasLegacyPassword =
-          !!(models.User?.rawAttributes && models.User.rawAttributes.password);
-        if (hasLegacyPassword) userPayload.password = passHash;
 
         const user = await models.User.create(userPayload, { transaction: t });
 
-        // Link (TenantUser) if model exists
         if (models.TenantUser?.create) {
-          await models.TenantUser.create({
-            tenantId: tenant.id,
-            userId: user.id,
-            role: 'owner',
-          }, { transaction: t });
+          await models.TenantUser.create(
+            { tenantId: tenant.id, userId: user.id, role: 'owner' },
+            { transaction: t }
+          );
+        } else {
+          // soft fallback if join model missing: attempt raw insert
+          try {
+            await models.sequelize.query(
+              `INSERT INTO tenant_users (tenant_id, user_id, role)
+               VALUES (:tenantId, :userId, 'owner')
+               ON CONFLICT DO NOTHING`,
+              { replacements: { tenantId: tenant.id, userId: user.id }, transaction: t }
+            );
+          } catch {}
         }
 
-        // Optional: create a default branch if your schema has Branch
+        // Default branch (optional)
         if (models.Branch?.create) {
-          await models.Branch.create({
-            tenantId: tenant.id,
-            name: 'Head Office',
-            code: 'HO',
-          }, { transaction: t }).catch(() => null);
+          await models.Branch.create(
+            { tenantId: tenant.id, name: 'Head Office', code: 'HO' },
+            { transaction: t }
+          ).catch(() => null);
         }
 
         return { tenant, user };
       });
 
-      // Email verification (optional)
       let verification = null;
       if (REQUIRE_EMAIL_VERIFICATION) {
-        verification = Buffer.from(JSON.stringify({ email, t: Date.now() }))
-          .toString('base64url');
+        verification = Buffer.from(JSON.stringify({ email, t: Date.now() })).toString('base64url');
       }
 
-      // JWT for immediate entry (if verification not required)
       let token = null;
       if (jwt && JWT_SECRET && !REQUIRE_EMAIL_VERIFICATION) {
-        token = jwt.sign(
-          { sub: out.user.id, tenantId: out.tenant.id },
-          JWT_SECRET,
-          { expiresIn: JWT_EXPIRES_IN }
-        );
+        token = jwt.sign({ sub: out.user.id, tenantId: out.tenant.id }, JWT_SECRET, {
+          expiresIn: JWT_EXPIRES_IN,
+        });
       }
 
       return ok(res, {
@@ -241,18 +205,25 @@ router.post('/', async (req, res) => {
         requireEmailVerification: !!REQUIRE_EMAIL_VERIFICATION,
         verificationToken: REQUIRE_EMAIL_VERIFICATION ? verification : undefined,
         token: token || undefined,
-        next: {
-          loginUrl: `${FRONTEND_URL}/login?email=${encodeURIComponent(email)}`
-        }
+        next: { loginUrl: `${FRONTEND_URL}/login?email=${encodeURIComponent(email)}` },
       });
     }
 
-    // Memory fallback (also uses bcrypt if available)
-    const r = memCreateTenantAndOwner({ companyName, email, password, adminName, phone, planCode });
+    // Memory fallback
+    const r = memCreateTenantAndOwner({
+      companyName,
+      email,
+      password,
+      adminName,
+      phone,
+      planCode,
+    });
 
     let token = null;
     if (jwt && JWT_SECRET && !REQUIRE_EMAIL_VERIFICATION) {
-      token = jwt.sign({ sub: r.userId, tenantId: r.tenantId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+      token = jwt.sign({ sub: r.userId, tenantId: r.tenantId }, JWT_SECRET, {
+        expiresIn: JWT_EXPIRES_IN,
+      });
     }
 
     return ok(res, {
@@ -264,7 +235,7 @@ router.post('/', async (req, res) => {
       trialEndsAt: r.tenant.trial_ends_at,
       requireEmailVerification: !!REQUIRE_EMAIL_VERIFICATION,
       token: token || undefined,
-      next: { loginUrl: `${FRONTEND_URL}/login?email=${encodeURIComponent(email)}` }
+      next: { loginUrl: `${FRONTEND_URL}/login?email=${encodeURIComponent(email)}` },
     });
   } catch (e) {
     const pgCode = e?.original?.code || e?.parent?.code;
@@ -273,17 +244,14 @@ router.post('/', async (req, res) => {
   }
 });
 
-/* ─────────────────────────── Route: POST /verify-email ───────────────────── */
+/* ─────────────────────────── POST /verify-email ──────────────────────────── */
 router.post('/verify-email', (req, res) => {
   if (!REQUIRE_EMAIL_VERIFICATION) return ok(res, { ok: true, message: 'Email verification not required.' });
-
   const token = String(req.body?.token || '');
   if (!token) return fail(res, 400, 'token is required');
-
   try {
     const decoded = JSON.parse(Buffer.from(token, 'base64url').toString('utf8'));
     if (!decoded?.email) return fail(res, 400, 'Invalid token');
-    // In a real impl. you would mark the user as verified here.
     return ok(res, { ok: true, verified: true, email: decoded.email });
   } catch {
     return fail(res, 400, 'Invalid token');

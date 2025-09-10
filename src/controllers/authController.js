@@ -33,12 +33,11 @@ function getActorId(req) {
   return null;
 }
 
-/** Legacy scrypt format: s2$<saltB64OrUrl>$<hashB64OrUrl> */
+/** Legacy scrypt format: s2$<saltB64/Url>$<hashB64/Url> */
 function isScryptHash(str) {
   return typeof str === 'string' && str.startsWith('s2$') && str.split('$').length === 3;
 }
 function decodeFlexibleB64(s) {
-  // try base64url then base64
   try { return Buffer.from(String(s), 'base64url'); } catch {}
   try { return Buffer.from(String(s), 'base64'); } catch {}
   return null;
@@ -56,10 +55,24 @@ function verifyScryptHash(hashed, password) {
   }
 }
 
-/** Find a tenant for the user (first match), tolerant to snake/camel tables */
+/** grab whichever password field exists on the row */
+function extractStoredHash(userRow) {
+  // prefer explicit password_hash, but accept common alternates
+  return (
+    userRow.password_hash ||
+    userRow.passwordHash ||
+    userRow.password_digest ||
+    userRow.passwordDigest ||
+    userRow.password || // if present in some environments
+    null
+  );
+}
+
+/** Find tenantId for a user via common layouts, fallback to DEFAULT_TENANT_ID */
 async function findTenantIdForUser(userId) {
   const uid = String(userId);
-  // 1) CamelCase join table
+
+  // 1) CamelCase join
   try {
     const rows = await sequelize.query(
       `SELECT "tenantId" AS "tenantId"
@@ -71,7 +84,8 @@ async function findTenantIdForUser(userId) {
     );
     if (rows?.[0]?.tenantId) return rows[0].tenantId;
   } catch {}
-  // 2) snake_case join table
+
+  // 2) snake_case join
   try {
     const rows = await sequelize.query(
       `SELECT tenant_id AS "tenantId"
@@ -83,7 +97,8 @@ async function findTenantIdForUser(userId) {
     );
     if (rows?.[0]?.tenantId) return rows[0].tenantId;
   } catch {}
-  // 3) sometimes tenantId is on Users
+
+  // 3) sometimes Users has tenantId column
   try {
     const rows = await sequelize.query(
       `SELECT "tenantId" AS "tenantId"
@@ -94,7 +109,7 @@ async function findTenantIdForUser(userId) {
     );
     if (rows?.[0]?.tenantId) return rows[0].tenantId;
   } catch {}
-  // 4) final fallback: env default
+
   return DEFAULT_TENANT_ID;
 }
 
@@ -102,7 +117,6 @@ async function findTenantIdForUser(userId) {
 
 exports.login = async (req, res) => {
   const { email, password } = req.body || {};
-
   if (!email || !password) {
     return res.status(400).json({ message: 'Email and password are required' });
   }
@@ -111,34 +125,32 @@ exports.login = async (req, res) => {
   }
 
   try {
+    // SELECT * avoids "column does not exist" issues across environments
     const rows = await sequelize.query(
-      `SELECT id, name, email, role, password_hash
-       FROM "Users"
-       WHERE LOWER(email) = LOWER(:email)
-       LIMIT 1`,
-      {
-        replacements: { email },
-        type: QueryTypes.SELECT
-      }
+      `SELECT *
+         FROM "Users"
+        WHERE LOWER(email) = LOWER(:email)
+        LIMIT 1`,
+      { replacements: { email }, type: QueryTypes.SELECT }
     );
 
     const user = rows && rows[0];
-    const authFail = () => res.status(401).json({ message: 'Invalid email or password' });
-    if (!user) return authFail();
+    if (!user) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
 
-    const stored = String(user.password_hash || '');
-    let isMatch = false;
+    const stored = extractStoredHash(user);
+    let ok = false;
 
     if (stored) {
-      if (isScryptHash(stored)) {
-        isMatch = verifyScryptHash(stored, password);
-      } else {
-        isMatch = await bcrypt.compare(String(password), stored);
-      }
+      if (isScryptHash(stored)) ok = verifyScryptHash(stored, password);
+      else ok = await bcrypt.compare(String(password), String(stored));
     }
-    if (!isMatch) return authFail();
 
-    // Resolve tenantId for brand-new users
+    if (!ok) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
     const tenantId = await findTenantIdForUser(user.id);
 
     const token = jwt.sign(
@@ -150,26 +162,27 @@ exports.login = async (req, res) => {
     return res.status(200).json({
       message: 'Login successful',
       token,
-      tenantId, // <— help frontend seed x-tenant-id
+      tenantId,
       user: {
         id: user.id,
         name: user.name,
         email: user.email,
         role: user.role,
-        tenantId, // <— also include on user object for your existing codepaths
-      }
+        tenantId,
+      },
     });
   } catch (error) {
     console.error('Login error:', error);
-    const pgCode = error?.original?.code || error?.parent?.code;
-    if (pgCode === '42P01') {
+    const pg = error?.original?.code || error?.parent?.code;
+    if (pg === '42P01') {
       return res.status(500).json({
-        message: 'Users table missing. Run DB migrations (e.g. `npx sequelize-cli db:migrate`).'
+        message:
+          'Users table missing. Run DB migrations (e.g. `npx sequelize-cli db:migrate`).',
       });
     }
-    if (pgCode === '42703') {
+    if (pg === '42703') {
       return res.status(500).json({
-        message: 'A required column is missing on Users. Ensure migrations are up to date.'
+        message: 'A required column is missing on Users. Ensure migrations are up to date.',
       });
     }
     return res.status(500).json({ message: 'Server error' });
@@ -204,18 +217,9 @@ exports.setupTwoFA = async (req, res) => {
     });
 
     const key = twoFaKeyForUser(userId);
+    await Setting.set(key, { enabled: false, secret: secret.base32 }, userId, userId);
 
-    await Setting.set(
-      key,
-      { enabled: false, secret: secret.base32 },
-      userId,
-      userId
-    );
-
-    return res.json({
-      secret: secret.base32,
-      otpauthUrl: secret.otpauth_url
-    });
+    return res.json({ secret: secret.base32, otpauthUrl: secret.otpauth_url });
   } catch (err) {
     console.error('2FA setup error:', err);
     return res.status(500).json({ message: 'Failed to start 2FA setup' });
