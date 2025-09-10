@@ -9,10 +9,13 @@ const { QueryTypes } = require('sequelize');
 require('dotenv').config();
 
 const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRES = process.env.JWT_EXPIRES_IN || '2h';
+const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS || 10);
 const DEFAULT_TENANT_ID =
   process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000000';
 
 /* ------------------------------ helpers ------------------------------ */
+const normalizeEmail = (e) => String(e || '').trim().toLowerCase();
 
 function sanitizeKeyPart(s) {
   return String(s || '').replace(/[^A-Za-z0-9._-]/g, '.');
@@ -33,37 +36,34 @@ function getActorId(req) {
   return null;
 }
 
-/** Legacy scrypt format: s2$<saltB64/Url>$<hashB64/Url> */
-function isScryptHash(str) {
-  return typeof str === 'string' && str.startsWith('s2$') && str.split('$').length === 3;
-}
-function decodeFlexibleB64(s) {
+/** Legacy scrypt marker: s2$<salt>$<hash> (base64/base64url) */
+const isScryptHash = (s) => typeof s === 'string' && s.startsWith('s2$') && s.split('$').length === 3;
+const decodeFlexibleB64 = (s) => {
   try { return Buffer.from(String(s), 'base64url'); } catch {}
   try { return Buffer.from(String(s), 'base64'); } catch {}
   return null;
-}
-function verifyScryptHash(hashed, password) {
+};
+function verifyScryptHash(stored, plain) {
   try {
-    const [, saltB64, hashB64] = String(hashed).split('$');
-    const saltBuf = decodeFlexibleB64(saltB64);
-    const hashBuf = decodeFlexibleB64(hashB64);
-    if (!saltBuf || !hashBuf) return false;
-    const calc = crypto.scryptSync(String(password), saltBuf, hashBuf.length);
-    return crypto.timingSafeEqual(calc, hashBuf);
+    const [, saltB64, hashB64] = String(stored).split('$');
+    const salt = decodeFlexibleB64(saltB64);
+    const want = decodeFlexibleB64(hashB64);
+    if (!salt || !want) return false;
+    const got = crypto.scryptSync(String(plain), salt, want.length);
+    return crypto.timingSafeEqual(got, want);
   } catch {
     return false;
   }
 }
 
 /** grab whichever password field exists on the row */
-function extractStoredHash(userRow) {
-  // prefer explicit password_hash, but accept common alternates
+function extractStoredHash(row) {
   return (
-    userRow.password_hash ||
-    userRow.passwordHash ||
-    userRow.password_digest ||
-    userRow.passwordDigest ||
-    userRow.password || // if present in some environments
+    row.password_hash ||
+    row.passwordHash ||
+    row.password_digest ||
+    row.passwordDigest ||
+    row.password || // some environments
     null
   );
 }
@@ -76,10 +76,10 @@ async function findTenantIdForUser(userId) {
   try {
     const rows = await sequelize.query(
       `SELECT "tenantId" AS "tenantId"
-       FROM "TenantUsers"
-       WHERE "userId" = :uid
-       ORDER BY "createdAt" NULLS LAST
-       LIMIT 1`,
+         FROM "TenantUsers"
+        WHERE "userId" = :uid
+        ORDER BY "createdAt" NULLS LAST
+        LIMIT 1`,
       { replacements: { uid }, type: QueryTypes.SELECT }
     );
     if (rows?.[0]?.tenantId) return rows[0].tenantId;
@@ -89,22 +89,22 @@ async function findTenantIdForUser(userId) {
   try {
     const rows = await sequelize.query(
       `SELECT tenant_id AS "tenantId"
-       FROM tenant_users
-       WHERE user_id = :uid
-       ORDER BY created_at NULLS LAST
-       LIMIT 1`,
+         FROM tenant_users
+        WHERE user_id = :uid
+        ORDER BY created_at NULLS LAST
+        LIMIT 1`,
       { replacements: { uid }, type: QueryTypes.SELECT }
     );
     if (rows?.[0]?.tenantId) return rows[0].tenantId;
   } catch {}
 
-  // 3) sometimes Users has tenantId column
+  // 3) Users.tenantId exists in some schemas
   try {
     const rows = await sequelize.query(
       `SELECT "tenantId" AS "tenantId"
-       FROM "Users"
-       WHERE id = :uid
-       LIMIT 1`,
+         FROM "Users"
+        WHERE id = :uid
+        LIMIT 1`,
       { replacements: { uid }, type: QueryTypes.SELECT }
     );
     if (rows?.[0]?.tenantId) return rows[0].tenantId;
@@ -113,10 +113,26 @@ async function findTenantIdForUser(userId) {
   return DEFAULT_TENANT_ID;
 }
 
-/* ------------------------------ LOGIN ------------------------------ */
+/** if scrypt verified, rehash to bcrypt and persist (migration-on-login) */
+async function maybeRehashToBcrypt(userId, stored, plain) {
+  if (!isScryptHash(stored)) return;
+  try {
+    const newHash = await bcrypt.hash(String(plain), BCRYPT_ROUNDS);
+    await sequelize.query(
+      `UPDATE "Users" SET password_hash = :hash WHERE id = :id`,
+      { replacements: { hash: newHash, id: userId } }
+    );
+  } catch (e) {
+    // non-fatal; we still logged in
+    console.warn('Password rehash to bcrypt failed:', e?.message || e);
+  }
+}
 
+/* ------------------------------ LOGIN ------------------------------ */
 exports.login = async (req, res) => {
-  const { email, password } = req.body || {};
+  const email = normalizeEmail(req.body?.email);
+  const password = req.body?.password;
+
   if (!email || !password) {
     return res.status(400).json({ message: 'Email and password are required' });
   }
@@ -125,19 +141,14 @@ exports.login = async (req, res) => {
   }
 
   try {
-    // SELECT * avoids "column does not exist" issues across environments
+    // SELECT * to avoid drifted columns across environments
     const rows = await sequelize.query(
-      `SELECT *
-         FROM "Users"
-        WHERE LOWER(email) = LOWER(:email)
-        LIMIT 1`,
+      `SELECT * FROM "Users" WHERE LOWER(email) = LOWER(:email) LIMIT 1`,
       { replacements: { email }, type: QueryTypes.SELECT }
     );
 
     const user = rows && rows[0];
-    if (!user) {
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
+    if (!user) return res.status(401).json({ message: 'Invalid email or password' });
 
     const stored = extractStoredHash(user);
     let ok = false;
@@ -147,16 +158,18 @@ exports.login = async (req, res) => {
       else ok = await bcrypt.compare(String(password), String(stored));
     }
 
-    if (!ok) {
-      return res.status(401).json({ message: 'Invalid email or password' });
+    if (!ok) return res.status(401).json({ message: 'Invalid email or password' });
+
+    // Migrate legacy scrypt -> bcrypt on successful login
+    if (isScryptHash(stored)) {
+      await maybeRehashToBcrypt(user.id, stored, password);
     }
 
     const tenantId = await findTenantIdForUser(user.id);
-
     const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role, tenantId },
       JWT_SECRET,
-      { expiresIn: '2h' }
+      { expiresIn: JWT_EXPIRES }
     );
 
     return res.status(200).json({
@@ -176,8 +189,7 @@ exports.login = async (req, res) => {
     const pg = error?.original?.code || error?.parent?.code;
     if (pg === '42P01') {
       return res.status(500).json({
-        message:
-          'Users table missing. Run DB migrations (e.g. `npx sequelize-cli db:migrate`).',
+        message: 'Users table missing. Run DB migrations (e.g. `npx sequelize-cli db:migrate`).',
       });
     }
     if (pg === '42703') {
@@ -190,7 +202,6 @@ exports.login = async (req, res) => {
 };
 
 /* ------------------------------ 2FA ------------------------------ */
-
 exports.getTwoFAStatus = async (req, res) => {
   try {
     const userId = getActorId(req);
@@ -236,17 +247,11 @@ exports.verifyTwoFA = async (req, res) => {
 
     const key = twoFaKeyForUser(userId);
     const value = await Setting.get(key, null);
-    if (!value?.secret) {
-      return res.status(400).json({ message: '2FA not in setup state' });
-    }
+    if (!value?.secret) return res.status(400).json({ message: '2FA not in setup state' });
 
     const ok = speakeasy.totp.verify({
-      secret: value.secret,
-      encoding: 'base32',
-      token: String(token),
-      window: 1,
+      secret: value.secret, encoding: 'base32', token: String(token), window: 1,
     });
-
     if (!ok) return res.status(400).json({ message: 'Invalid code' });
 
     await Setting.set(key, { enabled: true, secret: value.secret }, userId, userId);
@@ -271,15 +276,9 @@ exports.disableTwoFA = async (req, res) => {
       return res.json({ ok: true, enabled: false });
     }
 
-    const ok = token
-      ? speakeasy.totp.verify({
-          secret: value.secret,
-          encoding: 'base32',
-          token: String(token),
-          window: 1,
-        })
-      : false;
-
+    const ok = token ? speakeasy.totp.verify({
+      secret: value.secret, encoding: 'base32', token: String(token), window: 1,
+    }) : false;
     if (!ok) return res.status(400).json({ message: 'A valid code is required to disable 2FA' });
 
     await Setting.set(key, { enabled: false }, userId, userId);
