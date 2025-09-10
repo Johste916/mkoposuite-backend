@@ -32,13 +32,17 @@ const hasAttr = (model, attr) =>
 
 /* ---------- Core models ---------- */
 db.User          = require('./user')(sequelize, DataTypes);
-db.Branch        = require('./branch')(sequelize, DataTypes);
-db.Borrower      = require('./borrower')(sequelize, DataTypes);
-db.Loan          = require('./loan')(sequelize, DataTypes);
+db.Branch        = tryLoad(() => require('./branch')(sequelize, DataTypes), 'Branch');
+db.Borrower      = tryLoad(() => require('./borrower')(sequelize, DataTypes), 'Borrower');
+db.Loan          = tryLoad(() => require('./loan')(sequelize, DataTypes), 'Loan');
 db.LoanRepayment = tryLoad(() => require('./loanrepayment')(sequelize, DataTypes), 'LoanRepayment');
 db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),   'LoanPayment');
 db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes),   'LoanProduct');
+
+/* Multitenancy (needed for signup) */
+db.Tenant        = tryLoad(() => require('./Tenant')(sequelize, DataTypes), 'Tenant');
+db.TenantUser    = tryLoad(() => require('./tenant_user')(sequelize, DataTypes), 'TenantUser');
 
 /* Access control (optional) */
 db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes),       'Role');
@@ -46,7 +50,7 @@ db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes),   'Us
 db.Permission = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
 
 /* Savings (required) */
-db.SavingsTransaction = require('./savingstransaction')(sequelize, DataTypes);
+db.SavingsTransaction = tryLoad(() => require('./savingstransaction')(sequelize, DataTypes), 'SavingsTransaction');
 
 /* Optional modules */
 db.ReportSubscription      = tryLoad(() => require('./ReportSubscription')(sequelize, DataTypes), 'ReportSubscription');
@@ -59,24 +63,18 @@ db.ActivityLog        = tryLoad(() => require('./ActivityLog')(sequelize, DataTy
 db.ActivityComment    = tryLoad(() => require('./ActivityComment')(sequelize, DataTypes), 'ActivityComment');
 db.ActivityAssignment = tryLoad(() => require('./ActivityAssignment')(sequelize, DataTypes), 'ActivityAssignment');
 
-/* Accounting (required for accounting module) */
+/* Accounting (optional) */
 db.Account      = tryLoad(() => require('./account')(sequelize, DataTypes),      'Account');
 db.JournalEntry = tryLoad(() => require('./journalEntry')(sequelize, DataTypes), 'JournalEntry');
 db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes),  'LedgerEntry');
 
-/* Collections */
+/* Collections / Collateral / Expense / Investors (optional) */
 db.CollectionSheet = tryLoad(() => require('./collectionSheet')(sequelize, DataTypes), 'CollectionSheet');
+db.Collateral      = tryLoad(() => require('./collateral')(sequelize, DataTypes),      'Collateral');
+db.Expense         = tryLoad(() => require('./expense')(sequelize, DataTypes),         'Expense');
+db.Investor        = tryLoad(() => require('./investor')(sequelize, DataTypes),        'Investor');
 
-/* Collateral */
-db.Collateral = tryLoad(() => require('./collateral')(sequelize, DataTypes), 'Collateral');
-
-/* Expense */
-db.Expense = tryLoad(() => require('./expense')(sequelize, DataTypes), 'Expense');
-
-/* Investors */
-db.Investor = tryLoad(() => require('./investor')(sequelize, DataTypes), 'Investor');
-
-/* HR & Payroll (new) */
+/* HR & Payroll (optional) */
 db.Employee     = tryLoad(() => require('./employee')(sequelize, DataTypes),     'Employee');
 db.Attendance   = tryLoad(() => require('./attendance')(sequelize, DataTypes),   'Attendance');
 db.PayrollItem  = tryLoad(() => require('./payrollItem')(sequelize, DataTypes),  'PayrollItem');
@@ -85,7 +83,7 @@ db.Payslip      = tryLoad(() => require('./payslip')(sequelize, DataTypes),     
 db.LeaveRequest = tryLoad(() => require('./leaveRequest')(sequelize, DataTypes), 'LeaveRequest');
 db.Contract     = tryLoad(() => require('./contract')(sequelize, DataTypes),     'Contract');
 
-/* ✅ Plans & Entitlements (new; safe if files/tables missing) */
+/* Plans & Entitlements (optional) */
 db.Plan            = tryLoad(() => require('./plan')(sequelize, DataTypes),            'Plan');
 db.Entitlement     = tryLoad(() => require('./entitlement')(sequelize, DataTypes),     'Entitlement');
 db.PlanEntitlement = tryLoad(() => require('./planentitlement')(sequelize, DataTypes), 'PlanEntitlement');
@@ -272,7 +270,6 @@ if (db.Plan && db.Entitlement) {
     db.Plan.belongsToMany(db.Entitlement, { through: db.PlanEntitlement, foreignKey: 'plan_id', otherKey: 'entitlement_id', as: 'entitlements' });
     db.Entitlement.belongsToMany(db.Plan, { through: db.PlanEntitlement, foreignKey: 'entitlement_id', otherKey: 'plan_id', as: 'plans' });
   } else {
-    // Even if the join model file is missing, this keeps codepaths working if tables exist
     db.Plan.belongsToMany(db.Entitlement, { through: 'plan_entitlements', foreignKey: 'plan_id', otherKey: 'entitlement_id', as: 'entitlements' });
     db.Entitlement.belongsToMany(db.Plan, { through: 'plan_entitlements', foreignKey: 'entitlement_id', otherKey: 'plan_id', as: 'plans' });
   }

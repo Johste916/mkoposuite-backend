@@ -29,38 +29,22 @@ module.exports = {
         allowNull: false,
         defaultValue: '',
       },
-      createdBy: {
-        type: Sequelize.UUID,
-        allowNull: true,
-      },
-      updatedBy: {
-        type: Sequelize.UUID,
-        allowNull: true,
-      },
-      createdAt: {
-        allowNull: false,
-        type: Sequelize.DATE,
-        defaultValue: Sequelize.literal('NOW()'),
-      },
-      updatedAt: {
-        allowNull: false,
-        type: Sequelize.DATE,
-        defaultValue: Sequelize.literal('NOW()'),
-      },
+      createdBy: { type: Sequelize.UUID, allowNull: true },
+      updatedBy: { type: Sequelize.UUID, allowNull: true },
+      createdAt: { allowNull: false, type: Sequelize.DATE, defaultValue: Sequelize.literal('NOW()') },
+      updatedAt: { allowNull: false, type: Sequelize.DATE, defaultValue: Sequelize.literal('NOW()') },
     });
 
-    // helpful indexes
     await queryInterface.addIndex('settings', ['key'], { unique: true });
 
     if (dialect === 'postgres') {
-      // Optional GIN index for querying JSONB
       await queryInterface.sequelize.query(
         'CREATE INDEX IF NOT EXISTS settings_value_gin_idx ON "settings" USING GIN ("value");'
       );
     }
   },
 
-  async down(queryInterface, Sequelize) {
+  async down(queryInterface) {
     await queryInterface.dropTable('settings');
   },
 };

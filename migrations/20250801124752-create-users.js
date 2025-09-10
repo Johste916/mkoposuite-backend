@@ -5,7 +5,7 @@ module.exports = {
     await queryInterface.createTable('Users', {
       id: {
         type: Sequelize.UUID,
-        defaultValue: Sequelize.UUIDV4, // ✅ Node.js will generate UUIDs
+        defaultValue: Sequelize.UUIDV4,
         allowNull: false,
         primaryKey: true
       },
@@ -18,7 +18,7 @@ module.exports = {
         allowNull: false,
         unique: true
       },
-      password: {
+      password_hash: {                 // ✅ match model & controllers
         type: Sequelize.STRING,
         allowNull: false
       },
@@ -37,6 +37,14 @@ module.exports = {
         defaultValue: Sequelize.literal('CURRENT_TIMESTAMP')
       }
     });
+
+    // Case-insensitive uniqueness helper (optional)
+    try {
+      await queryInterface.addIndex('Users', [Sequelize.literal('LOWER("email")')], {
+        unique: true,
+        name: 'users_email_lower_unique_idx'
+      });
+    } catch {}
   },
 
   async down(queryInterface) {

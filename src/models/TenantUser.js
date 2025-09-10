@@ -1,4 +1,3 @@
-// server/models/tenantUser.js
 'use strict';
 module.exports = (sequelize, DataTypes) => {
   const TenantUser = sequelize.define('TenantUser', {

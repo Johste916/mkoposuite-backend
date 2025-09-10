@@ -20,6 +20,24 @@ let models;
 try { models = require('./models'); } catch { try { models = require('../models'); } catch {} }
 if (models) {
   app.set('models', models);
+
+  // Quick sanity: DB + critical env for auth/signup
+  (async () => {
+    try {
+      if (models.sequelize?.authenticate) {
+        await models.sequelize.authenticate();
+        console.log('✅ DB connected');
+      }
+    } catch (e) {
+      console.warn('⚠️ DB connect failed:', e.message);
+    }
+    if (!process.env.JWT_SECRET) {
+      console.warn('⚠️ JWT_SECRET is missing. Login/Signup tokens will fail.');
+    }
+    if (process.env.SELF_SIGNUP_ENABLED !== '1') {
+      console.warn('ℹ️ SELF_SIGNUP_ENABLED not set to 1 — public /api/signup may be disabled.');
+    }
+  })();
 } else {
   console.warn('[BOOT] Sequelize models not found; some routes may fallback to memory. Signup will not persist.');
 }
@@ -105,7 +123,7 @@ app.use((req, res, next) => {
     requested && String(requested).trim().length ? requested : DEFAULT_ALLOWED_HEADERS.join(', ')
   );
 
-  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition,X-Total-Count');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition,X-Total-Count,X-Request-Id');
 
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();

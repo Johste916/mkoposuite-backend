@@ -1,4 +1,3 @@
-// server/models/tenant.js
 'use strict';
 module.exports = (sequelize, DataTypes) => {
   const Tenant = sequelize.define('Tenant', {
