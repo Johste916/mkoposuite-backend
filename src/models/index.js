@@ -42,7 +42,7 @@ db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes),
 
 /* Multitenancy (needed for signup) */
 db.Tenant        = tryLoad(() => require('./Tenant')(sequelize, DataTypes), 'Tenant');
-db.TenantUser    = tryLoad(() => require('./tenant_user')(sequelize, DataTypes), 'TenantUser');
+db.TenantUser    = tryLoad(() => require('./TenantUser')(sequelize, DataTypes), 'TenantUser');
 
 /* Access control (optional) */
 db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes),       'Role');
