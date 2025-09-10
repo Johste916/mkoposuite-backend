@@ -2,6 +2,7 @@
 
 const express = require('express');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs'); // ← use bcrypt like legacy users
 let jwt; try { jwt = require('jsonwebtoken'); } catch {}
 
 const router = express.Router();
@@ -37,10 +38,10 @@ function normalizeEmail(e) { return String(e || '').trim().toLowerCase(); }
 function validEmail(e) { const s = normalizeEmail(e); return !!s && s.includes('@') && s.includes('.') && s.length <= 254; }
 function validPassword(p) { return typeof p === 'string' && p.length >= 8; }
 
+// ✅ bcrypt like legacy rows (≈60 chars) → no truncation
 function hashPassword(password) {
-  const salt = crypto.randomBytes(16);
-  const hash = crypto.scryptSync(password, salt, 64);
-  return `s2$${salt.toString('base64url')}$${hash.toString('base64url')}`;
+  const rounds = Number(process.env.BCRYPT_ROUNDS || 10);
+  return bcrypt.hashSync(String(password), rounds);
 }
 function trialEndsAt(days) {
   return new Date(Date.now() + Math.max(0, days) * 86400000);
@@ -52,7 +53,6 @@ const MEM = {
   users: new Map(),
   tenantUsers: new Map()
 };
-
 function memCreateTenantAndOwner({ companyName, email, password, adminName, phone, planCode }) {
   const tenantId = crypto.randomUUID?.() || String(Date.now()) + '-t';
   const userId   = crypto.randomUUID?.() || String(Date.now()) + '-u';
@@ -76,7 +76,7 @@ function memCreateTenantAndOwner({ companyName, email, password, adminName, phon
     name: adminName || email.split('@')[0],
     email,
     phone: phone || null,
-    password_hash: hashPassword(password),
+    password_hash: hashPassword(password), // bcrypt
     role: 'owner',
     created_at: nowIso,
     updated_at: nowIso,
@@ -145,12 +145,11 @@ router.post('/', async (req, res) => {
           name: adminName || companyName + ' Admin',
           email,
           phone: phone || null,
-          password_hash: hashPassword(password),
+          password_hash: hashPassword(password), // ✅ bcrypt
           role: 'owner',
-          // write-through if model defines them (ignored otherwise)
-          tenantId: tenant.id,
-          is_active: true,
-          status: 'active',
+          tenantId: tenant.id,     // if model has it
+          is_active: true,         // if model has it
+          status: 'active',        // if model has it
         };
 
         const user = await models.User.create(userPayload, { transaction: t });
@@ -161,7 +160,7 @@ router.post('/', async (req, res) => {
             { transaction: t }
           );
         } else {
-          // soft fallback if join model missing: attempt raw insert
+          // raw fallback if join table exists without model
           try {
             await models.sequelize.query(
               `INSERT INTO tenant_users (tenant_id, user_id, role)
@@ -172,7 +171,6 @@ router.post('/', async (req, res) => {
           } catch {}
         }
 
-        // Default branch (optional)
         if (models.Branch?.create) {
           await models.Branch.create(
             { tenantId: tenant.id, name: 'Head Office', code: 'HO' },
