@@ -3,32 +3,45 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 
-/** Env */
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 const SELF_SIGNUP_ENABLED = process.env.SELF_SIGNUP_ENABLED === '1';
 const DEFAULT_TRIAL_DAYS = Number(process.env.DEFAULT_TRIAL_DAYS || 14);
 
-/** Small helper: pick first tenant for a user (if joined) */
+// pick first non-empty string from aliases
+function pick(obj, aliases = []) {
+  for (const key of aliases) {
+    const v = obj?.[key];
+    if (typeof v === 'string' && v.trim().length) return v.trim();
+  }
+  return undefined;
+}
+
+// allow bodies wrapped in {payload:{...}} or {user:{...}}
+function normalizeBody(body) {
+  const b = body || {};
+  return (b.payload && typeof b.payload === 'object') ? b.payload
+       : (b.user && typeof b.user === 'object') ? b.user
+       : b;
+}
+
 async function getTenantIdForUser(models, userId) {
   const { TenantUser } = models || {};
   if (!TenantUser) return null;
-  const link = await TenantUser.findOne({ where: { user_id: userId }, order: [['createdAt', 'ASC']] });
+  const link = await TenantUser.findOne({
+    where: { user_id: userId },
+    order: [['createdAt', 'ASC']]
+  });
   return link ? link.tenant_id : null;
 }
 
-/** GET /api/signup/_selfcheck */
 exports.selfcheck = async (req, res) => {
   try {
     const models = req.app.get('models') || {};
     const { sequelize, User, Tenant, TenantUser } = models;
-
     const dbOk = !!sequelize && (await sequelize.authenticate().then(() => true).catch(() => false));
 
-    let usersCols = null;
-    let tenantsCols = null;
-    let tusersCols = null;
-
+    let usersCols = null, tenantsCols = null, tusersCols = null;
     if (dbOk) {
       const [u] = await sequelize.query(`
         SELECT column_name FROM information_schema.columns
@@ -64,11 +77,7 @@ exports.selfcheck = async (req, res) => {
         hasTenant: !!Tenant,
         hasTenantUser: !!TenantUser,
       },
-      schema: {
-        Users: usersCols,
-        tenants: tenantsCols,
-        tenant_users: tusersCols,
-      },
+      schema: { Users: usersCols, tenants: tenantsCols, tenant_users: tusersCols },
     });
   } catch (e) {
     console.error('[SIGNUP:_selfcheck] error', e);
@@ -76,7 +85,6 @@ exports.selfcheck = async (req, res) => {
   }
 };
 
-/** POST /api/signup */
 exports.signup = async (req, res) => {
   try {
     if (!SELF_SIGNUP_ENABLED) {
@@ -86,31 +94,47 @@ exports.signup = async (req, res) => {
     const models = req.app.get('models') || {};
     const { sequelize, User, Tenant, TenantUser } = models;
 
-    const { name, email, password, orgName } = req.body || {};
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: 'name, email and password are required' });
+    const raw = normalizeBody(req.body);
+
+    // 🔑 Accept your current keys & old ones:
+    // name: adminName | name | fullName | username | ownerName
+    // org : companyName | orgName | organization | company | tenantName
+    // plan: planCode | plan | plan_code
+    // phone optional
+    const name     = pick(raw, ['adminName', 'name', 'fullName', 'username', 'ownerName']);
+    const email    = pick(raw, ['email', 'emailAddress']);
+    const password = pick(raw, ['password', 'pass', 'pwd']);
+    const orgName  = pick(raw, ['companyName', 'orgName', 'organization', 'company', 'tenantName']) || 'Organization';
+    const phone    = pick(raw, ['phone', 'phoneNumber', 'mobile']); // ignored unless you add a column
+    const planCode = (pick(raw, ['planCode', 'plan', 'plan_code']) || 'basic').toLowerCase();
+
+    const missing = [];
+    if (!name) missing.push('name/adminName');
+    if (!email) missing.push('email');
+    if (!password) missing.push('password');
+    if (missing.length) {
+      return res.status(400).json({ error: 'Missing required fields', missing });
     }
 
-    // Make sure we can use password_hash even if defaultScope hides it
     const userModel = User.scope ? User.scope('withSensitive') : User;
 
-    // Uniqueness check
-    const existing = await userModel.findOne({ where: { email } });
-    if (existing) return res.status(409).json({ error: 'Email already in use' });
+    const exists = await userModel.findOne({ where: { email } });
+    if (exists) return res.status(409).json({ error: 'Email already in use' });
 
     const password_hash = await bcrypt.hash(password, 10);
 
-    // If we have Sequelize + both tenant models, do a full 3-step inside a single tx
+    // If we have full tenant stack, create tenant + user + link in one TX
     if (sequelize && Tenant && TenantUser) {
       const created = await sequelize.transaction(async (t) => {
         const tenant = await Tenant.create({
           id: uuidv4(),
-          name: orgName || 'Organization',
+          name: orgName,
           status: 'trial',
-          plan_code: 'basic',
+          plan_code: planCode,
           trial_ends_at: new Date(Date.now() + DEFAULT_TRIAL_DAYS * 86400000).toISOString().slice(0, 10),
         }, { transaction: t });
 
+        // NOTE: Users table has no 'phone' column in your schema -> we ignore it safely.
         const user = await userModel.create({
           id: uuidv4(),
           name,
@@ -144,20 +168,14 @@ exports.signup = async (req, res) => {
       });
     }
 
-    // 🔻 Graceful fallback: if Tenants aren’t wired yet, at least create the user
-    const userOnly = await userModel.create({
+    // Fallback: only user (if tenant models/tables unavailable)
+    const user = await userModel.create({
       id: uuidv4(),
-      name,
-      email,
-      password_hash,
-      role: 'owner',
-      branchId: null,
+      name, email, password_hash, role: 'owner', branchId: null,
     });
-
-    const tId = await getTenantIdForUser(models, userOnly.id);
-
+    const tId = await getTenantIdForUser(models, user.id);
     const token = jwt.sign(
-      { id: userOnly.id, email: userOnly.email, tenantId: tId },
+      { id: user.id, email: user.email, tenantId: tId },
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN }
     );
@@ -165,12 +183,12 @@ exports.signup = async (req, res) => {
     return res.status(201).json({
       ok: true,
       token,
-      user: userOnly.toJSON(),
+      user: user.toJSON(),
       tenant: tId ? { id: tId } : null,
       note: 'Tenant linkage skipped (tenant models/tables not found).',
     });
+
   } catch (err) {
-    // Map common PG errors cleanly
     const code = err?.original?.code || err?.parent?.code;
     if (code === '23505') return res.status(409).json({ error: 'Email already in use' });
     console.error('[SIGNUP] error:', err);

@@ -1,10 +1,9 @@
 'use strict';
 const express = require('express');
 const router = express.Router();
-const { signup, selfcheck } = require('../controllers/publicSignupController');
+const ctrl = require('../controllers/publicSignupController');
 
-// ✅ Public endpoints
-router.get('/_selfcheck', selfcheck);   // quick status probe
-router.post('/', signup);               // POST /api/signup
+router.get('/_selfcheck', ctrl.selfcheck);
+router.post('/', ctrl.signup);
 
 module.exports = router;
