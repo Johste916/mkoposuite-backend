@@ -18,7 +18,19 @@ app.set('trust proxy', true);
 /* -------------------------- Attach models for controllers ------------------ */
 let models;
 try { models = require('./models'); } catch { try { models = require('../models'); } catch {} }
-if (models) app.set('models', models);
+if (models) {
+  app.set('models', models);
+} else {
+  console.warn('[BOOT] Sequelize models not found; some routes may fallback to memory. Signup will not persist.');
+}
+
+/* (optional) quick debug for models list — enable with DEBUG_API=1 */
+if (process.env.DEBUG_API === '1') {
+  app.get('/api/debug/models', (_req, res) => {
+    const keys = models ? Object.keys(models).filter(k => !['sequelize','Sequelize'].includes(k)).sort() : [];
+    res.json({ loaded: !!models, keys });
+  });
+}
 
 /* ------------------------------- App context ------------------------------- */
 app.use((req, res, next) => {
@@ -1033,6 +1045,26 @@ try {
         res.json({ ok: missing.length === 0, missing, present: expected.filter(t => present.has(t)) });
       } catch (e) {
         console.error('DB table check error:', e);
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    /* 🔍 extra: inspect Users columns (helps with password/password_hash issues) */
+    app.get('/api/health/db/users-columns', async (_req, res) => {
+      try {
+        const [cols] = await sequelize2.query(`
+          SELECT table_name, column_name, data_type
+          FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name IN ('Users','users')
+          ORDER BY table_name, ordinal_position
+        `);
+        let userCount = null;
+        try {
+          const [cnt] = await sequelize2.query(`SELECT COUNT(*)::int AS count FROM "Users"`);
+          userCount = cnt?.[0]?.count ?? null;
+        } catch {}
+        res.json({ columns: cols, userCount });
+      } catch (e) {
         res.status(500).json({ error: e.message });
       }
     });
