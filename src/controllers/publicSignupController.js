@@ -28,6 +28,13 @@ const hasCol = (model, col) =>
      (model.rawAttributes[col] ||
       Object.values(model.rawAttributes).some(a => a.field === col)));
 
+const loginUrl = (email) => {
+  const base = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
+  const path = process.env.FRONTEND_LOGIN_PATH || '/login';
+  const url  = base ? `${base}${path}` : path;
+  return email ? `${url}?email=${encodeURIComponent(email)}` : url;
+};
+
 exports.selfCheck = async (req, res) => {
   const env = {
     SELF_SIGNUP_ENABLED: getEnvBool(process.env.SELF_SIGNUP_ENABLED),
@@ -124,7 +131,12 @@ exports.signup = async (req, res) => {
     // Check for existing user (case-insensitive)
     const existing = await db.User.findOne({ where: { email: { [Op.iLike]: email } } });
     if (existing) {
-      return res.status(409).json({ error: 'Email already registered.' });
+      return res.status(409).json({
+        code: 'ALREADY_REGISTERED',
+        error: 'User already registered in the system.',
+        redirectTo: loginUrl(email),
+        paidPlatformUrl: process.env.PAID_PLATFORM_URL || null
+      });
     }
 
     // Hash password → password_hash column
@@ -195,18 +207,21 @@ exports.signup = async (req, res) => {
 
       await t.commit();
 
-      // JWT
+      // JWT (kept for your existing flow)
       const token = jwt.sign(
         { id: user.id, email: user.email, role: user.role, tenantId: tenant ? tenant.id : null },
         process.env.JWT_SECRET,
         { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
       );
 
+      // Send next.loginUrl (used by your SPA on success redirect)
       return res.status(201).json({
         ok: true,
         token,
         user,
         tenant: tenant || null,
+        requireEmailVerification: getEnvBool(process.env.REQUIRE_EMAIL_VERIFICATION),
+        next: { loginUrl: loginUrl() },
         note: tenant ? undefined : 'Tenant linkage skipped (tenant model/table not available).',
       });
     } catch (err) {
@@ -217,7 +232,13 @@ exports.signup = async (req, res) => {
       const detail = err?.original?.detail || err?.parent?.detail || err?.message;
 
       if (code === '23505') { // unique_violation
-        return res.status(409).json({ error: 'Conflict: duplicate value (email or slug).', code, detail });
+        return res.status(409).json({
+          code: 'ALREADY_REGISTERED',
+          error: 'User already registered in the system.',
+          redirectTo: loginUrl(email),
+          paidPlatformUrl: process.env.PAID_PLATFORM_URL || null,
+          detail
+        });
       }
       if (code === '23502') { // not_null_violation
         return res.status(400).json({ error: 'Missing required field on tenant/user.', code, detail });
