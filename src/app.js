@@ -500,7 +500,8 @@ function makeSubscriptionFallbackRouter() {
 /* ------------------------------ SMS endpoints ------------------------------ */
 function makeSmsFallbackRouter() {
   const r = express.Router();
-  r.post('/send', (req, res) => {
+
+  function sendHandler(req, res) {
     const { to, message, from, tenantId } = req.body || {};
     if (!to || !message) return res.status(400).json({ error: 'to and message are required' });
     const item = {
@@ -513,9 +514,18 @@ function makeSmsFallbackRouter() {
       status: 'queued'
     };
     SMS_LOGS.push(item);
-    res.json({ ok: true, messageId: item.id, status: item.status });
-  });
+    res.json({ ok: true, messageId: item.id, status: item.status, provider: 'fallback' });
+  }
+
+  // Canonical
+  r.post('/send', sendHandler);
   r.get('/logs', (_req, res) => res.json({ items: SMS_LOGS.slice(-100) }));
+  r.get('/balance', (_req, res) => res.json({ balance: 'unknown (fallback)' }));
+
+  // Legacy aliases when this router is mounted at /api/communications and /api/notifications
+  r.post('/sms/send', sendHandler); // => /api/communications/sms/send
+  r.post('/sms', sendHandler);      // => /api/notifications/sms
+
   return r;
 }
 
@@ -951,8 +961,10 @@ app.use('/api/subscription', ...auth, ...active, subscriptionRoutes);
 app.use('/api/system/subscription', ...auth, ...active, subscriptionRoutes);
 app.use('/api/admin/subscription', ...auth, ...active, subscriptionRoutes);
 
-/* ✅ NEW: SMS (global) */
-app.use('/api/sms', ...auth, ...active, smsRoutes);
+/* ✅ NEW: SMS (canonical + legacy aliases for older UIs) */
+app.use('/api/sms',            ...auth, ...active, smsRoutes);
+app.use('/api/communications', ...auth, ...active, smsRoutes); // exposes /api/communications/sms/send
+app.use('/api/notifications',  ...auth, ...active, smsRoutes); // exposes /api/notifications/sms
 
 /* ✅ NEW: Billing by phone (global; mount BEFORE generic /api/billing) */
 app.use('/api/billing/phone', ...auth, ...active, billingPhoneRoutes);

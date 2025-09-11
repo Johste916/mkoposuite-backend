@@ -1,91 +1,103 @@
 'use strict';
-const svc = require('../services/sms');
+const axios = require('axios');
 
-let db; try { db = require('../models'); } catch { try { db = require('../../models'); } catch {} }
+const truthy = (v) => ['1','true','yes','on'].includes(String(v||'').trim().toLowerCase());
+const onlyDigits = (s) => String(s || '').replace(/\D+/g, '');
 
-const norm = (v) => String(v || '').trim();
-const toE164 = (raw) => {
-  let t = norm(raw).replace(/[^\d+]/g, '');
-  if (t.startsWith('+')) return t;
-  const cc = String(process.env.DEFAULT_COUNTRY_CODE || '+255');
-  if (/^0\d{8,}$/.test(t)) return cc + t.slice(1);
-  if (/^\d{8,13}$/.test(t)) return cc + t;
-  return t;
-};
+function normalizeMsisdn(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  s = s.replace(/[^\d+]/g, '');
+  const cc = (process.env.DEFAULT_COUNTRY_CODE || '+255').replace('+', '');
+  if (s.startsWith('+')) s = s.slice(1);
+  if (s.startsWith('00')) s = s.slice(2);
+  if (s[0] === '0') s = cc + s.slice(1);
+  return onlyDigits(s);
+}
 
-// tiny helper to detect model column by either name or mapped field
-const hasCol = (model, col) =>
-  !!(model?.rawAttributes &&
-     (model.rawAttributes[col] ||
-      Object.values(model.rawAttributes).some(a => a.field === col)));
+function parseBody(b = {}) {
+  const to = b.to || b.dest || b.msisdn || b.phone || b.number;
+  const message = b.message || b.msg || b.text || b.body;
+  const bodySender = b.senderId || b.sender || b.from;
+  const allowBody = truthy(process.env.SMS_ALLOW_BODY_SENDERID);
+  const senderId = allowBody && bodySender ? String(bodySender) : (process.env.SMSCO_SENDER_ID || 'MKOPOSUITE');
+  return { to, message, senderId };
+}
 
-async function resolveSenderId(req) {
-  // Allow explicit override from body only if env flag is on (optional)
-  const allowBody = /^(1|true|yes|on)$/i.test(String(process.env.SMS_ALLOW_BODY_SENDERID || ''));
-  if (allowBody) {
-    const b = norm(req.body.senderId || req.body.senderid);
-    if (b) return b;
+async function smscoSend(to, message, senderId) {
+  const apiKey = process.env.SMSCO_API_KEY;
+  if (!apiKey) {
+    const err = new Error('SMS provider not configured (SMSCO_API_KEY missing)');
+    err.status = 500;
+    throw err;
   }
 
-  const tid = req.headers['x-tenant-id'] || req.user?.tenantId || req.query.tenantId;
-  if (tid && db?.Tenant) {
-    const t = await db.Tenant.findByPk(tid).catch(() => null);
-    if (t) {
-      // probe a few common column names without breaking if absent
-      const fields = ['sms_sender_id','sms_senderid','smsSenderId','sender_id','sms_sender'];
-      for (const f of fields) {
-        if (hasCol(db.Tenant, f) && (t.get?.(f) ?? t[f])) {
-          const val = String(t.get?.(f) ?? t[f] ?? '').trim();
-          if (val) return val;
-        }
-      }
-    }
+  const dest = normalizeMsisdn(to);
+  if (!dest) {
+    const err = new Error('Invalid destination number');
+    err.status = 400;
+    throw err;
   }
-  return process.env.SMSCO_SENDER_ID || process.env.SMS_DEFAULT_SENDER_ID || 'MKOPOSUITE';
+  if (!message || !String(message).trim()) {
+    const err = new Error('Message text is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const url = `https://www.sms.co.tz/api.php?do=sms&api_key=${apiKey}&senderid=${encodeURIComponent(senderId || '')}&dest=${dest}&msg=${encodeURIComponent(String(message))}`;
+
+  const { data } = await axios.get(url, { timeout: 15000, responseType: 'text' });
+  const str = String(data || '').trim();
+  const parts = str.split(',');
+  const status = (parts[0] || '').toUpperCase();
+
+  if (status === 'OK') {
+    return {
+      ok: true,
+      provider: 'smsco',
+      detail: parts[1] || '',
+      providerId: parts[2] || '',
+      dest,
+      senderId,
+    };
+  }
+
+  const reason = (parts[1] || '').toUpperCase();
+  const map = {
+    INVALIDACCT: 'Invalid account or API key',
+    INVALIDNUMBER: 'Invalid phone number',
+    NOBALANCE: 'Insufficient SMS balance',
+    CHECKINPUT: 'Invalid input (senderid/msg/dest)',
+  };
+  const err = new Error(map[reason] || reason || 'Unknown provider error');
+  err.status = 400;
+  err.providerResponse = str;
+  throw err;
 }
 
 exports.send = async (req, res) => {
   try {
-    const to = toE164(req.body.to || req.body.phone || req.body.msisdn);
-    const text = norm(req.body.text || req.body.message);
-    if (!to || !/^\+\d{8,15}$/.test(to)) return res.status(400).json({ error: 'Invalid phone (use E.164 or local 0…)' });
-    if (!text) return res.status(400).json({ error: 'Message is required' });
-
-    const senderId = await resolveSenderId(req);
-    const r = await svc.send({ to, text, senderId });
-
-    try {
-      if (db?.SmsMessage) {
-        await db.SmsMessage.create({
-          to, body: text, provider: r.provider, provider_id: r.id || null, status: r.status || 'queued',
-        });
-      }
-    } catch {}
-
-    return res.json({ ok: true, to, senderId, result: r });
+    const { to, message, senderId } = parseBody(req.body);
+    const result = await smscoSend(to, message, senderId);
+    res.json(result);
   } catch (e) {
-    return res.status(500).json({ error: e.message || 'SMS send failed' });
+    res.status(e.status || 500).json({
+      error: e.message || 'SMS send failed',
+      providerResponse: e.providerResponse || null,
+    });
   }
 };
 
 exports.balance = async (_req, res) => {
   try {
-    const b = await svc.balance();
-    return res.json({ provider: (process.env.SMS_PROVIDER || 'smsco'), ...b });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || 'Balance failed' });
+    const apiKey = process.env.SMSCO_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'Missing SMSCO_API_KEY' });
+    const url = `https://www.sms.co.tz/api.php?do=balance&api_key=${apiKey}`;
+    const { data } = await axios.get(url, { timeout: 10000, responseType: 'text' });
+    res.json({ balance: String(data || '').trim() });
+  } catch {
+    res.status(502).json({ error: 'Failed to query balance' });
   }
 };
 
-exports.messages = async (_req, res) => {
-  try {
-    if (db?.SmsMessage) {
-      const list = await db.SmsMessage.findAll({ order: [['createdAt', 'DESC']], limit: 50 });
-      return res.json(list);
-    }
-    return res.json([]);
-  } catch (e) {
-    return res.status(500).json({ error: e.message || 'List failed' });
-  }
-};
-
+exports.messages = async (_req, res) => res.json([]); // stub list

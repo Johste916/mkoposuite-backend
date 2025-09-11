@@ -1,19 +1,33 @@
-// routes/smsRoutes.js
 'use strict';
 const express = require('express');
 const router = express.Router();
 
-const logs = [];
+let authenticateUser;
+try { ({ authenticateUser } = require('../middleware/authMiddleware')); } catch {}
+const auth = authenticateUser ? [authenticateUser] : [];
 
-router.post('/send', async (req, res) => {
-  const { to, message, from } = req.body || {};
-  if (!to || !message) return res.fail(400, 'to and message are required');
-  // Hook a real SMS provider here if available
-  const item = { id: Date.now(), tenantId: null, to: String(to), from: from || 'MkopoSuite', message: String(message), at: new Date().toISOString(), status: 'queued' };
-  logs.push(item);
-  return res.ok({ ok: true, messageId: item.id, status: item.status });
-});
+const ctrl = require('../controllers/smsController');
 
-router.get('/logs', (_req, res) => res.ok({ items: logs.slice(-100) }));
+/**
+ * We expose several paths to stay compatible with older frontends:
+ *
+ *  POST /api/sms/send                 (preferred)
+ *  POST /api/communications/sms/send  (legacy)
+ *  POST /api/notifications/sms        (legacy)
+ *
+ *  GET  /api/sms/messages
+ *  GET  /api/sms/balance
+ */
+
+// preferred base (/api/sms/*)
+router.post('/send', ...auth, ctrl.send);
+router.get('/messages', ...auth, ctrl.messages);
+router.get('/balance', ...auth, ctrl.balance);
+
+// when mounted at /api/communications
+router.post('/sms/send', ...auth, ctrl.send);
+
+// when mounted at /api/notifications
+router.post('/sms', ...auth, ctrl.send);
 
 module.exports = router;
