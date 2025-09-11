@@ -25,7 +25,7 @@ const ALLOW_BODY_SENDER =
 const PRICE_PER_SEGMENT = Number(process.env.SMS_PRICE_PER_SEGMENT || process.env.SMS_TZS_PER_SEGMENT || 0);
 const UNIT = process.env.SMS_UNIT_NAME || 'credits';
 
-/* ------------------------------- helpers -------------------------------- */
+/* -------------------------------- helpers -------------------------------- */
 function pick(obj, keys) {
   for (const k of keys) if (obj && obj[k] != null && String(obj[k]).trim() !== '') return obj[k];
   return undefined;
@@ -43,14 +43,62 @@ function normalizeTZ(phone) {
   else if (p.startsWith('+')) p = p.slice(1);
   return p;
 }
-function senderForTenant(tenantId, requested) {
-  if (ALLOW_BODY_SENDER && requested && String(requested).trim()) return String(requested).trim();
+
+/** Derive sender from DB — “first name of the company” (first word of org name) */
+async function getSystemSenderId(req, tenantId) {
+  try {
+    const models = req.app?.get?.('models');
+    if (!models) return null;
+
+    // Try common places for organization/tenant name
+    const candidates = [];
+
+    if (models.Tenant?.findByPk) {
+      const t = await models.Tenant.findByPk(tenantId);
+      if (t) candidates.push(t.name, t.companyName, t.org_name);
+      // optional JSON profile: profile.smsSenderId or profile.name
+      if (t?.profile?.smsSenderId) candidates.push(t.profile.smsSenderId);
+      if (t?.profile?.name) candidates.push(t.profile.name);
+    }
+
+    if (models.Organization?.findOne) {
+      const org = await models.Organization.findOne({ where: { tenantId } });
+      if (org) candidates.push(org.name, org.companyName);
+    }
+
+    if (models.Setting?.findOne) {
+      // sometimes org name is stored as a setting
+      const s = await models.Setting.findOne({ where: { tenant_id: tenantId, key: 'organization_name' } });
+      if (s?.value) candidates.push(s.value);
+      const s2 = await models.Setting.findOne({ where: { tenant_id: tenantId, key: 'sms_sender_id' } });
+      if (s2?.value) candidates.push(s2.value);
+    }
+
+    const raw = candidates.find(v => typeof v === 'string' && v.trim());
+    if (!raw) return null;
+
+    let firstWord = raw.trim().split(/\s+/)[0] || 'ORG';
+    // sanitize to A-Z0-9, uppercased, max 11 chars (sender id constraints)
+    firstWord = firstWord.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 11);
+    if (firstWord.length < 3) return null;
+    return firstWord;
+  } catch (_) { return null; }
+}
+
+async function senderForTenant(req, tenantId, requested) {
+  if (ALLOW_BODY_SENDER && requested && String(requested).trim()) {
+    return String(requested).trim();
+  }
+  const fromDb = await getSystemSenderId(req, tenantId);
+  if (fromDb) return fromDb;
+
   try {
     const map = JSON.parse(process.env.SMS_SENDER_MAP_JSON || '{}');
     if (tenantId && map[tenantId]) return String(map[tenantId]);
   } catch {}
-  return process.env.SMS_CO_TZ_SENDER_DEFAULT || process.env.SMSCO_SENDER_ID || 'MkopoSuite';
+  return process.env.SMS_CO_TZ_SENDER_DEFAULT || process.env.SMSCO_SENDER_ID || 'MKOPOSUITE';
 }
+
 function smsCoTzUrl(params) {
   const base = process.env.SMS_CO_TZ_API_BASE || 'https://www.sms.co.tz/api.php';
   const url = new URL(base);
@@ -84,7 +132,7 @@ async function smsCoTzBalance() {
   const now = Date.now();
   if (BAL_CACHE.payload && now - BAL_CACHE.ts < 60_000) return BAL_CACHE.payload;
   const text = await smsRawBalance();
-  // Typical format: "OK,1827.728813559319" or "ERR,reason"
+  // Format: "OK,1827.728813559319"
   const m = /^OK,?\s*([\d.]+)/i.exec(text || '');
   const credits = m ? Number(m[1]) : null;
   const payload = credits != null
@@ -129,9 +177,20 @@ function logPush(entry) {
   if (LOG.length > 400) LOG.splice(0, LOG.length - 400);
 }
 
-/* ------------------------------- routes ---------------------------------- */
+/* ------------------------------ capabilities ------------------------------ */
+router.get('/capabilities', async (req, res) => {
+  const tenantId =
+    req.headers['x-tenant-id'] ||
+    req.body?.tenantId ||
+    process.env.DEFAULT_TENANT_ID ||
+    'default';
+  const def = await senderForTenant(req, tenantId, null);
+  res.json({ allowBodySender: ALLOW_BODY_SENDER, defaultSender: def });
+});
 
-// Parsed balance (clean for UI)
+/* --------------------------------- routes -------------------------------- */
+
+// Parsed balance for UI
 router.get('/balance', async (_req, res) => {
   try { res.json(await smsCoTzBalance()); }
   catch (e) { res.status(500).json({ error: e.message }); }
@@ -153,7 +212,7 @@ router.post('/send', async (req, res) => {
     const toNorm = normalizeTZ(to);
     if (isOptedOut(tenantId, toNorm)) return res.status(403).json({ error: 'recipient opted out' });
 
-    const senderid = senderForTenant(tenantId, requestedFrom);
+    const senderid = await senderForTenant(req, tenantId, requestedFrom);
     if (String(process.env.SMS_DRY_RUN) === '1') {
       const fakeId = Date.now().toString();
       logPush({ id: fakeId, to: toNorm, from: senderid, message: String(message), at: new Date().toISOString(), status: 'dry-run' });
@@ -166,7 +225,7 @@ router.post('/send', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Quick multi-send: { to:["...","..."], message, from? }
+// Quick multi-send: { to:["..."], message, from? }
 router.post('/send-many', async (req, res) => {
   try {
     const { to = [], message, from, tenantId: tId } = req.body || {};
@@ -174,7 +233,7 @@ router.post('/send-many', async (req, res) => {
     if (!message) return res.status(400).json({ error: 'message is required' });
 
     const tenantId = tId || req.headers['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || 'default';
-    const senderid = senderForTenant(tenantId, from);
+    const senderid = await senderForTenant(req, tenantId, from);
     const results = [];
 
     for (const msisdn of to) {
@@ -200,7 +259,7 @@ router.post('/send-many', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Bulk with templating (unchanged core)
+// Bulk with templating
 router.post('/bulk', async (req, res) => {
   try {
     const b = req.body || {};
@@ -221,7 +280,7 @@ router.post('/bulk', async (req, res) => {
       if (template) {
         msg = template.replace(/\{\{(\w+)\}\}/g, (_s,g1) => (m.vars && g1 in m.vars ? String(m.vars[g1]) : ''));
       }
-      const senderid = senderForTenant(tenantId, m.from || b.defaultFrom);
+      const senderid = await senderForTenant(req, tenantId, m.from || b.defaultFrom);
 
       if (String(process.env.SMS_DRY_RUN) === '1') {
         const id = Date.now().toString() + Math.floor(Math.random()*1000);
@@ -240,8 +299,84 @@ router.post('/bulk', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// CSV upload: multipart/form-data -> file field "file"
-// Columns supported: phone, message OR phone + template at body + (firstName,lastName,...) for templating
+/* ---------- Server-side segment: tries to honor CRM filters if models exist */
+router.post('/to-segment', async (req, res) => {
+  try {
+    const { filter = {}, template, from } = req.body || {};
+    const tenantId = req.headers['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || 'default';
+    const senderid = await senderForTenant(req, tenantId, from);
+
+    const models = req.app?.get?.('models');
+    const out = [];
+
+    if (!models?.Borrower?.findAll) {
+      return res.status(501).json({ ok: false, error: 'Borrower model not available' });
+    }
+
+    // Build borrower where
+    const whereBorrower = {};
+    if (filter.branchId) whereBorrower.branchId = filter.branchId;
+
+    // naive search: name/phone contains q, if provided
+    if (filter.q) {
+      const q = String(filter.q).trim();
+      whereBorrower.$or = [
+        { firstName: { $iLike: `%${q}%` } },
+        { lastName:  { $iLike: `%${q}%` } },
+        { phone:     { $iLike: `%${q}%` } },
+        { msisdn:    { $iLike: `%${q}%` } },
+      ];
+    }
+
+    // If loan filters exist and Loan model is available, try to filter via raw query (kept defensive)
+    let borrowerIdsLoanFiltered = null;
+    if ((filter.loanStatus || filter.overdueOnly || filter.defaulted || filter.officerId) && models?.sequelize) {
+      try {
+        const parts = [`SELECT DISTINCT "borrowerId" FROM "Loans" WHERE 1=1`];
+        const repl = {};
+        if (filter.loanStatus) { parts.push(`AND "status" = :status`); repl.status = String(filter.loanStatus); }
+        if (filter.officerId)  { parts.push(`AND "officerId" = :officerId`); repl.officerId = filter.officerId; }
+        if (filter.overdueOnly) parts.push(`AND COALESCE("daysLate",0) > 0`);
+        if (filter.defaulted)   parts.push(`AND "status" IN ('defaulted','written_off')`);
+        const [rows] = await models.sequelize.query(parts.join(' '), { replacements: repl });
+        borrowerIdsLoanFiltered = new Set(rows.map(r => r.borrowerId));
+      } catch { /* fall back to no-op */ }
+    }
+
+    // Fetch borrowers and apply loan filter result if present
+    const borrowers = await models.Borrower.findAll({
+      where: whereBorrower,
+      attributes: ['id','firstName','lastName','phone','msisdn','branchId'],
+      limit: Math.min(Number(filter.limit || 500), 1000),
+      raw: true
+    });
+
+    const targets = borrowers
+      .filter(b => (borrowerIdsLoanFiltered ? borrowerIdsLoanFiltered.has(b.id) : true))
+      .map(b => ({
+        id: b.id,
+        name: [b.firstName, b.lastName].filter(Boolean).join(' ').trim() || `Borrower ${b.id}`,
+        phone: b.phone || b.msisdn || null,
+        branchId: b.branchId || null
+      }))
+      .filter(x => x.phone);
+
+    if (!targets.length) return res.json({ ok: true, count: 0, results: [] });
+
+    // Send via /bulk path
+    const messages = targets.map(t => {
+      const [firstName, ...rest] = (t.name || '').split(' ');
+      return { to: t.phone, vars: { name: t.name, firstName, lastName: rest.join(' ') }, from: senderid };
+    });
+
+    req.body = { messages, template, defaultFrom: senderid };
+    return router.handle({ ...req, url: '/bulk', method: 'POST' }, res);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* ----------------------------- CSV upload -------------------------------- */
 if (upload) {
   router.post('/upload-csv', upload.single('file'), async (req, res) => {
     try {
@@ -273,7 +408,6 @@ if (upload) {
         messages.push({ to: phone, message: msg });
       }
 
-      // Reuse /bulk
       req.body = { messages };
       return router.handle({ ...req, url: '/bulk', method: 'POST' }, res);
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -282,19 +416,55 @@ if (upload) {
   router.post('/upload-csv', (_req, res) => res.status(501).json({ error: 'CSV upload requires "multer" dependency' }));
 }
 
-// Messages log
+/* --------------------------- Borrower picker ------------------------------ */
+router.get('/recipients/borrowers', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+    const branchId = req.query.branchId ? String(req.query.branchId) : undefined;
+    const models = req.app.get('models');
+    if (!models?.Borrower?.findAll) return res.json({ items: [] });
+
+    const where = {};
+    if (branchId) where.branchId = branchId;
+    if (q) where.$or = [
+      { firstName: { $iLike: `%${q}%` } },
+      { lastName:  { $iLike: `%${q}%` } },
+      { phone:     { $iLike: `%${q}%` } },
+      { msisdn:    { $iLike: `%${q}%` } },
+      { nationalId:{ $iLike: `%${q}%` } },
+      { accountNo: { $iLike: `%${q}%` } },
+    ];
+
+    const rows = await models.Borrower.findAll({
+      where,
+      attributes: ['id','firstName','lastName','phone','msisdn','branchId'],
+      limit,
+      raw: true
+    });
+
+    const items = rows.map(b => ({
+      id: b.id,
+      name: [b.firstName, b.lastName].filter(Boolean).join(' ').trim() || `Borrower ${b.id}`,
+      phone: b.phone || b.msisdn || null,
+      branchId: b.branchId || null
+    })).filter(x => x.phone);
+
+    res.json({ items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+/* ------------------------------- Messages --------------------------------- */
 router.get('/messages', (_req, res) => {
   res.setHeader('X-Total-Count', String(LOG.length));
   res.json({ items: LOG.slice(-100).reverse() });
 });
-
-// Status (DLR)
 router.get('/status/:id', async (req, res) => {
   try { res.json(await smsCoTzStatus(String(req.params.id))); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Opt-out
+/* ------------------------------- Opt-out ---------------------------------- */
 router.get('/optout', (req, res) => {
   const tenantId = req.headers['x-tenant-id'] || 'default';
   res.json({ items: Array.from(OPTOUT.get(tenantId) || []) });
@@ -314,42 +484,7 @@ router.delete('/optout', (req, res) => {
   res.json({ ok: true, msisdn });
 });
 
-/* ---------- Borrower picker endpoint for the UI (searchable) -------------- */
-router.get('/recipients/borrowers', async (req, res) => {
-  try {
-    const q = String(req.query.q || '').trim();
-    const limit = Math.min(Number(req.query.limit || 20), 50);
-    const models = req.app.get('models');
-    if (!models?.Borrower?.findAll) return res.json({ items: [] });
-
-    const where = {};
-    // naive search; enhance if you have a full-text column
-    if (q) where.$or = [
-      { firstName: { $iLike: `%${q}%` } },
-      { lastName: { $iLike: `%${q}%` } },
-      { phone: { $iLike: `%${q}%` } },
-      { msisdn: { $iLike: `%${q}%` } }
-    ];
-
-    const borrowers = await models.Borrower.findAll({
-      where,
-      attributes: ['id','firstName','lastName','phone','msisdn','branchId'],
-      limit,
-      raw: true
-    });
-
-    const items = borrowers.map(b => ({
-      id: b.id,
-      name: [b.firstName, b.lastName].filter(Boolean).join(' ').trim() || `Borrower ${b.id}`,
-      phone: b.phone || b.msisdn || null,
-      branchId: b.branchId || null
-    })).filter(x => x.phone);
-
-    res.json({ items });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-/* -------------------------- legacy compat paths --------------------------- */
+/* ----------------------------- legacy aliases ----------------------------- */
 router.post('/sms/send', (req, res, next) =>
   router.handle({ ...req, url: '/send', method: 'POST' }, res, next)
 );
