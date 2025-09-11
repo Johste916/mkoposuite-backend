@@ -23,6 +23,11 @@ const getEnvBool = (val) => {
   return ['1','true','yes','on'].includes(str);
 };
 
+const hasCol = (model, col) =>
+  !!(model?.rawAttributes &&
+     (model.rawAttributes[col] ||
+      Object.values(model.rawAttributes).some(a => a.field === col)));
+
 exports.selfCheck = async (req, res) => {
   const env = {
     SELF_SIGNUP_ENABLED: getEnvBool(process.env.SELF_SIGNUP_ENABLED),
@@ -116,29 +121,29 @@ exports.signup = async (req, res) => {
 
     const { companyName, adminName, email, phone, password, planCode } = body;
 
-    // Check for existing user
+    // Check for existing user (case-insensitive)
     const existing = await db.User.findOne({ where: { email: { [Op.iLike]: email } } });
     if (existing) {
       return res.status(409).json({ error: 'Email already registered.' });
     }
 
     // Hash password → password_hash column
-    const hash = bcrypt ? await bcrypt.hash(password, 10)
-                        : (crypto.createHash('sha256').update(password).digest('hex')); // fallback
+    const hash = bcrypt
+      ? await bcrypt.hash(password, 10)
+      : crypto.createHash('sha256').update(password).digest('hex'); // fallback for environments without bcrypt
 
     const t = await db.sequelize.transaction();
 
     try {
-      // Create (or pick) tenant if tenant table exists; otherwise proceed without it
+      // Create tenant if model exists
       let tenant = null;
       if (db.Tenant) {
-        let slug = slugify(companyName);
-        if (!slug) slug = crypto.randomUUID().slice(0, 8);
+        let slug = slugify(companyName) || (crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : String(Date.now()));
 
-        // ensure slug uniqueness if there is a slug column
-        const hasSlugCol = !!db.Tenant.rawAttributes.slug || Object.values(db.Tenant.rawAttributes).some(a => a.field === 'slug');
-        if (hasSlugCol) {
+        // Ensure unique slug if slug column exists
+        if (hasCol(db.Tenant, 'slug')) {
           let candidate = slug, i = 1;
+          // eslint-disable-next-line no-constant-condition
           while (true) {
             const exists = await db.Tenant.findOne({ where: { slug: candidate } });
             if (!exists) { slug = candidate; break; }
@@ -148,7 +153,8 @@ exports.signup = async (req, res) => {
           }
         }
 
-        tenant = await db.Tenant.create({
+        // Build tenant payload and include only columns that exist in the model
+        const tenantData = {
           name: companyName,
           status: 'trial',
           plan_code: planCode || 'basic',
@@ -158,8 +164,15 @@ exports.signup = async (req, res) => {
           billing_email: email,
           auto_disable_overdue: false,
           grace_days: 7,
-          ...(hasSlugCol ? { slug } : {}),
-        }, { transaction: t });
+        };
+
+        // 🔹 supply commonly-required columns if present in DB/model
+        if (hasCol(db.Tenant, 'slug'))     tenantData.slug     = slug;
+        if (hasCol(db.Tenant, 'country'))  tenantData.country  = process.env.DEFAULT_COUNTRY  || 'TZ';
+        if (hasCol(db.Tenant, 'currency')) tenantData.currency = process.env.DEFAULT_CURRENCY || 'TZS';
+        if (hasCol(db.Tenant, 'staff_count') && tenantData.staff_count == null) tenantData.staff_count = 0;
+
+        tenant = await db.Tenant.create(tenantData, { transaction: t });
       }
 
       // Create user
@@ -171,7 +184,7 @@ exports.signup = async (req, res) => {
         branchId: null,
       }, { transaction: t });
 
-      // Link user to tenant if table exists
+      // Link user to tenant if join table exists
       if (tenant && db.TenantUser) {
         await db.TenantUser.create({
           tenant_id: tenant.id,
@@ -199,12 +212,17 @@ exports.signup = async (req, res) => {
     } catch (err) {
       await t.rollback();
 
-      // Unique constraint handling
-      const code = err?.original?.code || err?.parent?.code || err?.code;
-      if (code === '23505') {
-        return res.status(409).json({ error: 'Conflict: duplicate value (email or slug).' });
+      // Better diagnostics to the client
+      const code   = err?.original?.code || err?.parent?.code || err?.code;
+      const detail = err?.original?.detail || err?.parent?.detail || err?.message;
+
+      if (code === '23505') { // unique_violation
+        return res.status(409).json({ error: 'Conflict: duplicate value (email or slug).', code, detail });
       }
-      return res.status(500).json({ error: err.message || 'Signup failed.' });
+      if (code === '23502') { // not_null_violation
+        return res.status(400).json({ error: 'Missing required field on tenant/user.', code, detail });
+      }
+      return res.status(500).json({ error: 'Signup failed.', code, detail });
     }
   } catch (e) {
     return res.status(500).json({ error: e.message || 'Internal error.' });
