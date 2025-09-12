@@ -1,8 +1,17 @@
 'use strict';
+
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
+
 const app = express();
+
+/* ------------------------------- Optional env ------------------------------ */
+try {
+  // Load .env if present (no-op if module missing)
+  require('dotenv').config();
+} catch {}
 
 /* ------------------------------ Optional deps ------------------------------ */
 let helmet, compression, morgan, rateLimit;
@@ -18,6 +27,7 @@ app.set('trust proxy', true);
 /* -------------------------- Attach models for controllers ------------------ */
 let models;
 try { models = require('./models'); } catch { try { models = require('../models'); } catch {} }
+
 if (models) {
   app.set('models', models);
 
@@ -45,7 +55,7 @@ if (models) {
 /* (optional) quick debug for models list — enable with DEBUG_API=1 */
 if (process.env.DEBUG_API === '1') {
   app.get('/api/debug/models', (_req, res) => {
-    const keys = models ? Object.keys(models).filter(k => !['sequelize','Sequelize'].includes(k)).sort() : [];
+    const keys = models ? Object.keys(models).filter(k => !['sequelize', 'Sequelize'].includes(k)).sort() : [];
     res.json({ loaded: !!models, keys });
   });
 }
@@ -66,7 +76,11 @@ app.use((req, res, next) => {
 });
 
 /* -------------------------- Security & performance ------------------------- */
-if (helmet) app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+if (helmet) {
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  }));
+}
 if (compression) app.use(compression());
 if (process.env.NODE_ENV !== 'production' && morgan) app.use(morgan('dev'));
 
@@ -81,10 +95,10 @@ if (rateLimit) {
 
 /* ----------------------------------- CORS ---------------------------------- */
 const defaultOrigins = [
-  'http://localhost:5173','http://127.0.0.1:5173',
-  'http://localhost:4173','http://127.0.0.1:4173',
-  'http://localhost:3000','http://127.0.0.1:3000',
-  'https://strong-fudge-7fc28d.netlify.app','https://mkoposuite.netlify.app',
+  'http://localhost:5173', 'http://127.0.0.1:5173',
+  'http://localhost:4173', 'http://127.0.0.1:4173',
+  'http://localhost:3000', 'http://127.0.0.1:3000',
+  'https://strong-fudge-7fc28d.netlify.app', 'https://mkoposuite.netlify.app',
 ];
 const envOrigins = [
   ...(process.env.CORS_ALLOW_ORIGINS || process.env.CORS_ORIGINS || '')
@@ -104,8 +118,8 @@ function isAllowedOrigin(origin) {
 }
 
 const DEFAULT_ALLOWED_HEADERS = [
-  'Content-Type','Authorization','X-Requested-With','X-User-Id',
-  'x-tenant-id','x-branch-id','x-timezone','x-tz-offset','x-request-id','Accept',
+  'Content-Type', 'Authorization', 'X-Requested-With', 'X-User-Id',
+  'x-tenant-id', 'x-branch-id', 'x-timezone', 'x-tz-offset', 'x-request-id', 'Accept',
 ];
 
 app.use((req, res, next) => {
@@ -135,13 +149,14 @@ app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 /* ----------------------------- Static /uploads ----------------------------- */
 const uploadsDir = path.resolve(__dirname, '../uploads');
+try { fs.mkdirSync(uploadsDir, { recursive: true }); } catch {}
 app.use('/uploads', express.static(uploadsDir, {
-  maxAge: '1d',
+  maxAge: process.env.UPLOADS_MAX_AGE || '1d',
   setHeaders: (res) => res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin'),
 }));
 
 /* -------------------------- Small response helpers ------------------------- */
-app.use((req, res, next) => {
+app.use((_req, res, next) => {
   res.ok = (data, extra = {}) => {
     if (typeof extra.total === 'number') res.setHeader('X-Total-Count', String(extra.total));
     if (extra.filename) res.setHeader('Content-Disposition', `attachment; filename="${extra.filename}"`);
@@ -151,7 +166,7 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ------------------------ Helpers: safe route loading ----------------------- */
+/* ------------------------ Helpers: safe route loading ---------------------- */
 const FORCE_REAL = process.env.REAL_DATA === '1' || process.env.FORCE_REAL_ROUTES === '1';
 
 function makeDummyRouter(sample) {
@@ -438,7 +453,7 @@ function makeSupportFallbackRouter() {
     const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t) return res.status(404).json({ error: 'Ticket not found' });
     const status = req.body?.status ? String(req.body.status).toLowerCase() : null;
-    if (status && ['open','resolved','canceled'].includes(status)) t.status = status;
+    if (status && ['open', 'resolved', 'canceled'].includes(status)) t.status = status;
     t.updatedAt = new Date().toISOString();
     res.json(t);
   });
@@ -446,17 +461,23 @@ function makeSupportFallbackRouter() {
   r.post('/tickets/:id/resolve', (req, res) => {
     const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t) return res.status(404).json({ error: 'Ticket not found' });
-    t.status = 'resolved'; t.updatedAt = new Date().toISOString(); res.json(t);
+    t.status = 'resolved';
+    t.updatedAt = new Date().toISOString();
+    res.json(t);
   });
   r.post('/tickets/:id/cancel', (req, res) => {
     const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t) return res.status(404).json({ error: 'Ticket not found' });
-    t.status = 'canceled'; t.updatedAt = new Date().toISOString(); res.json(t);
+    t.status = 'canceled';
+    t.updatedAt = new Date().toISOString();
+    res.json(t);
   });
   r.post('/tickets/:id/reopen', (req, res) => {
     const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t) return res.status(404).json({ error: 'Ticket not found' });
-    t.status = 'open'; t.updatedAt = new Date().toISOString(); res.json(t);
+    t.status = 'open';
+    t.updatedAt = new Date().toISOString();
+    res.json(t);
   });
 
   return r;
@@ -491,7 +512,7 @@ function makeSubscriptionFallbackRouter() {
       seats: 'unlimited',
       trialEndsAt: null,
       renewsAt: null,
-      features: ['support-console','impersonation','tickets','sms','billing-by-phone','enrichment'],
+      features: ['support-console', 'impersonation', 'tickets', 'sms', 'billing-by-phone', 'enrichment'],
     });
   });
   return r;
@@ -511,7 +532,7 @@ function makeSmsFallbackRouter() {
       from: from || 'MkopoSuite',
       message: String(message),
       at: new Date().toISOString(),
-      status: 'queued'
+      status: 'queued',
     };
     SMS_LOGS.push(item);
     res.json({ ok: true, messageId: item.id, status: item.status, provider: 'fallback' });
@@ -628,7 +649,7 @@ function makeTenantFeatureBridgeRouter() {
     const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
     if (!t || t.tenantId !== String(req.params.tenantId)) return res.status(404).json({ error: 'Ticket not found' });
     const status = req.body?.status ? String(req.body.status).toLowerCase() : null;
-    if (status && ['open','resolved','canceled'].includes(status)) t.status = status;
+    if (status && ['open', 'resolved', 'canceled'].includes(status)) t.status = status;
     t.updatedAt = new Date().toISOString();
     res.json(t);
   });
@@ -649,7 +670,6 @@ function makeTenantFeatureBridgeRouter() {
   });
 
   // Alias: /api/tenants/:tenantId/support/tickets*
-  r.use('/:tenantId/support', (req, res, next) => next()); // namespace
   r.get('/:tenantId/support/tickets', (req, res) => {
     const tenantId = String(req.params.tenantId);
     const items = Array.from(SUPPORT_STORE.TICKETS.values()).filter(t => t.tenantId === tenantId);
@@ -669,7 +689,7 @@ function makeTenantFeatureBridgeRouter() {
       from: from || 'MkopoSuite',
       message: String(message),
       at: new Date().toISOString(),
-      status: 'queued'
+      status: 'queued',
     };
     SMS_LOGS.push(item);
     res.json({ ok: true, messageId: item.id, status: item.status });
@@ -738,7 +758,7 @@ function makeTenantFeatureBridgeRouter() {
   return r;
 }
 
-/* --------------------- Fallback org router (limits/invoices) -------------------- */
+/* --------------------- Fallback org router (limits/invoices) --------------- */
 function makeOrgFallbackRouter() {
   const r = express.Router();
   r.get('/limits', (_req, res) => {
@@ -746,8 +766,8 @@ function makeOrgFallbackRouter() {
       plan: { id: 'fallback', name: 'Basic', code: 'basic' },
       limits: { borrowers: 1000, loans: 2000 },
       entitlements: [
-        'savings.view','accounting.view','collateral.view','loans.view',
-        'investors.view','collections.view','assets.view'
+        'savings.view', 'accounting.view', 'collateral.view', 'loans.view',
+        'investors.view', 'collections.view', 'assets.view',
       ],
       usage: { borrowers: 0, loans: 0 },
     });
@@ -1038,6 +1058,7 @@ app.use('/api/billing',              ...auth, ...active, billingRoutes);
 app.use('/api/accounting',           ...auth, ...active, ...ent('accounting'),   accountingRoutes);
 
 /* ---------- Misc: metadata (no tenants stub here to avoid conflicts) ------ */
+app.get('/', (_req, res) => res.send('MkopoSuite API'));
 app.get('/api/meta', (_req, res) => {
   res.json({
     name: 'MkopoSuite API',
@@ -1062,9 +1083,9 @@ try {
 
     app.get('/api/health/db/hr-tables', async (_req, res) => {
       const expected = [
-        'employees','employee_roles','employee_contracts',
-        'leave_types','leave_requests','attendances',
-        'payroll_runs','payroll_items','payroll_components','employee_documents',
+        'employees', 'employee_roles', 'employee_contracts',
+        'leave_types', 'leave_requests', 'attendances',
+        'payroll_runs', 'payroll_items', 'payroll_components', 'employee_documents',
       ];
       try {
         const [rows] = await sequelize2.query(`
@@ -1143,6 +1164,14 @@ app.use((err, _req, res, _next) => {
   }
 
   res.status(status).json({ error: message, code: pgCode || undefined, requestId: res.getHeader('X-Request-Id') });
+});
+
+/* ------------------------------- Process hooks ----------------------------- */
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
 });
 
 module.exports = app;
