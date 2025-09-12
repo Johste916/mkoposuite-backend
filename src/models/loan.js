@@ -1,65 +1,61 @@
 // src/models/loan.js
 module.exports = (sequelize, DataTypes) => {
   const Loan = sequelize.define(
-    "Loan",
+    'Loan',
     {
-      // FKs
-      borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: "borrowerId" },
-      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: "branchId"   },
-      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: "product_id" },
+      // Core FKs (match your existing migration)
+      borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' },
 
-      // unique loan reference used for repayments until loan is closed
+      // Optional branch (only if your DB actually has this; harmless if unused)
+      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId' },
+
+      // NEW: product_id in DB → productId in model
+      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: 'product_id' },
+
+      // Reference used on receipts etc.
       reference:  { type: DataTypes.STRING, unique: true },
 
-      // money / terms
-      amount:   { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
-      currency: { type: DataTypes.STRING(8), defaultValue: "TZS" },
+      // Money / terms
+      amount:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
+      currency:     { type: DataTypes.STRING(8), defaultValue: 'TZS' },
+      interestRate: { type: DataTypes.DECIMAL(10, 4), field: 'interestRate' },
 
-      /**
-       * IMPORTANT: Your DB uses camelCase "interestRate" (per Postgres error hint),
-       * so DO NOT map it to "interest_rate". Either omit "field" or set it to "interestRate".
-       */
-      interestRate:       { type: DataTypes.DECIMAL(10, 4), field: "interestRate" },
+      // NEW: term_months in DB → termMonths in model
+      termMonths: { type: DataTypes.INTEGER, field: 'term_months' },
 
-      termMonths:         { type: DataTypes.INTEGER,  field: "term_months" },
-      startDate:          { type: DataTypes.DATEONLY, field: "start_date" },
-      endDate:            { type: DataTypes.DATEONLY, field: "end_date" },
-      repaymentFrequency: { type: DataTypes.STRING,   field: "repayment_frequency" },
-      interestMethod:     { type: DataTypes.STRING,   field: "interest_method" },
+      // ⚠ These were created camelCase in your first migration — keep camel here
+      startDate:          { type: DataTypes.DATEONLY, field: 'startDate' },
+      endDate:            { type: DataTypes.DATEONLY, field: 'endDate' },
+      repaymentFrequency: { type: DataTypes.ENUM('weekly', 'monthly'), field: 'repaymentFrequency' },
+      interestMethod:     { type: DataTypes.ENUM('flat', 'reducing'),  field: 'interestMethod' },
 
-      // keep as string; DB has ENUM, updated via migrations elsewhere
+      // Status enum (migration above extends it safely)
       status: { type: DataTypes.STRING },
 
-      totalInterest: { type: DataTypes.DECIMAL(14, 2), field: "total_interest" },
-      outstanding:   { type: DataTypes.DECIMAL(14, 2) },
+      // NEW: numeric totals (snake in DB)
+      totalInterest: { type: DataTypes.DECIMAL(14, 2), field: 'total_interest' },
+      outstanding:   { type: DataTypes.DECIMAL(14, 2), field: 'outstanding' },
 
-      // user traceability (UUIDs)
-      initiatedBy: { type: DataTypes.UUID, field: "initiated_by" },
-      approvedBy:  { type: DataTypes.UUID, field: "approved_by"  },
-      rejectedBy:  { type: DataTypes.UUID, field: "rejected_by"  },
-      disbursedBy: { type: DataTypes.UUID, field: "disbursed_by" },
-      closedBy:    { type: DataTypes.UUID, field: "closed_by"    },
+      // Workflow columns (your original migration used INTEGERs, not UUIDs)
+      approvedBy:       { type: DataTypes.INTEGER, field: 'approvedBy' },
+      approvalDate:     { type: DataTypes.DATE,    field: 'approvalDate' },
+      disbursedBy:      { type: DataTypes.INTEGER, field: 'disbursedBy' },
+      disbursementDate: { type: DataTypes.DATE,    field: 'disbursementDate' },
+      disbursementMethod: { type: DataTypes.STRING, field: 'disbursementMethod' },
 
-      approvalDate:     { type: DataTypes.DATE, field: "approval_date"     },
-      rejectionDate:    { type: DataTypes.DATE, field: "rejection_date"    },
-      disbursementDate: { type: DataTypes.DATE, field: "disbursement_date" },
-      closedDate:       { type: DataTypes.DATE, field: "closed_date"       },
-
-      approvalComments:   { type: DataTypes.TEXT,   field: "approval_comments"   },
-      rejectionComments:  { type: DataTypes.TEXT,   field: "rejection_comments"  },
-      disbursementMethod: { type: DataTypes.STRING, field: "disbursement_method" },
-      closeReason:        { type: DataTypes.STRING, field: "close_reason"        },
+      // NEW: close fields we just added (snake in DB)
+      closedBy:   { type: DataTypes.INTEGER, field: 'closed_by' },
+      closedDate: { type: DataTypes.DATE,    field: 'closed_date' },
     },
     {
-      tableName: "loans",
-      timestamps: true,      // createdAt / updatedAt (camel in the model, default columns in DB)
-      underscored: false,    // keep camelCase model attrs; fields above map to DB columns as needed
+      tableName: 'loans',
+      timestamps: true,   // createdAt / updatedAt (camel in DB per your first migration)
+      underscored: false, // because many columns are camelCase already
       hooks: {
-        // auto-generate a loan reference if missing
         beforeValidate: async (loan) => {
           if (!loan.reference) {
             const rnd = Math.random().toString(36).slice(2, 8).toUpperCase();
-            loan.reference = `LN-${(loan.borrowerId || "X")}-${rnd}`;
+            loan.reference = `LN-${(loan.borrowerId || 'X')}-${rnd}`;
           }
         },
       },

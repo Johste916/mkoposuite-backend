@@ -1,30 +1,35 @@
-// backend/src/models/branch.js
 'use strict';
+
 module.exports = (sequelize, DataTypes) => {
   const Branch = sequelize.define(
     'Branch',
     {
-      id:        { type: DataTypes.BIGINT, primaryKey: true, autoIncrement: true },
-      name:      { type: DataTypes.STRING, allowNull: false },
-      code:      { type: DataTypes.STRING },
-      phone:     { type: DataTypes.STRING },
-      address:   { type: DataTypes.TEXT },
-      managerId: { type: DataTypes.BIGINT, field: 'manager_id' },
-      tenantId:  { type: DataTypes.UUID,   field: 'tenant_id' },
+      id:       { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+      name:     { type: DataTypes.STRING, allowNull: false },
+      code:     { type: DataTypes.STRING },
 
-      // Important: map the timestamp fields to camelCase columns that already exist
-      createdAt: { type: DataTypes.DATE, field: 'createdAt' },
-      updatedAt: { type: DataTypes.DATE, field: 'updatedAt' },
-      deletedAt: { type: DataTypes.DATE, field: 'deletedAt' }, // ← match existing column
+      // ✅ New columns you said you'll add in DB
+      phone:    { type: DataTypes.STRING, allowNull: true },   // column: phone
+      address:  { type: DataTypes.TEXT,   allowNull: true },   // column: address
+
+      // DB has "manager" (not manager_id). Map to a friendly attribute if you need it:
+      managerId:{ type: DataTypes.STRING, field: 'manager', allowNull: true },
+
+      // DB has tenant_id
+      tenantId: { type: DataTypes.STRING, field: 'tenant_id', allowNull: true },
     },
     {
       tableName: 'branches',
       timestamps: true,
+      // ✅ Your table uses snake_case timestamps
+      createdAt: 'created_at',
+      updatedAt: 'updated_at',
+
+      // ✅ Your table already has camel-cased "deletedAt"
       paranoid: true,
-      createdAt: 'createdAt',
-      updatedAt: 'updatedAt',
-      deletedAt: 'deletedAt', // ← this makes Sequelize generate "Branch"."deletedAt" IS NULL
-      underscored: false,     // keep camelCase for this table (since DB already uses it)
+      deletedAt: 'deletedAt',
+
+      underscored: false,
     }
   );
 

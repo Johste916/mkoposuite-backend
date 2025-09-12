@@ -178,7 +178,8 @@ const getAllLoans = async (req, res) => {
       attributes, // avoid selecting non-existent columns
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch }, // default association
+        // ✅ Only ask for columns that exist on the branches table
+        { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
         { model: LoanProduct },
         ...userIncludes,
       ],
@@ -196,8 +197,7 @@ const getAllLoans = async (req, res) => {
       );
     }
 
-    // Other scopes could be implemented here (e.g., delinquent) if needed.
-    // Example (best-effort): delinquent → has overdue next due or arrears flag (if present on model)
+    // Other scopes could be implemented here (e.g., delinquent)
     if (scope === "delinquent") {
       result = result.filter((l) => {
         const nd = String(l.nextDueStatus || "").toLowerCase();
@@ -227,7 +227,8 @@ const getLoanById = async (req, res) => {
       attributes,
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch },
+        // ✅ Keep branch attributes safe here too
+        { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
         { model: LoanProduct },
         ...userIncludes,
       ],
@@ -248,7 +249,6 @@ const getLoanById = async (req, res) => {
     if (includeRepayments === "true") {
       repayments = await LoanRepayment.findAll({
         where: { loanId: loan.id },
-        // Prefer 'date'; if your model stores 'dueDate' for repayments, keep it.
         order: [["date", "DESC"], ["createdAt", "DESC"]],
       });
 
@@ -493,7 +493,7 @@ const updateLoanStatus = async (req, res) => {
       attributes,
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch },
+        { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
         { model: LoanProduct },
         ...userIncludes,
       ],
