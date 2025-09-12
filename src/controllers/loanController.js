@@ -48,24 +48,57 @@ const writeAudit = async ({ entityId, action, before, after, req }) => {
    Helpers: discover existing DB columns & build safe attributes/includes
 ==================================================================== */
 let LOAN_COLUMNS_CACHE = null;
+let LOAN_TABLE_DESC_CACHE = null;
+let USERS_TABLE_DESC_CACHE = null;
 
-const getLoansTableName = () => {
-  const t = Loan.getTableName ? Loan.getTableName() : "loans";
-  return typeof t === "string" ? t : t.tableName || "loans";
+const getTableNameFromModel = (Model, fallback) => {
+  const t = Model?.getTableName ? Model.getTableName() : fallback;
+  return typeof t === "string" ? t : t?.tableName || fallback;
 };
+
+const getLoansTableName = () => getTableNameFromModel(Loan, "loans");
+const getUsersTableName = () => getTableNameFromModel(User, "Users");
+
+function normalizePgType(t = "") {
+  const s = String(t).toLowerCase();
+  if (s.includes("uuid")) return "uuid";
+  if (s.includes("int")) return "int"; // covers int2/int4/int8/bigint/integer
+  if (s.includes("char") || s.includes("text") || s.includes("varying")) return "text";
+  if (s.includes("timestamp") || s.includes("date")) return "date";
+  return s || "unknown";
+}
+
+async function describeTableCached(tableName) {
+  try {
+    const qi = sequelize.getQueryInterface();
+    if (tableName === getLoansTableName()) {
+      if (!LOAN_TABLE_DESC_CACHE) LOAN_TABLE_DESC_CACHE = await qi.describeTable(tableName);
+      return LOAN_TABLE_DESC_CACHE;
+    }
+    if (tableName === getUsersTableName()) {
+      if (!USERS_TABLE_DESC_CACHE) USERS_TABLE_DESC_CACHE = await qi.describeTable(tableName);
+      return USERS_TABLE_DESC_CACHE;
+    }
+    // generic (rarely used here)
+    return await qi.describeTable(tableName);
+  } catch {
+    return null;
+  }
+}
 
 async function getLoanColumns() {
   if (LOAN_COLUMNS_CACHE) return LOAN_COLUMNS_CACHE;
   try {
-    const qi = sequelize.getQueryInterface();
-    const desc = await qi.describeTable(getLoansTableName());
-    LOAN_COLUMNS_CACHE = new Set(Object.keys(desc)); // snake_case column names
-  } catch (e) {
-    // Fallback: infer from model (may still include non-existent columns)
-    LOAN_COLUMNS_CACHE = new Set(
-      Object.values(Loan.rawAttributes || {}).map((a) => a.field || a.fieldName || a)
-    );
-  }
+    const desc = await describeTableCached(getLoansTableName());
+    if (desc) {
+      LOAN_COLUMNS_CACHE = new Set(Object.keys(desc)); // DB field names
+      return LOAN_COLUMNS_CACHE;
+    }
+  } catch {}
+  // Fallback: infer from model (may still include non-existent columns)
+  LOAN_COLUMNS_CACHE = new Set(
+    Object.values(Loan.rawAttributes || {}).map((a) => a.field || a.fieldName || a)
+  );
   return LOAN_COLUMNS_CACHE;
 }
 
@@ -80,24 +113,59 @@ async function getSafeLoanAttributeNames() {
 }
 
 /**
- * Build includes for the multiple User associations on Loan using the
- * **association objects** (prevents EagerLoadingError).
- * We only include associations that actually exist on the model.
+ * Build includes for the User associations on Loan, but **only** if the FK type
+ * matches Users PK type (prevents integer vs uuid join errors).
  */
 async function buildUserIncludesIfPossible() {
   const includes = [];
-  const aliases = ["initiator", "approver", "rejector", "disburser", "closer", "closedBy"]; // include any that might exist
+  const userTableDesc = await describeTableCached(getUsersTableName());
+  const loansTableDesc = await describeTableCached(getLoansTableName());
 
-  for (const as of aliases) {
-    const assoc = Loan.associations?.[as];
-    if (assoc && assoc.target === User) {
-      includes.push({
-        association: assoc,   // <- use the association object to disambiguate
-        attributes: ["id", "name"],
-        required: false,
-      });
+  // Figure out Users PK type (assume "id")
+  const usersPkType = normalizePgType(userTableDesc?.id?.type || "unknown");
+
+  // Gather all Loan -> User associations
+  const assocEntries = Object.entries(Loan.associations || {}).filter(
+    ([, a]) => a?.target === User
+  );
+
+  for (const [as, assoc] of assocEntries) {
+    // Determine the FK attribute name on Loan (e.g., 'approvedBy')
+    const fkAttrName =
+      assoc.foreignKey ||
+      assoc.foreignKeyAttribute?.fieldName ||
+      assoc.foreignKeyAttribute?.field ||
+      null;
+
+    if (!fkAttrName) continue;
+
+    // Map to actual DB field on loans
+    const fkDbField =
+      Loan.rawAttributes?.[fkAttrName]?.field || fkAttrName;
+
+    // Get FK DB column type
+    const fkType = normalizePgType(loansTableDesc?.[fkDbField]?.type || "unknown");
+
+    // Compare with Users PK type
+    const compatible =
+      (fkType === "uuid" && usersPkType === "uuid") ||
+      (fkType === "int" && usersPkType === "int");
+
+    if (!compatible) {
+      console.warn(
+        `[loans] Skipping include '${as}' due to FK/PK type mismatch: loans.${fkDbField} (${fkType}) vs Users.id (${usersPkType})`
+      );
+      continue;
     }
+
+    // Safe to include
+    includes.push({
+      association: assoc, // disambiguates multiple belongsTo(User)
+      attributes: ["id", "name"],
+      required: false,
+    });
   }
+
   return includes;
 }
 
@@ -175,10 +243,10 @@ const getAllLoans = async (req, res) => {
       attributes, // avoid selecting non-existent columns
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        // only existing branch columns
+        // include branch with new phone/address fields
         { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
-        { model: LoanProduct }, // only one association to product assumed
-        ...userIncludes,        // association-resolved User includes
+        { model: LoanProduct },
+        ...userIncludes, // only type-safe user includes
       ],
       order: [["createdAt", "DESC"]],
       limit: 500,
@@ -194,7 +262,6 @@ const getAllLoans = async (req, res) => {
       );
     }
 
-    // Other scopes could be implemented here (e.g., delinquent)
     if (scope === "delinquent") {
       result = result.filter((l) => {
         const nd = String(l.nextDueStatus || "").toLowerCase();
@@ -245,7 +312,6 @@ const getLoanById = async (req, res) => {
     if (includeRepayments === "true") {
       repayments = await LoanRepayment.findAll({
         where: { loanId: loan.id },
-        // Prefer 'date'; if your model stores 'dueDate' for repayments, keep it.
         order: [["date", "DESC"], ["createdAt", "DESC"]],
       });
 
