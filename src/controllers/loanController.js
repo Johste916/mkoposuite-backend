@@ -79,26 +79,23 @@ async function getSafeLoanAttributeNames() {
   });
 }
 
-function loanFkField(attrName) {
-  // Map a model attribute to the DB field name (snake_case) if defined
-  const attr = Loan.rawAttributes?.[attrName];
-  return attr?.field || attrName;
-}
-
+/**
+ * Build includes for the multiple User associations on Loan using the
+ * **association objects** (prevents EagerLoadingError).
+ * We only include associations that actually exist on the model.
+ */
 async function buildUserIncludesIfPossible() {
-  const cols = await getLoanColumns();
   const includes = [];
-  const mapping = [
-    { as: "initiator", attr: "initiatedBy" },
-    { as: "approver", attr: "approvedBy" },
-    { as: "rejector", attr: "rejectedBy" },
-    { as: "disburser", attr: "disbursedBy" },
-  ];
+  const aliases = ["initiator", "approver", "rejector", "disburser", "closer", "closedBy"]; // include any that might exist
 
-  for (const m of mapping) {
-    const field = loanFkField(m.attr);
-    if (field && cols.has(field)) {
-      includes.push({ model: User, as: m.as, attributes: ["id", "name"] });
+  for (const as of aliases) {
+    const assoc = Loan.associations?.[as];
+    if (assoc && assoc.target === User) {
+      includes.push({
+        association: assoc,   // <- use the association object to disambiguate
+        attributes: ["id", "name"],
+        required: false,
+      });
     }
   }
   return includes;
@@ -178,10 +175,10 @@ const getAllLoans = async (req, res) => {
       attributes, // avoid selecting non-existent columns
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        // ✅ Only ask for columns that exist on the branches table
+        // only existing branch columns
         { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
-        { model: LoanProduct },
-        ...userIncludes,
+        { model: LoanProduct }, // only one association to product assumed
+        ...userIncludes,        // association-resolved User includes
       ],
       order: [["createdAt", "DESC"]],
       limit: 500,
@@ -227,7 +224,6 @@ const getLoanById = async (req, res) => {
       attributes,
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        // ✅ Keep branch attributes safe here too
         { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
         { model: LoanProduct },
         ...userIncludes,
@@ -249,6 +245,7 @@ const getLoanById = async (req, res) => {
     if (includeRepayments === "true") {
       repayments = await LoanRepayment.findAll({
         where: { loanId: loan.id },
+        // Prefer 'date'; if your model stores 'dueDate' for repayments, keep it.
         order: [["date", "DESC"], ["createdAt", "DESC"]],
       });
 
