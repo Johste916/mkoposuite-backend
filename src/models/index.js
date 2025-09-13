@@ -278,6 +278,12 @@ if (db.Plan && db.Entitlement) {
   }
 }
 
+/* ---------- Bank associations (guarded) ---------- */
+if (db.Bank && db.Tenant) {
+  db.Bank.belongsTo(db.Tenant, { foreignKey: 'tenantId', as: 'tenant' });
+  db.Tenant.hasMany(db.Bank,   { foreignKey: 'tenantId', as: 'banks' });
+}
+
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;
 module.exports = db;
