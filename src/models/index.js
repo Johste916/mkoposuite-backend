@@ -40,6 +40,9 @@ db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),
 db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes),   'LoanProduct');
 
+/* ✅ Banks */
+db.Bank          = tryLoad(() => require('./bank')(sequelize, DataTypes), 'Bank');
+
 /* Multitenancy (needed for signup) */
 db.Tenant        = tryLoad(() => require('./Tenant')(sequelize, DataTypes), 'Tenant');
 db.TenantUser    = tryLoad(() => require('./TenantUser')(sequelize, DataTypes), 'TenantUser');

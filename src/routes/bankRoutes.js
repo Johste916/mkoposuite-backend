@@ -1,127 +1,122 @@
-// backend/routes/bankRoutes.js
 'use strict';
+
 const express = require('express');
 
+function getModels() {
+  try { return require('../models'); } catch {
+    try { return require('../../models'); } catch { return null; }
+  }
+}
+
 function makeMemoryStore() {
-  const byTenant = new Map(); // tenantId -> Map(id -> bank)
-  let nextId = 1;
-  return {
-    list(tenantId) {
-      if (!byTenant.has(tenantId)) byTenant.set(tenantId, new Map());
-      return Array.from(byTenant.get(tenantId).values()).filter(b => b.isActive !== false);
-    },
-    get(tenantId, id) {
-      if (!byTenant.has(tenantId)) return null;
-      return byTenant.get(tenantId).get(String(id)) || null;
-    },
-    create(tenantId, data) {
-      if (!byTenant.has(tenantId)) byTenant.set(tenantId, new Map());
-      const id = String(nextId++);
-      const now = new Date().toISOString();
-      const rec = { id, tenantId, isActive: true, createdAt: now, updatedAt: now, ...data };
-      byTenant.get(tenantId).set(id, rec);
-      return rec;
-    },
-    update(tenantId, id, patch) {
-      const cur = this.get(tenantId, id);
-      if (!cur) return null;
-      const upd = { ...cur, ...patch, updatedAt: new Date().toISOString() };
-      byTenant.get(tenantId).set(String(id), upd);
-      return upd;
-    },
-    remove(tenantId, id) {
-      if (!byTenant.has(tenantId)) return false;
-      return byTenant.get(tenantId).delete(String(id));
-    },
+  const db = new Map(); // tenantId -> { nextId, items: Map }
+  const ensure = (tenantId) => {
+    const key = tenantId || 'default';
+    if (!db.has(key)) db.set(key, { nextId: 1, items: new Map() });
+    return db.get(key);
   };
+  return { db, ensure };
 }
 
 module.exports = (() => {
   const r = express.Router();
-  let models = null;
-  try { models = require('../models'); } catch { try { models = require('../../models'); } catch {} }
+  const models = getModels();
+  const BankModel = models?.Bank || models?.Banks || null;
+
+  const Op = models?.Sequelize?.Op || require('sequelize').Op;
+  const dialect = models?.sequelize?.getDialect?.() || '';
+  const LIKE = dialect === 'postgres' ? Op.iLike : Op.like;
 
   const mem = makeMemoryStore();
 
-  const getTenantId = (req) =>
-    req.context?.tenantId || req.headers['x-tenant-id'] || null;
+  function pickTenant(req) {
+    return (
+      req.user?.tenantId ||
+      req.user?.tenant_id ||
+      req.context?.tenantId ||
+      req.headers['x-tenant-id'] ||
+      process.env.DEFAULT_TENANT_ID ||
+      null
+    );
+  }
 
-  const useDb = () => !!(models && models.sequelize && models.Bank);
-
+  // GET /api/banks
   r.get('/', async (req, res) => {
-    const tenantId = getTenantId(req);
-    if (!tenantId) return res.status(400).json({ error: 'Tenant ID is required (x-tenant-id header).' });
-
+    const tenantId = pickTenant(req);
     const q = String(req.query.search || '').trim();
-    const showInactive = String(req.query.showInactive || '') === '1';
-    const page = Math.max(1, parseInt(req.query.page || '1', 10));
-    const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize || '100', 10)));
 
-    if (!useDb()) {
-      let items = mem.list(tenantId);
-      if (q) {
-        const qq = q.toLowerCase();
-        items = items.filter(b =>
-          [b.name, b.code, b.branch, b.accountName, b.accountNumber, b.swift]
-            .filter(Boolean)
-            .some(v => String(v).toLowerCase().includes(qq))
-        );
-      }
-      if (!showInactive) items = items.filter(b => b.isActive !== false);
-      const total = items.length;
-      const paged = items.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize);
-      res.setHeader('X-Total-Count', String(total));
-      return res.json(paged);
+    if (BankModel?.findAndCountAll) {
+      const where = {
+        ...(tenantId ? { tenantId } : {}),
+        ...(q
+          ? {
+              [Op.or]: [
+                { name: { [LIKE]: `%${q}%` } },
+                { code: { [LIKE]: `%${q}%` } },
+                { branch: { [LIKE]: `%${q}%` } },
+                { accountName: { [LIKE]: `%${q}%` } },
+                { accountNumber: { [LIKE]: `%${q}%` } },
+                { swift: { [LIKE]: `%${q}%` } },
+                { phone: { [LIKE]: `%${q}%` } },
+              ],
+            }
+          : {}),
+      };
+
+      const { rows, count } = await BankModel.findAndCountAll({ where, order: [['name', 'ASC']] });
+      res.setHeader('X-Total-Count', String(count));
+      return res.json(rows);
     }
 
-    const { Bank, Sequelize } = models;
-    const { Op } = Sequelize;
-    const where = { tenantId };
-    if (!showInactive) where.isActive = true;
-
+    // Memory fallback
+    const store = mem.ensure(tenantId);
+    let items = Array.from(store.items.values());
     if (q) {
-      where[Op.or] = [
-        { name: { [Op.iLike]: `%${q}%` } },
-        { code: { [Op.iLike]: `%${q}%` } },
-        { branch: { [Op.iLike]: `%${q}%` } },
-        { accountName: { [Op.iLike]: `%${q}%` } },
-        { accountNumber: { [Op.iLike]: `%${q}%` } },
-        { swift: { [Op.iLike]: `%${q}%` } },
-      ];
+      const Q = q.toLowerCase();
+      items = items.filter((b) =>
+        [b.name, b.code, b.branch, b.accountName, b.accountNumber, b.swift, b.phone]
+          .some((v) => String(v || '').toLowerCase().includes(Q))
+      );
     }
-
-    const { rows, count } = await Bank.findAndCountAll({
-      where,
-      order: [['name', 'ASC']],
-      offset: (page - 1) * pageSize,
-      limit: pageSize,
-    });
-
-    res.setHeader('X-Total-Count', String(count));
-    res.json(rows);
+    res.setHeader('X-Total-Count', String(items.length));
+    return res.json(items);
   });
 
-  r.get('/:id', async (req, res) => {
-    const tenantId = getTenantId(req);
-    if (!tenantId) return res.status(400).json({ error: 'Tenant ID is required.' });
-
-    if (!useDb()) {
-      const item = mem.get(tenantId, req.params.id);
-      return res.json(item || null);
-    }
-
-    const item = await models.Bank.findOne({ where: { id: req.params.id, tenantId } });
-    return res.json(item || null);
-  });
-
+  // POST /api/banks
   r.post('/', async (req, res) => {
-    const tenantId = getTenantId(req);
-    if (!tenantId) return res.status(400).json({ error: 'Tenant ID is required.' });
-
+    const tenantId = pickTenant(req);
     const b = req.body || {};
-    if (!b.name || !String(b.name).trim()) return res.status(400).json({ error: 'Bank name is required.' });
 
-    const payload = {
+    if (!String(b.name || '').trim()) return res.status(400).json({ error: 'name is required' });
+    if (BankModel && !tenantId) return res.status(400).json({ error: 'tenantId missing (header x-tenant-id or authenticated user context required)' });
+
+    if (BankModel?.create) {
+      try {
+        const obj = await BankModel.create({
+          tenantId,
+          name: String(b.name).trim(),
+          code: String(b.code || '').trim() || null,
+          branch: String(b.branch || '').trim() || null,
+          accountName: String(b.accountName || '').trim() || null,
+          accountNumber: String(b.accountNumber || '').trim() || null,
+          swift: String(b.swift || '').trim() || null,
+          phone: String(b.phone || '').trim() || null,
+          address: String(b.address || '').trim() || null,
+          isActive: b.isActive !== false,
+        });
+        return res.status(201).json(obj);
+      } catch (e) {
+        console.error('[banks] create failed:', e);
+        return res.status(500).json({ error: 'Failed to create bank' });
+      }
+    }
+
+    // Memory fallback
+    const store = mem.ensure(tenantId);
+    const id = String(store.nextId++);
+    const now = new Date().toISOString();
+    const obj = {
+      id,
       tenantId,
       name: String(b.name).trim(),
       code: b.code || null,
@@ -132,64 +127,93 @@ module.exports = (() => {
       phone: b.phone || null,
       address: b.address || null,
       isActive: b.isActive !== false,
+      createdAt: now,
+      updatedAt: now,
     };
-
-    if (!useDb()) {
-      const created = mem.create(tenantId, payload);
-      return res.status(201).json(created);
-    }
-
-    const created = await models.Bank.create(payload);
-    return res.status(201).json(created);
+    store.items.set(id, obj);
+    return res.status(201).json(obj);
   });
 
+  // GET /api/banks/:id
+  r.get('/:id', async (req, res) => {
+    const tenantId = pickTenant(req);
+    const id = String(req.params.id);
+
+    if (BankModel?.findByPk) {
+      const obj = await BankModel.findByPk(id);
+      if (!obj || (tenantId && obj.tenantId && obj.tenantId !== tenantId)) {
+        return res.status(404).json({ error: 'Bank not found' });
+      }
+      return res.json(obj);
+    }
+
+    const store = mem.ensure(tenantId);
+    const obj = store.items.get(id);
+    if (!obj) return res.status(404).json({ error: 'Bank not found' });
+    return res.json(obj);
+  });
+
+  // PUT /api/banks/:id
   r.put('/:id', async (req, res) => {
-    const tenantId = getTenantId(req);
-    if (!tenantId) return res.status(400).json({ error: 'Tenant ID is required.' });
-
+    const tenantId = pickTenant(req);
+    const id = String(req.params.id);
     const b = req.body || {};
-    const patch = {
-      name: b.name,
-      code: b.code,
-      branch: b.branch,
-      accountName: b.accountName,
-      accountNumber: b.accountNumber,
-      swift: b.swift,
-      phone: b.phone,
-      address: b.address,
-    };
 
-    if (!useDb()) {
-      const upd = mem.update(tenantId, req.params.id, patch);
-      if (!upd) return res.status(404).json({ error: 'Not found' });
-      return res.json(upd);
+    if (BankModel?.findByPk) {
+      const obj = await BankModel.findByPk(id);
+      if (!obj || (tenantId && obj.tenantId && obj.tenantId !== tenantId)) {
+        return res.status(404).json({ error: 'Bank not found' });
+      }
+      await obj.update({
+        name: b.name ?? obj.name,
+        code: b.code ?? obj.code,
+        branch: b.branch ?? obj.branch,
+        accountName: b.accountName ?? obj.accountName,
+        accountNumber: b.accountNumber ?? obj.accountNumber,
+        swift: b.swift ?? obj.swift,
+        phone: b.phone ?? obj.phone,
+        address: b.address ?? obj.address,
+        isActive: typeof b.isActive === 'boolean' ? b.isActive : obj.isActive,
+      });
+      return res.json(obj);
     }
 
-    const item = await models.Bank.findOne({ where: { id: req.params.id, tenantId } });
-    if (!item) return res.status(404).json({ error: 'Not found' });
-    await item.update(patch);
-    res.json(item);
+    const store = mem.ensure(tenantId);
+    const obj = store.items.get(id);
+    if (!obj) return res.status(404).json({ error: 'Bank not found' });
+    Object.assign(obj, {
+      name: b.name ?? obj.name,
+      code: b.code ?? obj.code,
+      branch: b.branch ?? obj.branch,
+      accountName: b.accountName ?? obj.accountName,
+      accountNumber: b.accountNumber ?? obj.accountNumber,
+      swift: b.swift ?? obj.swift,
+      phone: b.phone ?? obj.phone,
+      address: b.address ?? obj.address,
+      isActive: typeof b.isActive === 'boolean' ? b.isActive : obj.isActive,
+      updatedAt: new Date().toISOString(),
+    });
+    return res.json(obj);
   });
 
-  // Soft delete by default; add ?hard=1 to really delete
+  // DELETE /api/banks/:id
   r.delete('/:id', async (req, res) => {
-    const tenantId = getTenantId(req);
-    if (!tenantId) return res.status(400).json({ error: 'Tenant ID is required.' });
-    const hard = String(req.query.hard || '') === '1';
+    const tenantId = pickTenant(req);
+    const id = String(req.params.id);
 
-    if (!useDb()) {
-      if (hard) mem.remove(tenantId, req.params.id);
-      else mem.update(tenantId, req.params.id, { isActive: false });
+    if (BankModel?.destroy) {
+      const obj = await BankModel.findByPk(id);
+      if (!obj || (tenantId && obj.tenantId && obj.tenantId !== tenantId)) {
+        return res.status(404).json({ error: 'Bank not found' });
+      }
+      await BankModel.destroy({ where: { id } });
       return res.status(204).end();
     }
 
-    const item = await models.Bank.findOne({ where: { id: req.params.id, tenantId } });
-    if (!item) return res.status(404).json({ error: 'Not found' });
-
-    if (hard) await item.destroy();
-    else await item.update({ isActive: false });
-
-    res.status(204).end();
+    const store = mem.ensure(tenantId);
+    const ok = store.items.delete(id);
+    if (!ok) return res.status(404).json({ error: 'Bank not found' });
+    return res.status(204).end();
   });
 
   return r;

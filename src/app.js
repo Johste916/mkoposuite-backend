@@ -800,7 +800,7 @@ const reportRoutes          = safeLoadRoutes('./routes/reportRoutes', makeDummyR
 
 const settingRoutes         = safeLoadRoutes('./routes/settingRoutes', makeDummyRouter({}));
 const userRoutes            = safeLoadRoutes('./routes/userRoutes', makeDummyRouter([]));
-const roleRoutes            = safeLoadRoutes('./routes/roleRoutes', makeDummyRouter([]));
+const roleRoutes            = safeLoadRoutes('./routes/roleRoutes', makeDummyRouter([])); // ✅ fixed
 const branchRoutes          = safeLoadRoutes('./routes/branchRoutes', makeDummyRouter([]));
 const userRoleRoutes        = safeLoadRoutes('./routes/userRoleRoutes', makeDummyRouter([]));
 const userBranchRoutes      = safeLoadRoutes('./routes/userBranchRoutes', makeDummyRouter([]));
@@ -870,6 +870,9 @@ const accountingRoutes = safeLoadRoutes('./routes/accountingRoutes', makeDummyRo
   ],
   trialBalance: [{ account: '1000 Cash', debit: 1200000, credit: 0 }],
 }));
+
+/* ✅ Banks — NEW (real route or dummy) */
+const bankRoutes = safeLoadRoutes('./routes/bankRoutes', makeDummyRouter([]));
 
 /* Tenants (real file if present; otherwise fallback keeps UI alive) */
 const tenantRoutes = safeLoadRoutes('./routes/tenantRoutes', makeTenantsFallbackRouter());
@@ -1007,6 +1010,9 @@ app.use('/api/support', ...auth, ...active, supportRoutes);
 app.use('/api/admin/tenants', adminTenantsRoutes);
 /* ⛳️ CHANGED: mount compat AFTER so it only catches gaps */
 app.use('/api/admin/tenants', tenantsCompatRoutes);
+
+/* ✅ NEW: Banks (use initialized router to avoid double require) */
+app.use('/api/banks', ...auth, ...active, bankRoutes);
 
 /* Feature modules with guards (no-op if guards missing) */
 app.use('/api/borrowers',      ...auth, ...active, borrowerRoutes);
