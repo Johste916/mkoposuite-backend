@@ -40,8 +40,13 @@ db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),
 db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes),   'LoanProduct');
 
-/* ✅ Banks */
-db.Bank          = tryLoad(() => require('./bank')(sequelize, DataTypes), 'Bank');
+/* ✅ Banks (rich) */
+db.Bank              = tryLoad(() => require('./bank')(sequelize, DataTypes), 'Bank');
+db.BankTransaction   = tryLoad(() => require('./bankTransaction')(sequelize, DataTypes), 'BankTransaction');
+
+/* ✅ Cashbook (simple companion to banks) */
+db.CashAccount       = tryLoad(() => require('./cashAccount')(sequelize, DataTypes), 'CashAccount');
+db.CashTransaction   = tryLoad(() => require('./cashTransaction')(sequelize, DataTypes), 'CashTransaction');
 
 /* Multitenancy (needed for signup) */
 db.Tenant        = tryLoad(() => require('./Tenant')(sequelize, DataTypes), 'Tenant');
@@ -278,10 +283,47 @@ if (db.Plan && db.Entitlement) {
   }
 }
 
-/* ---------- Bank associations (guarded) ---------- */
+/* ---------- Bank & Cash associations ---------- */
 if (db.Bank && db.Tenant) {
   db.Bank.belongsTo(db.Tenant, { foreignKey: 'tenantId', as: 'tenant' });
   db.Tenant.hasMany(db.Bank,   { foreignKey: 'tenantId', as: 'banks' });
+}
+if (db.Bank && db.BankTransaction) {
+  db.Bank.hasMany(db.BankTransaction, { foreignKey: 'bankId', as: 'transactions' });
+  db.BankTransaction.belongsTo(db.Bank, { foreignKey: 'bankId', as: 'bank' });
+}
+if (db.BankTransaction && db.Tenant) {
+  db.BankTransaction.belongsTo(db.Tenant, { foreignKey: 'tenantId', as: 'tenant' });
+}
+if (db.BankTransaction && db.User) {
+  db.BankTransaction.belongsTo(db.User, { foreignKey: 'createdBy', as: 'creator' });
+}
+if (db.BankTransaction && db.Loan) {
+  db.BankTransaction.belongsTo(db.Loan, { foreignKey: 'loanId', as: 'loan' });
+  db.Loan.hasMany(db.BankTransaction,   { foreignKey: 'loanId', as: 'bankTransactions' });
+}
+if (db.BankTransaction && db.Borrower) {
+  db.BankTransaction.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
+}
+
+/* Cashbook */
+if (db.CashAccount && db.Tenant) {
+  db.CashAccount.belongsTo(db.Tenant, { foreignKey: 'tenantId', as: 'tenant' });
+  db.Tenant.hasMany(db.CashAccount,   { foreignKey: 'tenantId', as: 'cashAccounts' });
+}
+if (db.CashAccount && db.CashTransaction) {
+  db.CashAccount.hasMany(db.CashTransaction, { foreignKey: 'cashAccountId', as: 'transactions' });
+  db.CashTransaction.belongsTo(db.CashAccount, { foreignKey: 'cashAccountId', as: 'cashAccount' });
+}
+if (db.CashTransaction && db.User) {
+  db.CashTransaction.belongsTo(db.User, { foreignKey: 'createdBy', as: 'creator' });
+}
+if (db.CashTransaction && db.Loan) {
+  db.CashTransaction.belongsTo(db.Loan, { foreignKey: 'loanId', as: 'loan' });
+  db.Loan.hasMany(db.CashTransaction,   { foreignKey: 'loanId', as: 'cashTransactions' });
+}
+if (db.CashTransaction && db.Borrower) {
+  db.CashTransaction.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
 }
 
 db.sequelize = sequelize;
