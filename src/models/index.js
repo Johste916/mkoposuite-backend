@@ -44,7 +44,7 @@ db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes),
 db.Bank              = tryLoad(() => require('./bank')(sequelize, DataTypes), 'Bank');
 db.BankTransaction   = tryLoad(() => require('./bankTransaction')(sequelize, DataTypes), 'BankTransaction');
 
-/* ✅ Cashbook (simple companion to banks) */
+/* ✅ Cashbook */
 db.CashAccount       = tryLoad(() => require('./cashAccount')(sequelize, DataTypes), 'CashAccount');
 db.CashTransaction   = tryLoad(() => require('./cashTransaction')(sequelize, DataTypes), 'CashTransaction');
 
@@ -306,7 +306,6 @@ if (db.BankTransaction && db.Borrower) {
   db.BankTransaction.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
 }
 
-/* Cashbook */
 if (db.CashAccount && db.Tenant) {
   db.CashAccount.belongsTo(db.Tenant, { foreignKey: 'tenantId', as: 'tenant' });
   db.Tenant.hasMany(db.CashAccount,   { foreignKey: 'tenantId', as: 'cashAccounts' });

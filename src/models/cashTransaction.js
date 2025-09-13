@@ -16,7 +16,6 @@ module.exports = (sequelize, DataTypes) => {
     description:   { type: DataTypes.TEXT, allowNull: true },
     status:        { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'posted' },
 
-    // loan links (optional)
     loanId:        { type: DataTypes.UUID, allowNull: true },
     borrowerId:    { type: DataTypes.UUID, allowNull: true },
 
@@ -48,20 +47,19 @@ module.exports = (sequelize, DataTypes) => {
       );
     } catch {}
 
-    // Optional: create loan repayment if type matches
     if (tx.type === 'loan_repayment' && tx.loanId) {
       const { Loan, LoanPayment, LoanRepayment } = sequelize.models;
       const t = options?.transaction;
 
       if (LoanPayment) {
         const payload = {};
-        if (has(LoanPayment, 'loanId'))     payload.loanId = tx.loanId;
-        if (has(LoanPayment, 'amount'))     payload.amount = tx.amount;
-        if (has(LoanPayment, 'paidAt'))     payload.paidAt = tx.occurredAt;
+        if (has(LoanPayment, 'loanId'))      payload.loanId = tx.loanId;
+        if (has(LoanPayment, 'amount'))      payload.amount = tx.amount;
+        if (has(LoanPayment, 'paidAt'))      payload.paidAt = tx.occurredAt;
         if (has(LoanPayment, 'paymentDate')) payload.paymentDate = tx.occurredAt;
-        if (has(LoanPayment, 'method'))     payload.method = 'cash';
-        if (has(LoanPayment, 'reference'))  payload.reference = tx.reference || `CASH:${tx.id}`;
-        if (has(LoanPayment, 'createdBy'))  payload.createdBy = tx.createdBy || null;
+        if (has(LoanPayment, 'method'))      payload.method = 'cash';
+        if (has(LoanPayment, 'reference'))   payload.reference = tx.reference || `CASH:${tx.id}`;
+        if (has(LoanPayment, 'createdBy'))   payload.createdBy = tx.createdBy || null;
         try { await LoanPayment.create(payload, { transaction: t }); } catch {}
       } else if (LoanRepayment) {
         const payload = {};
