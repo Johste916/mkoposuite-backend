@@ -23,6 +23,8 @@ const sequelize = process.env.DATABASE_URL
     );
 
 const db = {};
+
+/* ---------- Helpers ---------- */
 const tryLoad = (loader, nameForLog) => {
   try { return loader(); }
   catch (e) { console.warn(`⚠️  Model not loaded: ${nameForLog} (${e.message})`); return null; }
@@ -40,7 +42,7 @@ db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),
 db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes),   'LoanProduct');
 
-/* ✅ Banks (rich) */
+/* ✅ Banks & Transactions */
 db.Bank              = tryLoad(() => require('./bank')(sequelize, DataTypes), 'Bank');
 db.BankTransaction   = tryLoad(() => require('./bankTransaction')(sequelize, DataTypes), 'BankTransaction');
 
