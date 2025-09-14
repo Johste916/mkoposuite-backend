@@ -9,8 +9,15 @@ module.exports = (sequelize, DataTypes) => {
     code:          { type: DataTypes.STRING(32),  allowNull: true },
     branch:        { type: DataTypes.STRING(120), allowNull: true },
 
-    accountName:   { type: DataTypes.STRING(160), allowNull: true, field: 'account_name' },
-    accountNumber: { type: DataTypes.STRING(64),  allowNull: true, field: 'account_number' },
+    // canonical snake_case columns
+    accountName:   { type: DataTypes.STRING(160), allowNull: true,  field: 'account_name' },
+    accountNumber: { type: DataTypes.STRING(64),  allowNull: true,  field: 'account_number' },
+
+    // 🔁 legacy camelCase columns that may still exist in some DBs (quoted identifiers)
+    // We keep them optional; routes will mirror values into them on create/update.
+    accountNameLegacy:   { type: DataTypes.STRING(160), allowNull: true, field: 'accountName' },
+    accountNumberLegacy: { type: DataTypes.STRING(64),  allowNull: true, field: 'accountNumber' },
+
     swift:         { type: DataTypes.STRING(64),  allowNull: true },
     phone:         { type: DataTypes.STRING(64),  allowNull: true },
     address:       { type: DataTypes.TEXT,        allowNull: true },
