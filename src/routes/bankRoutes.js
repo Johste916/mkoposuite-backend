@@ -345,7 +345,7 @@ router.post('/:id/transactions', async (req, res) => {
   }
 });
 
-// POST /banks/:id/repayments   (fixed: no internal /api path usage)
+// POST /banks/:id/repayments
 router.post('/:id/repayments', async (req, res) => {
   const { Bank, BankTransaction } = m(req);
   const bankId = String(req.params.id);
@@ -417,6 +417,38 @@ router.post('/transactions/:txId/unreconcile', async (req, res) => {
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
 
     await tx.update({ reconciled: false, reconciledAt: null, reconciledBy: null, note: req.body?.note ?? tx.note });
+    res.json(tx);
+  } catch (e) {
+    if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/* --------------------------- Approvals (maker-checker) --------------------------- */
+
+// POST /banks/transactions/:txId/approve
+router.post('/transactions/:txId/approve', async (req, res) => {
+  const { BankTransaction } = m(req);
+  if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
+  try {
+    const tx = await BankTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    await tx.update({ status: 'posted', approvedAt: new Date(), approvedBy: req.user?.id || null, note: req.body?.note ?? tx.note });
+    res.json(tx);
+  } catch (e) {
+    if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /banks/transactions/:txId/void
+router.post('/transactions/:txId/void', async (req, res) => {
+  const { BankTransaction } = m(req);
+  if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
+  try {
+    const tx = await BankTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    await tx.update({ status: 'void', voidedAt: new Date(), voidedBy: req.user?.id || null, note: req.body?.note ?? tx.note });
     res.json(tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
@@ -757,6 +789,12 @@ cash.get('/accounts/:id/transactions', async (req, res) => {
   if (!CashTransaction) return res.json([]);
   try {
     const where = { cashAccountId: String(req.params.id), tenantId: tenantIdFrom(req) };
+    if (req.query.status) where.status = String(req.query.status);
+    if (req.query.from || req.query.to) {
+      where.occurredAt = {};
+      if (req.query.from) where.occurredAt[Op.gte] = new Date(req.query.from);
+      if (req.query.to)   where.occurredAt[Op.lte] = new Date(req.query.to);
+    }
     const rows = await CashTransaction.findAll({ where, order: [['occurredAt','DESC'], ['createdAt','DESC']] });
     res.setHeader('X-Total-Count', String(rows.length));
     res.json(rows);
@@ -798,6 +836,149 @@ cash.post('/accounts/:id/transactions', async (req, res) => {
 
     const created = await CashTransaction.create(payload);
     res.status(201).json(created);
+  } catch (e) {
+    if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/* ---------- Cash Statement (parity with bank statement) ---------- */
+// GET /banks/cash/accounts/:id/statement
+cash.get('/accounts/:id/statement', async (req, res) => {
+  const { CashAccount, CashTransaction } = m(req);
+  const id = String(req.params.id);
+  const tenantId = tenantIdFrom(req);
+
+  try {
+    const account = await CashAccount.findOne({ where: { id, tenantId } });
+    if (!account) return res.status(404).json({ error: 'Cash account not found' });
+
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to   = req.query.to   ? new Date(req.query.to)   : null;
+    const includeOpening = (req.query.includeOpening === '1' || req.query.includeOpening === 'true');
+
+    const where = { cashAccountId: id, tenantId };
+    if (from || to) {
+      where.occurredAt = {};
+      if (from) where.occurredAt[Op.gte] = from;
+      if (to)   where.occurredAt[Op.lte] = to;
+    }
+
+    let items = [];
+    if (CashTransaction) {
+      items = await CashTransaction.findAll({ where, order: [['occurredAt','ASC'],['createdAt','ASC']] });
+    }
+
+    let openingBalance = Number(account.openingBalance || 0);
+    if (includeOpening && from && CashTransaction) {
+      const sums = await CashTransaction.findAll({
+        attributes: [
+          [fn('SUM', literal(`CASE WHEN direction='in'  THEN amount ELSE 0 END`)), 'inflow'],
+          [fn('SUM', literal(`CASE WHEN direction='out' THEN amount ELSE 0 END`)), 'outflow'],
+        ],
+        where: { cashAccountId: id, tenantId, occurredAt: { [Op.lt]: from }, status: 'posted' },
+        raw: true,
+      });
+      const inflow = Number(sums?.[0]?.inflow || 0);
+      const outflow = Number(sums?.[0]?.outflow || 0);
+      openingBalance = openingBalance + inflow - outflow;
+    }
+
+    res.json({
+      account: { id: account.id, name: account.name, currency: account.currency },
+      openingBalance,
+      items,
+    });
+  } catch (e) {
+    if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+/* ---------- Cash Approvals & Reconciliation (parity with bank) ---------- */
+
+// GET /banks/cash/transactions (all cash)
+router.get('/cash/transactions', async (req, res) => {
+  const { CashTransaction } = m(req);
+  if (!CashTransaction) return res.json([]);
+  try {
+    const where = { tenantId: tenantIdFrom(req) };
+    if (req.query.status) where.status = String(req.query.status);
+    if (req.query.type)   where.type = String(req.query.type);
+    if (req.query.from || req.query.to) {
+      where.occurredAt = {};
+      if (req.query.from) where.occurredAt[Op.gte] = new Date(req.query.from);
+      if (req.query.to)   where.occurredAt[Op.lte] = new Date(req.query.to);
+    }
+    const rows = await CashTransaction.findAll({ where, order: [['occurredAt','DESC'],['createdAt','DESC']] });
+    res.setHeader('X-Total-Count', String(rows.length));
+    res.json(rows);
+  } catch (e) {
+    if (isMissingTable(e)) return res.json([]);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /banks/cash/transactions/:txId/reconcile
+router.post('/cash/transactions/:txId/reconcile', async (req, res) => {
+  const { CashTransaction } = m(req);
+  if (!CashTransaction) return respondMissingTable(res, 'cash transactions');
+  try {
+    const tx = await CashTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    await tx.update({
+      reconciled: true,
+      reconciledAt: new Date(),
+      reconciledBy: req.user?.id || null,
+      reference: req.body?.reference ?? tx.reference,
+      description: req.body?.note ?? tx.description,
+    });
+    res.json(tx);
+  } catch (e) {
+    if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /banks/cash/transactions/:txId/unreconcile
+router.post('/cash/transactions/:txId/unreconcile', async (req, res) => {
+  const { CashTransaction } = m(req);
+  if (!CashTransaction) return respondMissingTable(res, 'cash transactions');
+  try {
+    const tx = await CashTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    await tx.update({ reconciled: false, reconciledAt: null, reconciledBy: null, description: req.body?.note ?? tx.description });
+    res.json(tx);
+  } catch (e) {
+    if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /banks/cash/transactions/:txId/approve
+router.post('/cash/transactions/:txId/approve', async (req, res) => {
+  const { CashTransaction } = m(req);
+  if (!CashTransaction) return respondMissingTable(res, 'cash transactions');
+  try {
+    const tx = await CashTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    await tx.update({ status: 'posted', approvedAt: new Date(), approvedBy: req.user?.id || null, description: req.body?.note ?? tx.description });
+    res.json(tx);
+  } catch (e) {
+    if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /banks/cash/transactions/:txId/void
+router.post('/cash/transactions/:txId/void', async (req, res) => {
+  const { CashTransaction } = m(req);
+  if (!CashTransaction) return respondMissingTable(res, 'cash transactions');
+  try {
+    const tx = await CashTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    await tx.update({ status: 'void', voidedAt: new Date(), voidedBy: req.user?.id || null, description: req.body?.note ?? tx.description });
+    res.json(tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
     return res.status(500).json({ error: e.message });
