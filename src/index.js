@@ -1,4 +1,5 @@
-// server/src/index.js
+'use strict';
+
 require('dotenv').config();
 
 const app = require('./app');
@@ -6,6 +7,9 @@ const db = require('./models');
 const { sequelize } = db;
 
 const cron = require('node-cron');
+
+// ✅ NEW: run migrations before serving traffic
+const runMigrations = require('./boot/runMigrations');
 
 // Optional auto-sync (creates/updates tables in Supabase when AUTO_SYNC=1)
 let autoSync;
@@ -98,25 +102,17 @@ async function ensureExpensesTables() {
 async function ensureCoreTables() {
   console.log('🔧 Syncing CORE tables (create/alter as needed)…');
 
-  // Branch had "paranoid: true" — this adds deletedAt; sync will create it if missing.
-  if (db.Branch) await db.Branch.sync({ alter: true });
-
-  // Borrowers, Loans, Payments, Products, Users are typical report dependencies
+  if (db.Branch)        await db.Branch.sync({ alter: true });
   if (db.Borrower)      await db.Borrower.sync({ alter: true });
   if (db.LoanProduct)   await db.LoanProduct.sync({ alter: true });
   if (db.Loan)          await db.Loan.sync({ alter: true });
-
-  // Important: LoanPayment needs "applied", "amountPaid", "paymentDate" for our queries.
   if (db.LoanPayment)   await db.LoanPayment.sync({ alter: true });
-
   if (db.User)          await db.User.sync({ alter: true });
   if (db.Setting)       await db.Setting.sync({ alter: true });
-
-  // Optional auxiliary tables if present:
   if (db.LoanSchedule)  await db.LoanSchedule.sync({ alter: true });
   if (db.LoanFee)       await db.LoanFee.sync({ alter: true });
 
-  // ✅ Accounting (for reports like TB/PL/Cashflow)
+  // Accounting
   if (db.Account)       await db.Account.sync({ alter: true });
   if (db.JournalEntry)  await db.JournalEntry.sync({ alter: true });
   if (db.LedgerEntry)   await db.LedgerEntry.sync({ alter: true });
@@ -130,17 +126,20 @@ async function ensureCoreTables() {
     await sequelize.authenticate();
     console.log('✅ Connected to the database');
 
-    // One-switch bootstrap (creates/updates ALL models automatically)
+    // ✅ Always run migrations first (this creates columns like tenant_id, opening_balance, etc.)
+    await runMigrations(sequelize);
+
+    // One-switch bootstrap (optional legacy sync; prefer migrations)
     if (process.env.AUTO_SYNC === '1' && typeof autoSync === 'function') {
       await autoSync(); // contains sequelize.sync({ alter: true })
     } else {
-      // Granular toggles
+      // Granular toggles (use only if you need to patch legacy tables)
       const syncSettingsOnly = process.env.SYNC_SETTINGS_ONLY === 'true';
       const syncACL          = process.env.SYNC_ACL === 'true';
       const syncAudit        = process.env.SYNC_AUDIT === 'true';
       const syncSavings      = process.env.SYNC_SAVINGS === 'true';
       const syncExpenses     = process.env.SYNC_EXPENSES === 'true';
-      const syncCore         = process.env.SYNC_CORE === 'true'; // 👈 new toggle for core tables
+      const syncCore         = process.env.SYNC_CORE === 'true';
 
       if (syncSettingsOnly) await ensureSettingsOnly();
       else console.log('⏭  Skipping settings sync (set SYNC_SETTINGS_ONLY=true for one-off)');
@@ -165,7 +164,7 @@ async function ensureCoreTables() {
       console.log(`🚀 Server is running on port ${PORT}`);
     });
   } catch (err) {
-    console.error('❌ Unable to connect to the database:', err);
+    console.error('❌ Unable to start server:', err);
     process.exit(1);
   }
 })();
