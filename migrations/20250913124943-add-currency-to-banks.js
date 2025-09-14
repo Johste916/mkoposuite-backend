@@ -3,11 +3,11 @@
 module.exports = {
   async up(queryInterface, Sequelize) {
     await queryInterface.sequelize.transaction(async (t) => {
-      // Only add if missing (safe for multiple envs)
-      const desc = await queryInterface.describeTable('banks');
+      // describeTable can take a schema option; ensure public for Render
+      const desc = await queryInterface.describeTable({ tableName: 'banks', schema: 'public' });
       if (!desc.currency) {
         await queryInterface.addColumn(
-          'banks',
+          { tableName: 'banks', schema: 'public' },
           'currency',
           {
             type: Sequelize.STRING(8),
@@ -20,11 +20,11 @@ module.exports = {
     });
   },
 
-  async down(queryInterface, Sequelize) {
+  async down(queryInterface) {
     await queryInterface.sequelize.transaction(async (t) => {
-      const desc = await queryInterface.describeTable('banks');
+      const desc = await queryInterface.describeTable({ tableName: 'banks', schema: 'public' });
       if (desc.currency) {
-        await queryInterface.removeColumn('banks', 'currency', { transaction: t });
+        await queryInterface.removeColumn({ tableName: 'banks', schema: 'public' }, 'currency', { transaction: t });
       }
     });
   },

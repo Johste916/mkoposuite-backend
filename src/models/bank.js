@@ -13,7 +13,6 @@ module.exports = (sequelize, DataTypes) => {
     phone:         { type: DataTypes.STRING(64),  allowNull: true },
     address:       { type: DataTypes.TEXT,        allowNull: true },
 
-    // ✅ New column that your queries already expect
     currency: {
       type: DataTypes.STRING(8),
       allowNull: false,
@@ -30,6 +29,7 @@ module.exports = (sequelize, DataTypes) => {
     meta:          { type: DataTypes.JSONB,        allowNull: true },
   }, {
     tableName: 'banks',
+    schema: 'public',
     indexes: [
       { fields: ['tenantId'] },
       { fields: ['tenantId', 'name'] },

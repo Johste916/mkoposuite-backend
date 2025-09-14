@@ -38,9 +38,9 @@ db.Branch        = tryLoad(() => require('./branch')(sequelize, DataTypes), 'Bra
 db.Borrower      = tryLoad(() => require('./borrower')(sequelize, DataTypes), 'Borrower');
 db.Loan          = tryLoad(() => require('./loan')(sequelize, DataTypes), 'Loan');
 db.LoanRepayment = tryLoad(() => require('./loanrepayment')(sequelize, DataTypes), 'LoanRepayment');
-db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),   'LoanPayment');
+db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes), 'LoanPayment');
 db.Setting       = require('./setting')(sequelize, DataTypes);
-db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes),   'LoanProduct');
+db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes), 'LoanProduct');
 
 /* ✅ Banks & Transactions */
 db.Bank              = tryLoad(() => require('./bank')(sequelize, DataTypes), 'Bank');
@@ -50,13 +50,13 @@ db.BankTransaction   = tryLoad(() => require('./bankTransaction')(sequelize, Dat
 db.CashAccount       = tryLoad(() => require('./cashAccount')(sequelize, DataTypes), 'CashAccount');
 db.CashTransaction   = tryLoad(() => require('./cashTransaction')(sequelize, DataTypes), 'CashTransaction');
 
-/* Multitenancy (needed for signup) */
+/* Multitenancy */
 db.Tenant        = tryLoad(() => require('./Tenant')(sequelize, DataTypes), 'Tenant');
 db.TenantUser    = tryLoad(() => require('./TenantUser')(sequelize, DataTypes), 'TenantUser');
 
 /* Access control (optional) */
-db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes),       'Role');
-db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes),   'UserRole');
+db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes), 'Role');
+db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes), 'UserRole');
 db.Permission = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
 
 /* Savings (required) */
@@ -74,28 +74,28 @@ db.ActivityComment    = tryLoad(() => require('./ActivityComment')(sequelize, Da
 db.ActivityAssignment = tryLoad(() => require('./ActivityAssignment')(sequelize, DataTypes), 'ActivityAssignment');
 
 /* Accounting (optional) */
-db.Account      = tryLoad(() => require('./account')(sequelize, DataTypes),      'Account');
+db.Account      = tryLoad(() => require('./account')(sequelize, DataTypes), 'Account');
 db.JournalEntry = tryLoad(() => require('./journalEntry')(sequelize, DataTypes), 'JournalEntry');
-db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes),  'LedgerEntry');
+db.LedgerEntry  = tryLoad(() => require('./ledgerEntry')(sequelize, DataTypes), 'LedgerEntry');
 
 /* Collections / Collateral / Expense / Investors (optional) */
 db.CollectionSheet = tryLoad(() => require('./collectionSheet')(sequelize, DataTypes), 'CollectionSheet');
-db.Collateral      = tryLoad(() => require('./collateral')(sequelize, DataTypes),      'Collateral');
-db.Expense         = tryLoad(() => require('./expense')(sequelize, DataTypes),         'Expense');
-db.Investor        = tryLoad(() => require('./investor')(sequelize, DataTypes),        'Investor');
+db.Collateral      = tryLoad(() => require('./collateral')(sequelize, DataTypes), 'Collateral');
+db.Expense         = tryLoad(() => require('./expense')(sequelize, DataTypes), 'Expense');
+db.Investor        = tryLoad(() => require('./investor')(sequelize, DataTypes), 'Investor');
 
 /* HR & Payroll (optional) */
-db.Employee     = tryLoad(() => require('./employee')(sequelize, DataTypes),     'Employee');
-db.Attendance   = tryLoad(() => require('./attendance')(sequelize, DataTypes),   'Attendance');
-db.PayrollItem  = tryLoad(() => require('./payrollItem')(sequelize, DataTypes),  'PayrollItem');
-db.Payrun       = tryLoad(() => require('./payrun')(sequelize, DataTypes),       'Payrun');
-db.Payslip      = tryLoad(() => require('./payslip')(sequelize, DataTypes),      'Payslip');
+db.Employee     = tryLoad(() => require('./employee')(sequelize, DataTypes), 'Employee');
+db.Attendance   = tryLoad(() => require('./attendance')(sequelize, DataTypes), 'Attendance');
+db.PayrollItem  = tryLoad(() => require('./payrollItem')(sequelize, DataTypes), 'PayrollItem');
+db.Payrun       = tryLoad(() => require('./payrun')(sequelize, DataTypes), 'Payrun');
+db.Payslip      = tryLoad(() => require('./payslip')(sequelize, DataTypes), 'Payslip');
 db.LeaveRequest = tryLoad(() => require('./leaveRequest')(sequelize, DataTypes), 'LeaveRequest');
-db.Contract     = tryLoad(() => require('./contract')(sequelize, DataTypes),     'Contract');
+db.Contract     = tryLoad(() => require('./contract')(sequelize, DataTypes), 'Contract');
 
 /* Plans & Entitlements (optional) */
-db.Plan            = tryLoad(() => require('./plan')(sequelize, DataTypes),            'Plan');
-db.Entitlement     = tryLoad(() => require('./entitlement')(sequelize, DataTypes),     'Entitlement');
+db.Plan            = tryLoad(() => require('./plan')(sequelize, DataTypes), 'Plan');
+db.Entitlement     = tryLoad(() => require('./entitlement')(sequelize, DataTypes), 'Entitlement');
 db.PlanEntitlement = tryLoad(() => require('./planentitlement')(sequelize, DataTypes), 'PlanEntitlement');
 
 /* ---------------- Associations (core) ---------------- */

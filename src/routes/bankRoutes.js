@@ -8,11 +8,16 @@ const router = express.Router();
 
 function m(req) { return req.app.get('models') || {}; }
 function tenantIdFrom(req) {
-  return req.headers['x-tenant-id'] || req.user?.tenantId || process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000000';
+  return (
+    req.headers['x-tenant-id'] ||
+    req.headers['x-tenant'] ||
+    req.user?.tenantId ||
+    process.env.DEFAULT_TENANT_ID ||
+    '00000000-0000-0000-0000-000000000000'
+  );
 }
 
 /* ----------------------------- Codes (types/status) ----------------------------- */
-// Admin can override later; we read from Setting if present, else defaults.
 router.get('/codes', async (req, res) => {
   const { Setting } = m(req);
   const tenantId = tenantIdFrom(req);
@@ -34,8 +39,16 @@ router.get('/codes', async (req, res) => {
     return res.json(defaults);
   }
 });
+
+// Optional: /banks/codes/:group
 router.get('/codes/:group', async (req, res) => {
-  const r = await (await router.handle.bind(router))?.(req, res); // noop, keep above handler; kept for compatibility
+  const sub = await new Promise((resolve) => {
+    const _res = { json: (x) => resolve(x) };
+    router.handle({ ...req, method: 'GET', url: '/codes' }, _res);
+  });
+  const key = String(req.params.group || '').trim();
+  if (!key || !(key in sub)) return res.json(sub);
+  res.json({ [key]: sub[key] });
 });
 
 /* --------------------------------- Banks: CRUD --------------------------------- */
@@ -82,7 +95,7 @@ router.post('/', async (req, res) => {
     swift: b.swift || null,
     phone: b.phone || null,
     address: b.address || null,
-    currency: b.currency || 'TZS',
+    currency: (b.currency || 'TZS').toUpperCase(),
     openingBalance: Number(b.openingBalance || 0),
     currentBalance: Number(b.currentBalance ?? b.openingBalance ?? 0),
     isActive: b.isActive !== false,
@@ -93,7 +106,7 @@ router.post('/', async (req, res) => {
   return res.status(201).json(created);
 });
 
-// GET /api/banks/:id (with quick balances)
+// GET /api/banks/:id
 router.get('/:id', async (req, res) => {
   const { Bank, BankTransaction } = m(req);
   const id = String(req.params.id);
@@ -132,7 +145,7 @@ async function updateBank(req, res) {
   const b = req.body || {};
   const updates = {};
   ['name','code','branch','accountName','accountNumber','swift','phone','address','currency','meta'].forEach(k => {
-    if (k in b) updates[k] = b[k];
+    if (k in b) updates[k] = k === 'currency' && typeof b[k] === 'string' ? b[k].toUpperCase() : b[k];
   });
   if ('openingBalance' in b) updates.openingBalance = Number(b.openingBalance);
   if ('currentBalance' in b) updates.currentBalance = Number(b.currentBalance);
@@ -194,7 +207,7 @@ router.post('/:id/transactions', async (req, res) => {
     direction: b.direction || (['withdrawal','disbursement','fee','transfer_out'].includes(b.type) ? 'out' : 'in'),
     type: b.type || 'other',
     amount: Number(b.amount || 0),
-    currency: b.currency || bank.currency || 'TZS',
+    currency: (b.currency || bank.currency || 'TZS').toUpperCase(),
     occurredAt: b.occurredAt ? new Date(b.occurredAt) : new Date(),
     reference: b.reference || null,
     bankRef: b.bankRef || null,
@@ -213,7 +226,7 @@ router.post('/:id/transactions', async (req, res) => {
   return res.status(201).json(created);
 });
 
-// POST /api/banks/:id/repayments  -> convenience
+// POST /api/banks/:id/repayments
 router.post('/:id/repayments', async (req, res) => {
   const b = req.body || {};
   if (!b.loanId)  return res.status(400).json({ error: 'loanId is required' });
@@ -253,7 +266,7 @@ router.post('/transactions/:txId/unreconcile', async (req, res) => {
 
 /* -------------------------------- Transfers -------------------------------- */
 
-// POST /api/banks/:id/transfer  { toBankId, amount, reference, occurredAt, note }
+// POST /api/banks/:id/transfer
 router.post('/:id/transfer', async (req, res) => {
   const { sequelize, Bank, BankTransaction } = m(req);
   const tenantId = tenantIdFrom(req);
@@ -275,7 +288,7 @@ router.post('/:id/transfer', async (req, res) => {
     const base = {
       tenantId,
       amount,
-      currency: b.currency || from.currency || to.currency || 'TZS',
+      currency: (b.currency || from.currency || to.currency || 'TZS').toUpperCase(),
       occurredAt: b.occurredAt ? new Date(b.occurredAt) : new Date(),
       reference: b.reference || null,
       note: b.note || null,
@@ -294,7 +307,7 @@ router.post('/:id/transfer', async (req, res) => {
   }
 });
 
-// POST /api/banks/:id/transfer-to-cash  { cashAccountId, amount, ... }
+// POST /api/banks/:id/transfer-to-cash
 router.post('/:id/transfer-to-cash', async (req, res) => {
   const { sequelize, Bank, BankTransaction, CashAccount, CashTransaction } = m(req);
   const tenantId = tenantIdFrom(req);
@@ -315,7 +328,7 @@ router.post('/:id/transfer-to-cash', async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const when = b.occurredAt ? new Date(b.occurredAt) : new Date();
-    const currency = b.currency || bank.currency || cash.currency || 'TZS';
+    const currency = (b.currency || bank.currency || cash.currency || 'TZS').toUpperCase();
 
     await BankTransaction.create({
       tenantId, bankId: bank.id, direction: 'out', type: 'transfer_out',
@@ -339,7 +352,7 @@ router.post('/:id/transfer-to-cash', async (req, res) => {
 
 /* ---------------------- Balance as-of / Overview / Stats ---------------------- */
 
-// GET /api/banks/:id/balance?asOf=YYYY-MM-DD
+// GET /api/banks/:id/balance
 router.get('/:id/balance', async (req, res) => {
   const { Bank, BankTransaction } = m(req);
   const id = String(req.params.id);
@@ -366,7 +379,7 @@ router.get('/:id/balance', async (req, res) => {
   return res.json({ asOf: asOf.toISOString(), opening, inflow, outflow, closing });
 });
 
-// GET /api/banks/:id/statement?from=&to=&includeOpening=1
+// GET /api/banks/:id/statement
 router.get('/:id/statement', async (req, res) => {
   const { BankTransaction, Bank } = m(req);
   const id = String(req.params.id);
@@ -435,7 +448,7 @@ router.get('/__internal/overview', async (req, res) => {
   res.json({ items: result });
 });
 
-// GET /api/banks/__internal/stats/payments?from=&to=
+// GET /api/banks/__internal/stats/payments
 router.get('/__internal/stats/payments', async (req, res) => {
   const { BankTransaction, CashTransaction } = m(req);
   const tenantId = tenantIdFrom(req);
@@ -463,7 +476,6 @@ router.get('/__internal/stats/payments', async (req, res) => {
 });
 
 /* =============================== CASH SUBROUTES =============================== */
-
 const cash = express.Router();
 
 // GET /api/banks/cash/accounts
@@ -488,7 +500,7 @@ cash.post('/accounts', async (req, res) => {
     branchId: b.branchId || null,
     openingBalance: Number(b.openingBalance || 0),
     currentBalance: Number(b.currentBalance ?? b.openingBalance ?? 0),
-    currency: b.currency || 'TZS',
+    currency: (b.currency || 'TZS').toUpperCase(),
     isActive: b.isActive !== false,
     meta: b.meta || null,
   });
@@ -519,7 +531,7 @@ cash.post('/accounts/:id/transactions', async (req, res) => {
     direction: b.direction || (['withdrawal','disbursement','fee','transfer_out'].includes(b.type) ? 'out' : 'in'),
     type: b.type || 'other',
     amount: Number(b.amount || 0),
-    currency: b.currency || account.currency || 'TZS',
+    currency: (b.currency || account.currency || 'TZS').toUpperCase(),
     occurredAt: b.occurredAt ? new Date(b.occurredAt) : new Date(),
     reference: b.reference || null,
     description: b.description || null,
@@ -529,6 +541,7 @@ cash.post('/accounts/:id/transactions', async (req, res) => {
     createdBy: req.user?.id || null,
     meta: b.meta || null,
   };
+
   if (!payload.amount || payload.amount <= 0) return res.status(400).json({ error: 'amount must be > 0' });
 
   const created = await CashTransaction.create(payload);
