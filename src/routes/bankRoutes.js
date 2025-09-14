@@ -23,7 +23,6 @@ function isMissingTable(err) {
   // Postgres: 42P01 = undefined_table
   return err?.original?.code === '42P01' || err?.code === '42P01';
 }
-
 function respondMissingTable(res, tableLabel) {
   return res.status(500).json({
     error: `Storage for ${tableLabel} is not initialized on this environment.`,
@@ -72,12 +71,10 @@ router.get('/codes/:group', async (req, res) => {
 router.get('/', async (req, res) => {
   const { Bank } = m(req);
   if (!Bank) return res.json([]);
-
   try {
     const where = { tenantId: tenantIdFrom(req) };
     const search = String(req.query.search || '').trim();
     const like = (s) => ({ [Op.iLike]: `%${s}%` });
-
     if (search) {
       where[Op.or] = [
         { name: like(search) },
@@ -88,7 +85,6 @@ router.get('/', async (req, res) => {
         { swift: like(search) },
       ];
     }
-
     const list = await Bank.findAll({ where, order: [['name', 'ASC']] });
     res.setHeader('X-Total-Count', String(list.length));
     return res.json(list);
@@ -104,8 +100,8 @@ router.post('/', async (req, res) => {
 
   try {
     const b = req.body || {};
-    const accountName = b.accountName || null;
-    const accountNumber = b.accountNumber || null;
+    const accountName = b.accountName ?? null;
+    const accountNumber = b.accountNumber ?? null;
 
     const payload = {
       id: b.id || crypto.randomUUID(),
@@ -117,7 +113,7 @@ router.post('/', async (req, res) => {
       accountName,
       accountNumber,
 
-      // Keep legacy quoted/camel columns in sync if they exist in DB
+      // if legacy camelCase columns exist in DB, these keep them in sync harmlessly
       accountNameLegacy: accountName,
       accountNumberLegacy: accountNumber,
 
@@ -147,7 +143,6 @@ router.get('/:id', async (req, res) => {
     if (!bank) return res.status(404).json({ error: 'Bank not found' });
 
     let inflow = 0, outflow = 0;
-
     if (BankTransaction) {
       try {
         const txs = await BankTransaction.findAll({
@@ -162,8 +157,6 @@ router.get('/:id', async (req, res) => {
         outflow = Number(txs?.[0]?.outflow || 0);
       } catch (e) {
         if (!isMissingTable(e)) throw e;
-        // table missing → treat as zero activity
-        inflow = 0; outflow = 0;
       }
     }
 
@@ -195,7 +188,7 @@ async function updateBank(req, res) {
     if ('currentBalance' in b) updates.currentBalance = Number(b.currentBalance);
     if ('isActive' in b) updates.isActive = !!b.isActive;
 
-    // keep legacy columns in sync if present
+    // keep legacy camel columns in sync (if they still exist)
     if ('accountName' in b)   updates.accountNameLegacy   = b.accountName ?? null;
     if ('accountNumber' in b) updates.accountNumberLegacy = b.accountNumber ?? null;
 
@@ -222,14 +215,68 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+/* -------------------- “Generic” lists/balances used by UI -------------------- */
+
+// List ALL bank transactions (UI calls /api/banks/transactions)
+router.get('/transactions', async (req, res) => {
+  const { BankTransaction } = m(req);
+  if (!BankTransaction) return res.json([]);
+  try {
+    const where = { tenantId: tenantIdFrom(req) };
+    if (req.query.status) where.status = String(req.query.status);
+    if (req.query.type) where.type = String(req.query.type);
+    const rows = await BankTransaction.findAll({ where, order: [['occurredAt','DESC'], ['createdAt','DESC']] });
+    res.setHeader('X-Total-Count', String(rows.length));
+    return res.json(rows);
+  } catch (e) {
+    if (isMissingTable(e)) return res.json([]);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+async function genericBalance(req, res, scope) {
+  const { BankTransaction } = m(req);
+  if (!BankTransaction) return res.json({ inflow: 0, outflow: 0, count: 0 });
+
+  const where = { tenantId: tenantIdFrom(req) };
+  if (scope === 'transfers') where.type = { [Op.in]: ['transfer_in','transfer_out'] };
+  if (scope === 'reconciliation') where.reconciled = true;
+  if (scope === 'approvals') where.status = 'pending';
+
+  try {
+    const sums = await BankTransaction.findAll({
+      attributes: [
+        [fn('SUM', literal(`CASE WHEN direction='in'  THEN amount ELSE 0 END`)), 'inflow'],
+        [fn('SUM', literal(`CASE WHEN direction='out' THEN amount ELSE 0 END`)), 'outflow'],
+        [fn('COUNT', literal('*')), 'count'],
+      ],
+      where,
+      raw: true,
+    });
+    const row = sums?.[0] || {};
+    return res.json({
+      inflow: Number(row.inflow || 0),
+      outflow: Number(row.outflow || 0),
+      count: Number(row.count || 0),
+    });
+  } catch (e) {
+    if (isMissingTable(e)) return res.json({ inflow: 0, outflow: 0, count: 0 });
+    return res.status(500).json({ error: e.message });
+  }
+}
+
+;['transactions','transfers','reconciliation','statements','approvals','rules','import'].forEach(scope => {
+  router.get(`/${scope}`, async (_req, res) => res.json({ items: [] })); // placeholder list
+  router.get(`/${scope}/balance`, (req, res) => genericBalance(req, res, scope));
+});
+
 /* ---------------------- Banks: Transactions, repay, reconcile ---------------------- */
 
 // GET /api/banks/:id/transactions
 router.get('/:id/transactions', async (req, res) => {
   const { BankTransaction } = m(req);
   const id = String(req.params.id);
-
-  if (!BankTransaction) return res.json([]); // model not wired → treat as empty
+  if (!BankTransaction) return res.json([]);
 
   try {
     const where = { bankId: id, tenantId: tenantIdFrom(req) };
@@ -242,12 +289,11 @@ router.get('/:id/transactions', async (req, res) => {
       if (req.query.from) where.occurredAt[Op.gte] = new Date(req.query.from);
       if (req.query.to)   where.occurredAt[Op.lte] = new Date(req.query.to);
     }
-
     const rows = await BankTransaction.findAll({ where, order: [['occurredAt', 'DESC'], ['createdAt', 'DESC']] });
     res.setHeader('X-Total-Count', String(rows.length));
     return res.json(rows);
   } catch (e) {
-    if (isMissingTable(e)) return res.json([]); // safe fallback for list
+    if (isMissingTable(e)) return res.json([]);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -312,7 +358,6 @@ router.post('/:id/repayments', async (req, res) => {
 router.post('/transactions/:txId/reconcile', async (req, res) => {
   const { BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
-
   try {
     const txId = String(req.params.txId);
     const tx = await BankTransaction.findOne({ where: { id: txId, tenantId: tenantIdFrom(req) } });
@@ -336,7 +381,6 @@ router.post('/transactions/:txId/reconcile', async (req, res) => {
 router.post('/transactions/:txId/unreconcile', async (req, res) => {
   const { BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
-
   try {
     const txId = String(req.params.txId);
     const tx = await BankTransaction.findOne({ where: { id: txId, tenantId: tenantIdFrom(req) } });
@@ -385,7 +429,6 @@ router.post('/:id/transfer', async (req, res) => {
         status: 'posted',
         createdBy: req.user?.id || null,
       };
-
       await BankTransaction.create({ ...base, bankId: from.id, direction: 'out', type: 'transfer_out' }, { transaction: t });
       await BankTransaction.create({ ...base, bankId: to.id,   direction: 'in',  type: 'transfer_in'  }, { transaction: t });
 
@@ -444,7 +487,7 @@ router.post('/:id/transfer-to-cash', async (req, res) => {
       res.status(201).json({ ok: true });
     } catch (e) {
       await t.rollback();
-      if (isMissingTable(e)) return respondMissingTable(res, isMissingTable(e) ? 'cash/bank transactions' : 'cash transactions');
+      if (isMissingTable(e)) return respondMissingTable(res, 'cash/bank transactions');
       res.status(500).json({ error: e.message });
     }
   } catch (e) {
@@ -480,7 +523,6 @@ router.get('/:id/balance', async (req, res) => {
         outflow = Number(sums?.[0]?.outflow || 0);
       } catch (e) {
         if (!isMissingTable(e)) throw e;
-        inflow = 0; outflow = 0;
       }
     }
 
@@ -575,7 +617,6 @@ router.get('/__internal/overview', async (req, res) => {
           outflow = Number(sums?.[0]?.outflow || 0);
         } catch (e) {
           if (!isMissingTable(e)) throw e;
-          inflow = 0; outflow = 0;
         }
       }
       result.push({
@@ -617,7 +658,6 @@ router.get('/__internal/stats/payments', async (req, res) => {
         bankCount = await BankTransaction.count({ where: { tenantId, status: 'posted', type: 'loan_repayment', ...whereRange } });
       } catch (e) {
         if (!isMissingTable(e)) throw e;
-        bankCount = 0;
       }
     }
     if (CashTransaction) {
@@ -625,7 +665,6 @@ router.get('/__internal/stats/payments', async (req, res) => {
         cashCount = await CashTransaction.count({ where: { tenantId, status: 'posted', type: 'loan_repayment', ...whereRange } });
       } catch (e) {
         if (!isMissingTable(e)) throw e;
-        cashCount = 0;
       }
     }
 
@@ -652,6 +691,7 @@ cash.get('/accounts', async (req, res) => {
     res.setHeader('X-Total-Count', String(rows.length));
     res.json(rows);
   } catch (e) {
+    if (isMissingTable(e)) return res.json([]);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -676,6 +716,7 @@ cash.post('/accounts', async (req, res) => {
     });
     res.status(201).json(created);
   } catch (e) {
+    if (isMissingTable(e)) return respondMissingTable(res, 'cash accounts');
     return res.status(500).json({ error: e.message });
   }
 });
