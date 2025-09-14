@@ -3,17 +3,13 @@
 module.exports = {
   async up(queryInterface, Sequelize) {
     await queryInterface.sequelize.transaction(async (t) => {
-      // describeTable can take a schema option; ensure public for Render
-      const desc = await queryInterface.describeTable({ tableName: 'banks', schema: 'public' });
+      const table = { tableName: 'banks', schema: 'public' };
+      const desc = await queryInterface.describeTable(table);
       if (!desc.currency) {
         await queryInterface.addColumn(
-          { tableName: 'banks', schema: 'public' },
+          table,
           'currency',
-          {
-            type: Sequelize.STRING(8),
-            allowNull: false,
-            defaultValue: 'TZS',
-          },
+          { type: Sequelize.STRING(8), allowNull: false, defaultValue: 'TZS' },
           { transaction: t }
         );
       }
@@ -22,9 +18,10 @@ module.exports = {
 
   async down(queryInterface) {
     await queryInterface.sequelize.transaction(async (t) => {
-      const desc = await queryInterface.describeTable({ tableName: 'banks', schema: 'public' });
+      const table = { tableName: 'banks', schema: 'public' };
+      const desc = await queryInterface.describeTable(table);
       if (desc.currency) {
-        await queryInterface.removeColumn({ tableName: 'banks', schema: 'public' }, 'currency', { transaction: t });
+        await queryInterface.removeColumn(table, 'currency', { transaction: t });
       }
     });
   },

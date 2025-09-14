@@ -34,7 +34,6 @@ module.exports = (sequelize, DataTypes) => {
     tableName: 'banks',
     schema: 'public',
     freezeTableName: true,
-    // keep default camelCase timestamps since your table appears to have createdAt/updatedAt
     indexes: [
       { fields: ['tenant_id'] },
       { fields: ['tenant_id', 'name'] },
