@@ -56,18 +56,19 @@ router.get('/codes', async (req, res) => {
 
 // Optional: /banks/codes/:group
 router.get('/codes/:group', async (req, res) => {
-  const sub = await new Promise((resolve) => {
+  // call /codes internally (safe sync)
+  const defaults = await new Promise((resolve) => {
     const _res = { json: (x) => resolve(x) };
     router.handle({ ...req, method: 'GET', url: '/codes' }, _res);
   });
   const key = String(req.params.group || '').trim();
-  if (!key || !(key in sub)) return res.json(sub);
-  res.json({ [key]: sub[key] });
+  if (!key || !(key in defaults)) return res.json(defaults);
+  res.json({ [key]: defaults[key] });
 });
 
 /* --------------------------------- Banks: CRUD --------------------------------- */
 
-// GET /api/banks?search=
+// GET /banks?search=
 router.get('/', async (req, res) => {
   const { Bank } = m(req);
   if (!Bank) return res.json([]);
@@ -93,7 +94,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// POST /api/banks
+// POST /banks
 router.post('/', async (req, res) => {
   const { Bank } = m(req);
   if (!Bank) return res.status(500).json({ error: 'Bank model unavailable' });
@@ -113,7 +114,7 @@ router.post('/', async (req, res) => {
       accountName,
       accountNumber,
 
-      // if legacy camelCase columns exist in DB, these keep them in sync harmlessly
+      // legacy mirroring if camelCase/snakeCase variations exist
       accountNameLegacy: accountName,
       accountNumberLegacy: accountNumber,
 
@@ -133,7 +134,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// GET /api/banks/:id
+// GET /banks/:id
 router.get('/:id', async (req, res) => {
   const { Bank, BankTransaction } = m(req);
   const id = String(req.params.id);
@@ -171,7 +172,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// PUT/PATCH /api/banks/:id
+// PUT/PATCH /banks/:id
 async function updateBank(req, res) {
   const { Bank } = m(req);
   const id = String(req.params.id);
@@ -188,7 +189,7 @@ async function updateBank(req, res) {
     if ('currentBalance' in b) updates.currentBalance = Number(b.currentBalance);
     if ('isActive' in b) updates.isActive = !!b.isActive;
 
-    // keep legacy camel columns in sync (if they still exist)
+    // legacy mirrors
     if ('accountName' in b)   updates.accountNameLegacy   = b.accountName ?? null;
     if ('accountNumber' in b) updates.accountNumberLegacy = b.accountNumber ?? null;
 
@@ -201,7 +202,7 @@ async function updateBank(req, res) {
 router.patch('/:id', updateBank);
 router.put('/:id', updateBank);
 
-// DELETE /api/banks/:id
+// DELETE /banks/:id
 router.delete('/:id', async (req, res) => {
   const { Bank } = m(req);
   const id = String(req.params.id);
@@ -217,7 +218,7 @@ router.delete('/:id', async (req, res) => {
 
 /* -------------------- “Generic” lists/balances used by UI -------------------- */
 
-// List ALL bank transactions (UI calls /api/banks/transactions)
+// GET /banks/transactions  (all banks)
 router.get('/transactions', async (req, res) => {
   const { BankTransaction } = m(req);
   if (!BankTransaction) return res.json([]);
@@ -270,9 +271,9 @@ async function genericBalance(req, res, scope) {
   router.get(`/${scope}/balance`, (req, res) => genericBalance(req, res, scope));
 });
 
-/* ---------------------- Banks: Transactions, repay, reconcile ---------------------- */
+/* ---------------------- Bank: Transactions, repay, reconcile ---------------------- */
 
-// GET /api/banks/:id/transactions
+// GET /banks/:id/transactions
 router.get('/:id/transactions', async (req, res) => {
   const { BankTransaction } = m(req);
   const id = String(req.params.id);
@@ -298,7 +299,7 @@ router.get('/:id/transactions', async (req, res) => {
   }
 });
 
-// POST /api/banks/:id/transactions
+// POST /banks/:id/transactions
 router.post('/:id/transactions', async (req, res) => {
   const { Bank, BankTransaction } = m(req);
   const bankId = String(req.params.id);
@@ -344,17 +345,46 @@ router.post('/:id/transactions', async (req, res) => {
   }
 });
 
-// POST /api/banks/:id/repayments
+// POST /banks/:id/repayments   (fixed: no internal /api path usage)
 router.post('/:id/repayments', async (req, res) => {
+  const { Bank, BankTransaction } = m(req);
+  const bankId = String(req.params.id);
+  const tenantId = tenantIdFrom(req);
   const b = req.body || {};
-  if (!b.loanId)  return res.status(400).json({ error: 'loanId is required' });
-  if (!b.amount)  return res.status(400).json({ error: 'amount is required' });
 
-  req.body = { ...b, type: 'loan_repayment', direction: 'in' };
-  return router.handle({ ...req, url: `/api/banks/${req.params.id}/transactions`, method: 'POST' }, res);
+  try {
+    if (!b.loanId)  return res.status(400).json({ error: 'loanId is required' });
+    if (!b.amount)  return res.status(400).json({ error: 'amount is required' });
+
+    const bank = await Bank.findOne({ where: { id: bankId, tenantId } });
+    if (!bank) return res.status(404).json({ error: 'Bank not found' });
+    if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
+
+    const created = await BankTransaction.create({
+      id: b.id || crypto.randomUUID(),
+      tenantId,
+      bankId,
+      direction: 'in',
+      type: 'loan_repayment',
+      amount: Number(b.amount),
+      currency: (b.currency || bank.currency || 'TZS').toUpperCase(),
+      occurredAt: b.occurredAt ? new Date(b.occurredAt) : new Date(),
+      reference: b.reference || null,
+      status: 'posted',
+      loanId: b.loanId,
+      borrowerId: b.borrowerId || null,
+      createdBy: req.user?.id || null,
+      meta: b.meta || null,
+    });
+
+    return res.status(201).json(created);
+  } catch (e) {
+    if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
+    return res.status(500).json({ error: e.message });
+  }
 });
 
-// POST /api/banks/transactions/:txId/reconcile
+// POST /banks/transactions/:txId/reconcile
 router.post('/transactions/:txId/reconcile', async (req, res) => {
   const { BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -377,7 +407,7 @@ router.post('/transactions/:txId/reconcile', async (req, res) => {
   }
 });
 
-// POST /api/banks/transactions/:txId/unreconcile
+// POST /banks/transactions/:txId/unreconcile
 router.post('/transactions/:txId/unreconcile', async (req, res) => {
   const { BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -396,7 +426,7 @@ router.post('/transactions/:txId/unreconcile', async (req, res) => {
 
 /* -------------------------------- Transfers -------------------------------- */
 
-// POST /api/banks/:id/transfer
+// POST /banks/:id/transfer
 router.post('/:id/transfer', async (req, res) => {
   const { sequelize, Bank, BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -444,7 +474,7 @@ router.post('/:id/transfer', async (req, res) => {
   }
 });
 
-// POST /api/banks/:id/transfer-to-cash
+// POST /banks/:id/transfer-to-cash
 router.post('/:id/transfer-to-cash', async (req, res) => {
   const { sequelize, Bank, BankTransaction, CashAccount, CashTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -497,7 +527,7 @@ router.post('/:id/transfer-to-cash', async (req, res) => {
 
 /* ---------------------- Balance as-of / Overview / Stats ---------------------- */
 
-// GET /api/banks/:id/balance
+// GET /banks/:id/balance
 router.get('/:id/balance', async (req, res) => {
   const { Bank, BankTransaction } = m(req);
   const id = String(req.params.id);
@@ -536,7 +566,7 @@ router.get('/:id/balance', async (req, res) => {
   }
 });
 
-// GET /api/banks/:id/statement
+// GET /banks/:id/statement
 router.get('/:id/statement', async (req, res) => {
   const { BankTransaction, Bank } = m(req);
   const id = String(req.params.id);
@@ -592,7 +622,7 @@ router.get('/:id/statement', async (req, res) => {
   }
 });
 
-// GET /api/banks/__internal/overview
+// GET /banks/__internal/overview
 router.get('/__internal/overview', async (req, res) => {
   const { Bank, BankTransaction } = m(req);
   const tenantId = tenantIdFrom(req);
@@ -636,7 +666,7 @@ router.get('/__internal/overview', async (req, res) => {
   }
 });
 
-// GET /api/banks/__internal/stats/payments
+// GET /banks/__internal/stats/payments
 router.get('/__internal/stats/payments', async (req, res) => {
   const { BankTransaction, CashTransaction } = m(req);
   const tenantId = tenantIdFrom(req);
@@ -682,7 +712,7 @@ router.get('/__internal/stats/payments', async (req, res) => {
 /* =============================== CASH SUBROUTES =============================== */
 const cash = express.Router();
 
-// GET /api/banks/cash/accounts
+// GET /banks/cash/accounts
 cash.get('/accounts', async (req, res) => {
   const { CashAccount } = m(req);
   if (!CashAccount) return res.json([]);
@@ -696,7 +726,7 @@ cash.get('/accounts', async (req, res) => {
   }
 });
 
-// POST /api/banks/cash/accounts
+// POST /banks/cash/accounts
 cash.post('/accounts', async (req, res) => {
   const { CashAccount } = m(req);
   if (!CashAccount) return res.status(500).json({ error: 'CashAccount unavailable' });
@@ -721,7 +751,7 @@ cash.post('/accounts', async (req, res) => {
   }
 });
 
-// GET /api/banks/cash/accounts/:id/transactions
+// GET /banks/cash/accounts/:id/transactions
 cash.get('/accounts/:id/transactions', async (req, res) => {
   const { CashTransaction } = m(req);
   if (!CashTransaction) return res.json([]);
@@ -736,7 +766,7 @@ cash.get('/accounts/:id/transactions', async (req, res) => {
   }
 });
 
-// POST /api/banks/cash/accounts/:id/transactions
+// POST /banks/cash/accounts/:id/transactions
 cash.post('/accounts/:id/transactions', async (req, res) => {
   const { CashAccount, CashTransaction } = m(req);
   if (!CashTransaction) return respondMissingTable(res, 'cash transactions');
