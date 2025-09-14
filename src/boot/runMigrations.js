@@ -13,12 +13,9 @@ module.exports = async function runMigrations(sequelize) {
   const umzug = new Umzug({
     migrations: { glob: path.join(__dirname, '../migrations/*.js') },
     context: sequelize.getQueryInterface(),
-    storage: new SequelizeStorage({ sequelize }), // uses table `SequelizeMeta`
+    storage: new SequelizeStorage({ sequelize }), // table: SequelizeMeta
     logger: console,
   });
-
-  // Expose programmatic helpers if you ever need them elsewhere
-  module.exports._umzug = umzug;
 
   console.log('🔧 Running DB migrations (Umzug)…');
   const pending = await umzug.pending();

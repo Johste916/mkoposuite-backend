@@ -952,6 +952,43 @@ if (sequelize && !FORCE_REAL) {
   });
 }
 
+/* -------------------- PUBLIC SETTINGS: sidebar (no auth) ------------------- */
+/**
+ * Many UIs hit /api/settings/sidebar before auth. Make it optionally public.
+ * If a real controller exists, you can swap the fallback to call it.
+ */
+const PUBLIC_SIDEBAR_ENABLED = process.env.PUBLIC_SIDEBAR !== '0'; // default on
+const DEFAULT_PUBLIC_SIDEBAR = {
+  app: {
+    name: process.env.APP_NAME || 'MkopoSuite',
+    logoUrl: process.env.APP_LOGO_URL || null,
+    version: process.env.APP_VERSION || 'dev',
+  },
+  // keep minimal so clients can render shells before login
+  sections: [
+    {
+      key: 'main',
+      label: 'Main',
+      items: [
+        { key: 'dashboard', label: 'Dashboard', path: '/dashboard', icon: 'LayoutDashboard' },
+      ],
+    },
+  ],
+};
+if (PUBLIC_SIDEBAR_ENABLED) {
+  app.get('/api/settings/sidebar', async (req, res) => {
+    // If you later add a real controller, prefer that and fall back to this payload.
+    try {
+      // Example: try a controller if present (non-breaking)
+      const controller = require('./controllers/settingController'); // optional
+      if (controller?.publicSidebar) {
+        return controller.publicSidebar(req, res);
+      }
+    } catch {}
+    return res.json(DEFAULT_PUBLIC_SIDEBAR);
+  });
+}
+
 /* --------------------------------- Mounting -------------------------------- */
 app.use('/api/borrowers/search', borrowerSearchRoutes);
 
