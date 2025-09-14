@@ -28,8 +28,6 @@ module.exports = (sequelize, DataTypes) => {
     openingBalance:{ type: DataTypes.DECIMAL(18,2), allowNull: false, defaultValue: 0, field: 'opening_balance' },
     currentBalance:{ type: DataTypes.DECIMAL(18,2), allowNull: false, defaultValue: 0, field: 'current_balance' },
     isActive:      { type: DataTypes.BOOLEAN,      allowNull: false, defaultValue: true, field: 'is_active' },
-
-    meta:          { type: DataTypes.JSONB,        allowNull: true },
   }, {
     tableName: 'banks',
     schema: 'public',

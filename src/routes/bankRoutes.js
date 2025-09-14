@@ -99,7 +99,7 @@ router.post('/', async (req, res) => {
     openingBalance: Number(b.openingBalance || 0),
     currentBalance: Number(b.currentBalance ?? b.openingBalance ?? 0),
     isActive: b.isActive !== false,
-    meta: b.meta || null,
+    // meta removed (no column in DB)
   };
 
   const created = await Bank.create(payload);
@@ -144,7 +144,7 @@ async function updateBank(req, res) {
 
   const b = req.body || {};
   const updates = {};
-  ['name','code','branch','accountName','accountNumber','swift','phone','address','currency','meta'].forEach(k => {
+  ['name','code','branch','accountName','accountNumber','swift','phone','address','currency' /* meta removed */].forEach(k => {
     if (k in b) updates[k] = k === 'currency' && typeof b[k] === 'string' ? b[k].toUpperCase() : b[k];
   });
   if ('openingBalance' in b) updates.openingBalance = Number(b.openingBalance);
@@ -217,7 +217,7 @@ router.post('/:id/transactions', async (req, res) => {
     loanId: b.loanId || null,
     borrowerId: b.borrowerId || null,
     createdBy: req.user?.id || null,
-    meta: b.meta || null,
+    meta: b.meta || null, // BankTransaction can keep meta (if your DB has it)
   };
 
   if (!payload.amount || payload.amount <= 0) return res.status(400).json({ error: 'amount must be > 0' });
@@ -502,7 +502,7 @@ cash.post('/accounts', async (req, res) => {
     currentBalance: Number(b.currentBalance ?? b.openingBalance ?? 0),
     currency: (b.currency || 'TZS').toUpperCase(),
     isActive: b.isActive !== false,
-    meta: b.meta || null,
+    meta: b.meta || null, // CashAccount can keep meta if your DB supports it
   });
   res.status(201).json(created);
 });
@@ -539,7 +539,7 @@ cash.post('/accounts/:id/transactions', async (req, res) => {
     loanId: b.loanId || null,
     borrowerId: b.borrowerId || null,
     createdBy: req.user?.id || null,
-    meta: b.meta || null,
+    meta: b.meta || null, // CashTransaction can keep meta if your DB supports it
   };
 
   if (!payload.amount || payload.amount <= 0) return res.status(400).json({ error: 'amount must be > 0' });
