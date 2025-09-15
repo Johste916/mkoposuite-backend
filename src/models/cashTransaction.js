@@ -12,8 +12,8 @@ module.exports = (sequelize, DataTypes) => {
     currency:       { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS' },
 
     occurredAt:     { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW, field: 'occurred_at' },
-
     status:         { type: DataTypes.STRING(24), allowNull: false, defaultValue: 'posted' },
+
     reference:      { type: DataTypes.STRING(120), allowNull: true },
     description:    { type: DataTypes.TEXT, allowNull: true },
 
@@ -21,20 +21,19 @@ module.exports = (sequelize, DataTypes) => {
     borrowerId:     { type: DataTypes.UUID, allowNull: true, field: 'borrower_id' },
     createdBy:      { type: DataTypes.UUID, allowNull: true, field: 'created_by' },
 
+    // cash reconciliation fields (if present in your DB)
+    reconciled:     { type: DataTypes.BOOLEAN, allowNull: true },
+    reconciledAt:   { type: DataTypes.DATE, allowNull: true, field: 'reconciled_at' },
+    reconciledBy:   { type: DataTypes.UUID, allowNull: true, field: 'reconciled_by' },
+
     meta:           { type: DataTypes.JSONB, allowNull: true },
   }, {
     tableName: 'cash_transactions',
     schema: 'public',
     underscored: true,
-
-    // DB uses camelCase timestamps
     timestamps: true,
-    createdAt: 'createdAt',
+    createdAt: 'createdAt',   // <-- maps to camelCase column created by migrations
     updatedAt: 'updatedAt',
-
-    defaultScope: {
-      order: [['occurredAt', 'DESC']],
-    },
   });
 
   return CashTransaction;

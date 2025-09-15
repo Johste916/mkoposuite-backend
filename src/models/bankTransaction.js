@@ -12,8 +12,8 @@ module.exports = (sequelize, DataTypes) => {
     currency:      { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS' },
 
     occurredAt:    { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW, field: 'occurred_at' },
-
     status:        { type: DataTypes.STRING(24), allowNull: false, defaultValue: 'posted' },
+
     reference:     { type: DataTypes.STRING(120), allowNull: true },
     bankRef:       { type: DataTypes.STRING(120), allowNull: true, field: 'bank_ref' },
     description:   { type: DataTypes.TEXT, allowNull: true },
@@ -32,16 +32,9 @@ module.exports = (sequelize, DataTypes) => {
     tableName: 'bank_transactions',
     schema: 'public',
     underscored: true,
-
-    // DB uses camelCase timestamps per your migrations
     timestamps: true,
-    createdAt: 'createdAt',
+    createdAt: 'createdAt',   // <-- ensure Sequelize uses camelCase column
     updatedAt: 'updatedAt',
-
-    defaultScope: {
-      // Bank statements typically sort by the business date, not the insert time
-      order: [['occurredAt', 'DESC']],
-    },
   });
 
   return BankTransaction;

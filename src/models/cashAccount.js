@@ -1,4 +1,5 @@
 'use strict';
+
 module.exports = (sequelize, DataTypes) => {
   const CashAccount = sequelize.define('CashAccount', {
     id:              { type: DataTypes.UUID, primaryKey: true, allowNull: false, defaultValue: DataTypes.UUIDV4 },
@@ -13,7 +14,10 @@ module.exports = (sequelize, DataTypes) => {
   }, {
     tableName: 'cash_accounts',
     schema: 'public',
-    underscored: true,
+    underscored: true,      // keep snake_case for non-timestamp fields
+    timestamps: true,       // ensure timestamps are on
+    createdAt: 'createdAt', // map to your camelCase DB columns
+    updatedAt: 'updatedAt',
   });
 
   return CashAccount;
