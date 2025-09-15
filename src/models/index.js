@@ -2,24 +2,66 @@
 const { Sequelize, DataTypes } = require('sequelize');
 require('dotenv').config();
 
-/* Force `public` schema so prod finds public tables */
+/* ---------- Connection / global model defaults tuned for our DB ---------- */
+const LOG_SQL = process.env.DEBUG_SQL === '1' || process.env.SQL_DEBUG === '1';
+
 const common = {
   dialect: 'postgres',
-  logging: false,
-  searchPath: 'public',
-  define: { schema: 'public' },
+  logging: LOG_SQL ? (msg) => console.log('[sql]', msg) : false,
+  benchmark: LOG_SQL,
+  timezone: 'Z',                 // always store/return UTC
+  quoteIdentifiers: true,        // keep case of "createdAt"/"updatedAt"
+  searchPath: 'public',          // ensure we hit the public schema
+  retry: { max: 3 },
+  pool: {
+    max: Number(process.env.DB_POOL_MAX || 10),
+    min: 0,
+    idle: 10000,
+    acquire: 30000,
+  },
+  define: {
+    schema: 'public',
+    // ⬇️ Critical: our tables use camelCase timestamp columns
+    timestamps: true,
+    createdAt: 'createdAt',
+    updatedAt: 'updatedAt',
+    // Do NOT set underscored globally; individual models control it.
+    // That lets models keep snake_case data columns via `field: '...'`
+  },
+  // Ensure models that specify underscored don't downgrade timestamps to created_at
+  hooks: {
+    beforeDefine: (_attrs, options) => {
+      // If a model uses underscored: true, keep timestamps camelCase anyway
+      if (!Object.prototype.hasOwnProperty.call(options, 'createdAt')) {
+        options.createdAt = 'createdAt';
+      }
+      if (!Object.prototype.hasOwnProperty.call(options, 'updatedAt')) {
+        options.updatedAt = 'updatedAt';
+      }
+      if (!Object.prototype.hasOwnProperty.call(options, 'timestamps')) {
+        options.timestamps = true;
+      }
+    },
+  },
 };
 
 const sequelize = process.env.DATABASE_URL
   ? new Sequelize(process.env.DATABASE_URL, {
       ...common,
-      dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
+      dialectOptions: {
+        ssl: { require: true, rejectUnauthorized: false }, // Supabase/managed PG
+        keepAlive: true,
+      },
     })
   : new Sequelize(
       process.env.DB_NAME || 'mkoposuite_dev',
       process.env.DB_USER || 'postgres',
       process.env.DB_PASS || null,
-      { ...common, host: process.env.DB_HOST || '127.0.0.1', port: Number(process.env.DB_PORT) || 5432 }
+      {
+        ...common,
+        host: process.env.DB_HOST || '127.0.0.1',
+        port: Number(process.env.DB_PORT) || 5432,
+      }
     );
 
 const db = {};
@@ -43,16 +85,16 @@ db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes), 'LoanProduct');
 
 /* ✅ Banks & Transactions */
-db.Bank              = tryLoad(() => require('./bank')(sequelize, DataTypes), 'Bank');
-db.BankTransaction   = tryLoad(() => require('./bankTransaction')(sequelize, DataTypes), 'BankTransaction');
+db.Bank            = tryLoad(() => require('./bank')(sequelize, DataTypes), 'Bank');
+db.BankTransaction = tryLoad(() => require('./bankTransaction')(sequelize, DataTypes), 'BankTransaction');
 
 /* ✅ Cashbook */
-db.CashAccount       = tryLoad(() => require('./cashAccount')(sequelize, DataTypes), 'CashAccount');
-db.CashTransaction   = tryLoad(() => require('./cashTransaction')(sequelize, DataTypes), 'CashTransaction');
+db.CashAccount     = tryLoad(() => require('./cashAccount')(sequelize, DataTypes), 'CashAccount');
+db.CashTransaction = tryLoad(() => require('./cashTransaction')(sequelize, DataTypes), 'CashTransaction');
 
 /* Multitenancy */
-db.Tenant        = tryLoad(() => require('./Tenant')(sequelize, DataTypes), 'Tenant');
-db.TenantUser    = tryLoad(() => require('./TenantUser')(sequelize, DataTypes), 'TenantUser');
+db.Tenant     = tryLoad(() => require('./Tenant')(sequelize, DataTypes), 'Tenant');
+db.TenantUser = tryLoad(() => require('./TenantUser')(sequelize, DataTypes), 'TenantUser');
 
 /* Access control (optional) */
 db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes), 'Role');
@@ -327,6 +369,7 @@ if (db.CashTransaction && db.Borrower) {
   db.CashTransaction.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
 }
 
+/* ---------- Export ---------- */
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;
 module.exports = db;
