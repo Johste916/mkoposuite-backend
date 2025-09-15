@@ -9,7 +9,7 @@ const common = {
   dialect: 'postgres',
   logging: LOG_SQL ? (msg) => console.log('[sql]', msg) : false,
   benchmark: LOG_SQL,
-  timezone: 'Z',                 // always store/return UTC
+  timezone: 'UTC',                 // always store/return UTC
   quoteIdentifiers: true,        // keep case of "createdAt"/"updatedAt"
   searchPath: 'public',          // ensure we hit the public schema
   retry: { max: 3 },
