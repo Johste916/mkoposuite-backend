@@ -2,14 +2,15 @@
 const { Sequelize, DataTypes } = require('sequelize');
 require('dotenv').config();
 
-/* ---------- Connection / global model defaults tuned for our DB ---------- */
+/* ---------- Connection / global model defaults tuned for Postgres ---------- */
 const LOG_SQL = process.env.DEBUG_SQL === '1' || process.env.SQL_DEBUG === '1';
 
 const common = {
   dialect: 'postgres',
   logging: LOG_SQL ? (msg) => console.log('[sql]', msg) : false,
   benchmark: LOG_SQL,
-  timezone: 'UTC',                 // always store/return UTC
+  // ✅ Postgres understands 'UTC' or '+00:00' — NOT 'Z'
+  timezone: 'UTC',
   quoteIdentifiers: true,        // keep case of "createdAt"/"updatedAt"
   searchPath: 'public',          // ensure we hit the public schema
   retry: { max: 3 },
@@ -25,22 +26,14 @@ const common = {
     timestamps: true,
     createdAt: 'createdAt',
     updatedAt: 'updatedAt',
-    // Do NOT set underscored globally; individual models control it.
-    // That lets models keep snake_case data columns via `field: '...'`
+    // Do NOT set underscored globally; individual models may still use snake_case via `field: '...'`
   },
   // Ensure models that specify underscored don't downgrade timestamps to created_at
   hooks: {
     beforeDefine: (_attrs, options) => {
-      // If a model uses underscored: true, keep timestamps camelCase anyway
-      if (!Object.prototype.hasOwnProperty.call(options, 'createdAt')) {
-        options.createdAt = 'createdAt';
-      }
-      if (!Object.prototype.hasOwnProperty.call(options, 'updatedAt')) {
-        options.updatedAt = 'updatedAt';
-      }
-      if (!Object.prototype.hasOwnProperty.call(options, 'timestamps')) {
-        options.timestamps = true;
-      }
+      if (!Object.prototype.hasOwnProperty.call(options, 'timestamps')) options.timestamps = true;
+      if (!Object.prototype.hasOwnProperty.call(options, 'createdAt')) options.createdAt = 'createdAt';
+      if (!Object.prototype.hasOwnProperty.call(options, 'updatedAt')) options.updatedAt = 'updatedAt';
     },
   },
 };
@@ -51,6 +44,7 @@ const sequelize = process.env.DATABASE_URL
       dialectOptions: {
         ssl: { require: true, rejectUnauthorized: false }, // Supabase/managed PG
         keepAlive: true,
+        application_name: process.env.APP_NAME || 'mkoposuite',
       },
     })
   : new Sequelize(
@@ -61,6 +55,7 @@ const sequelize = process.env.DATABASE_URL
         ...common,
         host: process.env.DB_HOST || '127.0.0.1',
         port: Number(process.env.DB_PORT) || 5432,
+        dialectOptions: { application_name: process.env.APP_NAME || 'mkoposuite' },
       }
     );
 
