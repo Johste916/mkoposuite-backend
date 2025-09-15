@@ -1,5 +1,4 @@
 'use strict';
-
 module.exports = (sequelize, DataTypes) => {
   const CashAccount = sequelize.define('CashAccount', {
     id:              { type: DataTypes.UUID, primaryKey: true, allowNull: false, defaultValue: DataTypes.UUIDV4 },
@@ -10,15 +9,15 @@ module.exports = (sequelize, DataTypes) => {
     currentBalance:  { type: DataTypes.DECIMAL(18,2), allowNull: false, defaultValue: 0, field: 'current_balance' },
     currency:        { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS' },
     isActive:        { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true, field: 'is_active' },
-    meta:            { type: DataTypes.JSONB, allowNull: true },
+    meta:            { type: DataTypes.JSONB },
   }, {
     tableName: 'cash_accounts',
     schema: 'public',
-    underscored: true,      // keep snake_case for non-timestamp fields
-    timestamps: true,       // ensure timestamps are on
-    createdAt: 'createdAt', // map to your camelCase DB columns
+    underscored: true,
+    // 👇 important
+    timestamps: true,
+    createdAt: 'createdAt',
     updatedAt: 'updatedAt',
   });
-
   return CashAccount;
 };
