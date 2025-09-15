@@ -6,8 +6,15 @@ const crypto = require('crypto');
 
 const router = express.Router();
 
-/* ------------------------------- Model helpers ------------------------------ */
+/* -----------------------------------------------------------------------------
+ * Utilities
+ * ---------------------------------------------------------------------------*/
+const OK = (res, body = {}) => res.status(200).json(body);
+const CREATED = (res, body = {}) => res.status(201).json(body);
+const NO_CONTENT = (res) => res.status(204).end();
+
 function m(req) { return req.app.get('models') || {}; }
+
 function tenantIdFrom(req) {
   return (
     req.headers['x-tenant-id'] ||
@@ -18,11 +25,11 @@ function tenantIdFrom(req) {
   );
 }
 
-/* --------------------------------- Errors ---------------------------------- */
 function isMissingTable(err) {
   // Postgres: 42P01 = undefined_table
   return err?.original?.code === '42P01' || err?.code === '42P01';
 }
+
 function respondMissingTable(res, tableLabel) {
   return res.status(500).json({
     error: `Storage for ${tableLabel} is not initialized on this environment.`,
@@ -31,7 +38,25 @@ function respondMissingTable(res, tableLabel) {
   });
 }
 
-/* --------------------------------- Codes ----------------------------------- */
+function parseDateSafe(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(+d) ? null : d;
+}
+
+function getPagination(req, fallbackLimit = 100) {
+  const limit = Math.min(
+    Math.max(parseInt(req.query.limit ?? fallbackLimit, 10) || fallbackLimit, 1),
+    1000
+  );
+  const offset = Math.max(parseInt(req.query.offset ?? 0, 10) || 0, 0);
+  return { limit, offset };
+}
+
+/* -----------------------------------------------------------------------------
+ * Codes / Dictionaries
+ * ---------------------------------------------------------------------------*/
+
 // GET /banks/codes
 router.get('/codes', async (req, res) => {
   const { Setting } = m(req);
@@ -39,47 +64,71 @@ router.get('/codes', async (req, res) => {
 
   const defaults = {
     transactionTypes: [
-      'deposit','withdrawal','loan_repayment','disbursement','fee',
-      'transfer_in','transfer_out','other'
+      'deposit', 'withdrawal', 'loan_repayment', 'disbursement', 'fee',
+      'transfer_in', 'transfer_out', 'other'
     ],
-    statuses: ['posted','pending','void'],
-    channels: ['bank','cash','mobile','card','other'],
+    statuses: ['posted', 'pending', 'void'],
+    channels: ['bank', 'cash', 'mobile', 'card', 'other'],
   };
 
-  if (!Setting) return res.json(defaults);
+  if (!Setting) return OK(res, defaults);
 
   try {
     const row = await Setting.findOne({ where: { key: 'bank.codes', tenantId } });
-    if (!row?.value) return res.json(defaults);
+    if (!row?.value) return OK(res, defaults);
     const payload = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
-    return res.json({ ...defaults, ...(payload || {}) });
+    return OK(res, { ...defaults, ...(payload || {}) });
   } catch {
-    return res.json(defaults);
+    return OK(res, defaults);
   }
 });
 
-// GET /banks/codes/:group (optional convenience)
+// GET /banks/codes/:group
 router.get('/codes/:group', async (req, res) => {
-  const defaults = await new Promise((resolve) => {
-    const _res = { json: (x) => resolve(x) };
-    router.handle({ ...req, method: 'GET', url: '/codes' }, _res);
-  });
-  const key = String(req.params.group || '').trim();
-  if (!key || !(key in defaults)) return res.json(defaults);
-  res.json({ [key]: defaults[key] });
+  // resolve defaults without re-entering the router
+  const { Setting } = m(req);
+  const tenantId = tenantIdFrom(req);
+  const defaults = {
+    transactionTypes: [
+      'deposit', 'withdrawal', 'loan_repayment', 'disbursement', 'fee',
+      'transfer_in', 'transfer_out', 'other'
+    ],
+    statuses: ['posted', 'pending', 'void'],
+    channels: ['bank', 'cash', 'mobile', 'card', 'other'],
+  };
+
+  if (!Setting) {
+    const key = String(req.params.group || '').trim();
+    return OK(res, key && defaults[key] ? { [key]: defaults[key] } : defaults);
+  }
+
+  try {
+    const row = await Setting.findOne({ where: { key: 'bank.codes', tenantId } });
+    const payload = row?.value ? (typeof row.value === 'string' ? JSON.parse(row.value) : row.value) : {};
+    const merged = { ...defaults, ...(payload || {}) };
+    const key = String(req.params.group || '').trim();
+    return OK(res, key && merged[key] ? { [key]: merged[key] } : merged);
+  } catch {
+    const key = String(req.params.group || '').trim();
+    return OK(res, key && defaults[key] ? { [key]: defaults[key] } : defaults);
+  }
 });
 
-/* =============================== BANK ACCOUNTS ============================== */
-/* --------------------------------- CRUD ------------------------------------ */
+/* =============================================================================
+ * BANK ACCOUNTS
+ * =============================================================================*/
 
-// GET /banks?search=
+// GET /banks?search=&limit=&offset=
 router.get('/', async (req, res) => {
   const { Bank } = m(req);
-  if (!Bank) return res.json([]);
+  if (!Bank) return OK(res, []);
+
   try {
+    const { limit, offset } = getPagination(req, 200);
     const where = { tenantId: tenantIdFrom(req) };
     const search = String(req.query.search || '').trim();
     const like = (s) => ({ [Op.iLike]: `%${s}%` });
+
     if (search) {
       where[Op.or] = [
         { name: like(search) },
@@ -90,9 +139,16 @@ router.get('/', async (req, res) => {
         { swift: like(search) },
       ];
     }
-    const list = await Bank.findAll({ where, order: [['name', 'ASC']] });
-    res.setHeader('X-Total-Count', String(list.length));
-    return res.json(list);
+
+    const { rows, count } = await Bank.findAndCountAll({
+      where,
+      order: [['name', 'ASC']],
+      limit,
+      offset,
+    });
+
+    res.setHeader('X-Total-Count', String(count));
+    return OK(res, rows);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
@@ -118,7 +174,7 @@ router.post('/', async (req, res) => {
       accountName,
       accountNumber,
 
-      // legacy mirrors (in case schema still has them)
+      // legacy mirrors (if physical columns still exist they will map)
       accountNameLegacy: accountName,
       accountNumberLegacy: accountNumber,
 
@@ -132,7 +188,7 @@ router.post('/', async (req, res) => {
     };
 
     const created = await Bank.create(payload);
-    return res.status(201).json(created);
+    return CREATED(res, created);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
@@ -155,7 +211,7 @@ router.get('/:id', async (req, res) => {
             [fn('SUM', literal(`CASE WHEN direction='in'  THEN amount ELSE 0 END`)), 'inflow'],
             [fn('SUM', literal(`CASE WHEN direction='out' THEN amount ELSE 0 END`)), 'outflow'],
           ],
-          where: { bankId: id, status: 'posted' },
+          where: { bankId: id, tenantId: tenantIdFrom(req), status: 'posted' },
           raw: true,
         });
         inflow = Number(txs?.[0]?.inflow || 0);
@@ -169,7 +225,7 @@ router.get('/:id', async (req, res) => {
     const computedCurrent = opening + inflow - outflow;
     const data = bank.toJSON();
     data.balances = { opening, inflow, outflow, current: computedCurrent };
-    return res.json(data);
+    return OK(res, data);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
@@ -198,7 +254,7 @@ async function updateBank(req, res) {
     if ('accountNumber' in b) updates.accountNumberLegacy = b.accountNumber ?? null;
 
     await bank.update(updates);
-    return res.json(bank);
+    return OK(res, bank);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
@@ -214,34 +270,45 @@ router.delete('/:id', async (req, res) => {
     const bank = await Bank.findOne({ where: { id, tenantId: tenantIdFrom(req) } });
     if (!bank) return res.status(404).json({ error: 'Bank not found' });
     await bank.destroy();
-    return res.status(204).end();
+    return NO_CONTENT(res);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* ========================= GENERIC LISTS / BALANCES ========================= */
+/* -----------------------------------------------------------------------------
+ * Generic Lists / Balances
+ * ---------------------------------------------------------------------------*/
 
-// GET /banks/transactions (all banks)
+// GET /banks/transactions (all banks, optional filters, pagination)
 router.get('/transactions', async (req, res) => {
   const { BankTransaction } = m(req);
-  if (!BankTransaction) return res.json([]);
+  if (!BankTransaction) return OK(res, []);
+
   try {
+    const { limit, offset } = getPagination(req, 500);
     const where = { tenantId: tenantIdFrom(req) };
     if (req.query.status) where.status = String(req.query.status);
     if (req.query.type) where.type = String(req.query.type);
-    const rows = await BankTransaction.findAll({ where, order: [['occurredAt','DESC'], ['createdAt','DESC']] });
-    res.setHeader('X-Total-Count', String(rows.length));
-    return res.json(rows);
+
+    const { rows, count } = await BankTransaction.findAndCountAll({
+      where,
+      order: [['occurredAt','DESC'], ['createdAt','DESC']],
+      limit,
+      offset,
+    });
+
+    res.setHeader('X-Total-Count', String(count));
+    return OK(res, rows);
   } catch (e) {
-    if (isMissingTable(e)) return res.json([]);
+    if (isMissingTable(e)) return OK(res, []);
     return res.status(500).json({ error: e.message });
   }
 });
 
 async function genericBalance(req, res, scope) {
   const { BankTransaction } = m(req);
-  if (!BankTransaction) return res.json({ inflow: 0, outflow: 0, count: 0 });
+  if (!BankTransaction) return OK(res, { inflow: 0, outflow: 0, count: 0 });
 
   const where = { tenantId: tenantIdFrom(req) };
   if (scope === 'transfers') where.type = { [Op.in]: ['transfer_in','transfer_out'] };
@@ -259,47 +326,61 @@ async function genericBalance(req, res, scope) {
       raw: true,
     });
     const row = sums?.[0] || {};
-    return res.json({
+    return OK(res, {
       inflow: Number(row.inflow || 0),
       outflow: Number(row.outflow || 0),
       count: Number(row.count || 0),
     });
   } catch (e) {
-    if (isMissingTable(e)) return res.json({ inflow: 0, outflow: 0, count: 0 });
+    if (isMissingTable(e)) return OK(res, { inflow: 0, outflow: 0, count: 0 });
     return res.status(500).json({ error: e.message });
   }
 }
 
-// Keep the lightweight list placeholders for UI wiring + a /balance each
+// Lightweight lists + balance endpoints for UI wiring
 ;['transactions','transfers','reconciliation','statements','approvals','rules','import'].forEach(scope => {
-  router.get(`/${scope}`, async (_req, res) => res.json({ items: [] }));
+  router.get(`/${scope}`, async (_req, res) => OK(res, { items: [] }));
   router.get(`/${scope}/balance`, (req, res) => genericBalance(req, res, scope));
 });
 
-/* ========================== BANK TX / RECON / IMPORT ======================== */
+/* -----------------------------------------------------------------------------
+ * Bank Transactions / Reconciliation / Import
+ * ---------------------------------------------------------------------------*/
 
 // GET /banks/:id/transactions
 router.get('/:id/transactions', async (req, res) => {
   const { BankTransaction } = m(req);
   const id = String(req.params.id);
-  if (!BankTransaction) return res.json([]);
+  if (!BankTransaction) return OK(res, []);
 
   try {
+    const { limit, offset } = getPagination(req, 500);
     const where = { bankId: id, tenantId: tenantIdFrom(req) };
     if (req.query.type)      where.type = String(req.query.type);
     if (req.query.status)    where.status = String(req.query.status);
     if (req.query.reconciled === '1' || req.query.reconciled === 'true') where.reconciled = true;
     if (req.query.reconciled === '0' || req.query.reconciled === 'false') where.reconciled = false;
     if (req.query.from || req.query.to) {
-      where.occurredAt = {};
-      if (req.query.from) where.occurredAt[Op.gte] = new Date(req.query.from);
-      if (req.query.to)   where.occurredAt[Op.lte] = new Date(req.query.to);
+      const from = parseDateSafe(req.query.from);
+      const to   = parseDateSafe(req.query.to);
+      if (from || to) {
+        where.occurredAt = {};
+        if (from) where.occurredAt[Op.gte] = from;
+        if (to)   where.occurredAt[Op.lte] = to;
+      }
     }
-    const rows = await BankTransaction.findAll({ where, order: [['occurredAt', 'DESC'], ['createdAt', 'DESC']] });
-    res.setHeader('X-Total-Count', String(rows.length));
-    return res.json(rows);
+
+    const { rows, count } = await BankTransaction.findAndCountAll({
+      where,
+      order: [['occurredAt', 'DESC'], ['createdAt', 'DESC']],
+      limit,
+      offset,
+    });
+
+    res.setHeader('X-Total-Count', String(count));
+    return OK(res, rows);
   } catch (e) {
-    if (isMissingTable(e)) return res.json([]);
+    if (isMissingTable(e)) return OK(res, []);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -313,6 +394,7 @@ router.post('/:id/transactions', async (req, res) => {
   try {
     const bank = await Bank.findOne({ where: { id: bankId, tenantId } });
     if (!bank) return res.status(404).json({ error: 'Bank not found' });
+    if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
 
     const b = req.body || {};
     const payload = {
@@ -323,7 +405,7 @@ router.post('/:id/transactions', async (req, res) => {
       type: b.type || 'other',
       amount: Number(b.amount || 0),
       currency: (b.currency || bank.currency || 'TZS').toUpperCase(),
-      occurredAt: b.occurredAt ? new Date(b.occurredAt) : new Date(),
+      occurredAt: parseDateSafe(b.occurredAt) || new Date(),
       reference: b.reference || null,
       bankRef: b.bankRef || null,
       description: b.description || null,
@@ -338,12 +420,9 @@ router.post('/:id/transactions', async (req, res) => {
     if (!payload.amount || payload.amount <= 0) {
       return res.status(400).json({ error: 'amount must be > 0' });
     }
-    if (!BankTransaction) {
-      return respondMissingTable(res, 'bank transactions');
-    }
 
     const created = await BankTransaction.create(payload);
-    return res.status(201).json(created);
+    return CREATED(res, created);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
@@ -373,7 +452,7 @@ router.post('/:id/repayments', async (req, res) => {
       type: 'loan_repayment',
       amount: Number(b.amount),
       currency: (b.currency || bank.currency || 'TZS').toUpperCase(),
-      occurredAt: b.occurredAt ? new Date(b.occurredAt) : new Date(),
+      occurredAt: parseDateSafe(b.occurredAt) || new Date(),
       reference: b.reference || null,
       status: 'posted',
       loanId: b.loanId,
@@ -382,15 +461,14 @@ router.post('/:id/repayments', async (req, res) => {
       meta: b.meta || null,
     });
 
-    return res.status(201).json(created);
+    return CREATED(res, created);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* ----------------------------- Reconciliation ------------------------------ */
-// POST /banks/transactions/:txId/reconcile
+/* Reconciliation */
 router.post('/transactions/:txId/reconcile', async (req, res) => {
   const { BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -406,14 +484,13 @@ router.post('/transactions/:txId/reconcile', async (req, res) => {
       bankRef: req.body?.bankRef || tx.bankRef || null,
       note: req.body?.note ?? tx.note,
     });
-    res.json(tx);
+    return OK(res, tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-// POST /banks/transactions/:txId/unreconcile
 router.post('/transactions/:txId/unreconcile', async (req, res) => {
   const { BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -423,15 +500,14 @@ router.post('/transactions/:txId/unreconcile', async (req, res) => {
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
 
     await tx.update({ reconciled: false, reconciledAt: null, reconciledBy: null, note: req.body?.note ?? tx.note });
-    res.json(tx);
+    return OK(res, tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* -------------------------------- Transfers -------------------------------- */
-// POST /banks/:id/transfer
+/* Transfers */
 router.post('/:id/transfer', async (req, res) => {
   const { sequelize, Bank, BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -458,7 +534,7 @@ router.post('/:id/transfer', async (req, res) => {
         tenantId,
         amount,
         currency: (b.currency || from.currency || to.currency || 'TZS').toUpperCase(),
-        occurredAt: b.occurredAt ? new Date(b.occurredAt) : new Date(),
+        occurredAt: parseDateSafe(b.occurredAt) || new Date(),
         reference: b.reference || null,
         note: b.note || null,
         status: 'posted',
@@ -468,18 +544,17 @@ router.post('/:id/transfer', async (req, res) => {
       await BankTransaction.create({ ...base, bankId: to.id,   direction: 'in',  type: 'transfer_in'  }, { transaction: t });
 
       await t.commit();
-      res.status(201).json({ ok: true });
+      return CREATED(res, { ok: true });
     } catch (e) {
       await t.rollback();
       if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
-      res.status(500).json({ error: e.message });
+      return res.status(500).json({ error: e.message });
     }
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 });
 
-// POST /banks/:id/transfer-to-cash
 router.post('/:id/transfer-to-cash', async (req, res) => {
   const { sequelize, Bank, BankTransaction, CashAccount, CashTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -503,7 +578,7 @@ router.post('/:id/transfer-to-cash', async (req, res) => {
 
     const t = await sequelize.transaction();
     try {
-      const when = b.occurredAt ? new Date(b.occurredAt) : new Date();
+      const when = parseDateSafe(b.occurredAt) || new Date();
       const currency = (b.currency || bank.currency || cash.currency || 'TZS').toUpperCase();
 
       await BankTransaction.create({
@@ -519,18 +594,20 @@ router.post('/:id/transfer-to-cash', async (req, res) => {
       }, { transaction: t });
 
       await t.commit();
-      res.status(201).json({ ok: true });
+      return CREATED(res, { ok: true });
     } catch (e) {
       await t.rollback();
       if (isMissingTable(e)) return respondMissingTable(res, 'cash/bank transactions');
-      res.status(500).json({ error: e.message });
+      return res.status(500).json({ error: e.message });
     }
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* ---------------------- Balance-as-of / Statement / Stats ------------------- */
+/* -----------------------------------------------------------------------------
+ * Balance-as-of / Statement / Stats
+ * ---------------------------------------------------------------------------*/
 
 // GET /banks/:id/balance
 router.get('/:id/balance', async (req, res) => {
@@ -541,7 +618,7 @@ router.get('/:id/balance', async (req, res) => {
     const bank = await Bank.findOne({ where: { id, tenantId: tenantIdFrom(req) } });
     if (!bank) return res.status(404).json({ error: 'Bank not found' });
 
-    const asOf = req.query.asOf ? new Date(req.query.asOf) : new Date();
+    const asOf = parseDateSafe(req.query.asOf) || new Date();
 
     let inflow = 0, outflow = 0;
     if (BankTransaction) {
@@ -551,7 +628,7 @@ router.get('/:id/balance', async (req, res) => {
             [fn('SUM', literal(`CASE WHEN direction='in'  THEN amount ELSE 0 END`)), 'inflow'],
             [fn('SUM', literal(`CASE WHEN direction='out' THEN amount ELSE 0 END`)), 'outflow'],
           ],
-          where: { bankId: id, status: 'posted', occurredAt: { [Op.lte]: asOf } },
+          where: { bankId: id, tenantId: tenantIdFrom(req), status: 'posted', occurredAt: { [Op.lte]: asOf } },
           raw: true,
         });
         inflow = Number(sums?.[0]?.inflow || 0);
@@ -564,7 +641,7 @@ router.get('/:id/balance', async (req, res) => {
     const opening = Number(bank.openingBalance || 0);
     const closing = opening + inflow - outflow;
 
-    return res.json({ asOf: asOf.toISOString(), opening, inflow, outflow, closing });
+    return OK(res, { asOf: asOf.toISOString(), opening, inflow, outflow, closing });
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
@@ -580,16 +657,16 @@ router.get('/:id/statement', async (req, res) => {
     const bank = await Bank.findOne({ where: { id, tenantId: tenantIdFrom(req) } });
     if (!bank) return res.status(404).json({ error: 'Bank not found' });
 
-    const from = req.query.from ? new Date(req.query.from) : null;
-    const to   = req.query.to   ? new Date(req.query.to)   : null;
+    const from = parseDateSafe(req.query.from);
+    const to   = parseDateSafe(req.query.to);
     const includeOpening = (req.query.includeOpening === '1' || req.query.includeOpening === 'true');
 
-    const range = {};
-    if (from) range[Op.gte] = from;
-    if (to)   range[Op.lte] = to;
-
     const where = { bankId: id, tenantId: tenantIdFrom(req) };
-    if (from || to) where.occurredAt = range;
+    if (from || to) {
+      where.occurredAt = {};
+      if (from) where.occurredAt[Op.gte] = from;
+      if (to)   where.occurredAt[Op.lte] = to;
+    }
 
     let items = [];
     try {
@@ -620,7 +697,7 @@ router.get('/:id/statement', async (req, res) => {
       }
     }
 
-    res.json({ bank: { id: bank.id, name: bank.name, currency: bank.currency }, openingBalance, items });
+    return OK(res, { bank: { id: bank.id, name: bank.name, currency: bank.currency }, openingBalance, items });
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
@@ -645,7 +722,7 @@ router.get('/__internal/overview', async (req, res) => {
               [fn('SUM', literal(`CASE WHEN direction='in'  THEN amount ELSE 0 END`)), 'inflow'],
               [fn('SUM', literal(`CASE WHEN direction='out' THEN amount ELSE 0 END`)), 'outflow'],
             ],
-            where: { bankId: bank.id, status: 'posted' },
+            where: { bankId: bank.id, tenantId, status: 'posted' },
             raw: true,
           });
           inflow = Number(sums?.[0]?.inflow || 0);
@@ -664,7 +741,7 @@ router.get('/__internal/overview', async (req, res) => {
         currency: bank.currency,
       });
     }
-    res.json({ items: result });
+    return OK(res, { items: result });
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
@@ -675,8 +752,8 @@ router.get('/__internal/overview', async (req, res) => {
 router.get('/__internal/stats/payments', async (req, res) => {
   const { BankTransaction, CashTransaction } = m(req);
   const tenantId = tenantIdFrom(req);
-  const from = req.query.from ? new Date(req.query.from) : null;
-  const to   = req.query.to   ? new Date(req.query.to)   : null;
+  const from = parseDateSafe(req.query.from);
+  const to   = parseDateSafe(req.query.to);
 
   const whereRange = {};
   if (from || to) {
@@ -703,7 +780,7 @@ router.get('/__internal/stats/payments', async (req, res) => {
       }
     }
 
-    res.json({
+    return OK(res, {
       from: from ? from.toISOString() : null,
       to:   to ? to.toISOString() : null,
       repayments: { bank: bankCount, cash: cashCount },
@@ -714,21 +791,28 @@ router.get('/__internal/stats/payments', async (req, res) => {
   }
 });
 
-/* ============================== CASH SUBROUTES ============================== */
-
+/* -----------------------------------------------------------------------------
+ * CASH SUBROUTES
+ * ---------------------------------------------------------------------------*/
 const cash = express.Router();
 
-/* -------- Accounts -------- */
+/* Accounts */
 // GET /banks/cash/accounts
 cash.get('/accounts', async (req, res) => {
   const { CashAccount } = m(req);
-  if (!CashAccount) return res.json([]);
+  if (!CashAccount) return OK(res, []);
   try {
-    const rows = await CashAccount.findAll({ where: { tenantId: tenantIdFrom(req) }, order: [['name','ASC']] });
-    res.setHeader('X-Total-Count', String(rows.length));
-    res.json(rows);
+    const { limit, offset } = getPagination(req, 200);
+    const { rows, count } = await CashAccount.findAndCountAll({
+      where: { tenantId: tenantIdFrom(req) },
+      order: [['name','ASC']],
+      limit,
+      offset,
+    });
+    res.setHeader('X-Total-Count', String(count));
+    return OK(res, rows);
   } catch (e) {
-    if (isMissingTable(e)) return res.json([]);
+    if (isMissingTable(e)) return OK(res, []);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -751,33 +835,44 @@ cash.post('/accounts', async (req, res) => {
       isActive: b.isActive !== false,
       meta: b.meta || null,
     });
-    res.status(201).json(created);
+    return CREATED(res, created);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'cash accounts');
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* -------- Transactions -------- */
+/* Transactions */
 // GET /banks/cash/accounts/:id/transactions
 cash.get('/accounts/:id/transactions', async (req, res) => {
   const { CashTransaction } = m(req);
-  if (!CashTransaction) return res.json([]);
+  if (!CashTransaction) return OK(res, []);
   try {
+    const { limit, offset } = getPagination(req, 500);
     const where = { cashAccountId: String(req.params.id), tenantId: tenantIdFrom(req) };
-    // optional filters
     if (req.query.type)   where.type = String(req.query.type);
     if (req.query.status) where.status = String(req.query.status);
     if (req.query.from || req.query.to) {
-      where.occurredAt = {};
-      if (req.query.from) where.occurredAt[Op.gte] = new Date(req.query.from);
-      if (req.query.to)   where.occurredAt[Op.lte] = new Date(req.query.to);
+      const from = parseDateSafe(req.query.from);
+      const to   = parseDateSafe(req.query.to);
+      if (from || to) {
+        where.occurredAt = {};
+        if (from) where.occurredAt[Op.gte] = from;
+        if (to)   where.occurredAt[Op.lte] = to;
+      }
     }
-    const rows = await CashTransaction.findAll({ where, order: [['occurredAt','DESC'], ['createdAt','DESC']] });
-    res.setHeader('X-Total-Count', String(rows.length));
-    res.json(rows);
+
+    const { rows, count } = await CashTransaction.findAndCountAll({
+      where,
+      order: [['occurredAt','DESC'], ['createdAt','DESC']],
+      limit,
+      offset,
+    });
+
+    res.setHeader('X-Total-Count', String(count));
+    return OK(res, rows);
   } catch (e) {
-    if (isMissingTable(e)) return res.json([]);
+    if (isMissingTable(e)) return OK(res, []);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -800,7 +895,7 @@ cash.post('/accounts/:id/transactions', async (req, res) => {
       type: b.type || 'other',
       amount: Number(b.amount || 0),
       currency: (b.currency || account.currency || 'TZS').toUpperCase(),
-      occurredAt: b.occurredAt ? new Date(b.occurredAt) : new Date(),
+      occurredAt: parseDateSafe(b.occurredAt) || new Date(),
       reference: b.reference || null,
       description: b.description || null,
       status: b.status || 'posted',
@@ -809,21 +904,21 @@ cash.post('/accounts/:id/transactions', async (req, res) => {
       createdBy: req.user?.id || null,
       meta: b.meta || null,
       reconciled: !!b.reconciled,
-      reconciledAt: b.reconciled ? (b.reconciledAt ? new Date(b.reconciledAt) : new Date()) : null,
+      reconciledAt: b.reconciled ? (parseDateSafe(b.reconciledAt) || new Date()) : null,
       reconciledBy: b.reconciled ? (req.user?.id || null) : null,
     };
 
     if (!payload.amount || payload.amount <= 0) return res.status(400).json({ error: 'amount must be > 0' });
 
     const created = await CashTransaction.create(payload);
-    res.status(201).json(created);
+    return CREATED(res, created);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* -------- Cash Statement (like Bank Statements) -------- */
+/* Cash Statement */
 // GET /banks/cash/accounts/:id/statement
 cash.get('/accounts/:id/statement', async (req, res) => {
   const { CashTransaction, CashAccount } = m(req);
@@ -833,16 +928,16 @@ cash.get('/accounts/:id/statement', async (req, res) => {
     const account = await CashAccount.findOne({ where: { id, tenantId: tenantIdFrom(req) } });
     if (!account) return res.status(404).json({ error: 'Cash account not found' });
 
-    const from = req.query.from ? new Date(req.query.from) : null;
-    const to   = req.query.to   ? new Date(req.query.to)   : null;
+    const from = parseDateSafe(req.query.from);
+    const to   = parseDateSafe(req.query.to);
     const includeOpening = (req.query.includeOpening === '1' || req.query.includeOpening === 'true');
 
-    const range = {};
-    if (from) range[Op.gte] = from;
-    if (to)   range[Op.lte] = to;
-
     const where = { cashAccountId: id, tenantId: tenantIdFrom(req) };
-    if (from || to) where.occurredAt = range;
+    if (from || to) {
+      where.occurredAt = {};
+      if (from) where.occurredAt[Op.gte] = from;
+      if (to)   where.occurredAt[Op.lte] = to;
+    }
 
     let items = [];
     try {
@@ -873,14 +968,14 @@ cash.get('/accounts/:id/statement', async (req, res) => {
       }
     }
 
-    res.json({ account: { id: account.id, name: account.name, currency: account.currency }, openingBalance, items });
+    return OK(res, { account: { id: account.id, name: account.name, currency: account.currency }, openingBalance, items });
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* -------- Cash Balance-as-of (handy for reconciliation) -------- */
+/* Cash Balance-as-of */
 // GET /banks/cash/accounts/:id/balance
 cash.get('/accounts/:id/balance', async (req, res) => {
   const { CashAccount, CashTransaction } = m(req);
@@ -890,7 +985,7 @@ cash.get('/accounts/:id/balance', async (req, res) => {
     const account = await CashAccount.findOne({ where: { id, tenantId: tenantIdFrom(req) } });
     if (!account) return res.status(404).json({ error: 'Cash account not found' });
 
-    const asOf = req.query.asOf ? new Date(req.query.asOf) : new Date();
+    const asOf = parseDateSafe(req.query.asOf) || new Date();
 
     let inflow = 0, outflow = 0;
     if (CashTransaction) {
@@ -900,7 +995,7 @@ cash.get('/accounts/:id/balance', async (req, res) => {
             [fn('SUM', literal(`CASE WHEN direction='in'  THEN amount ELSE 0 END`)), 'inflow'],
             [fn('SUM', literal(`CASE WHEN direction='out' THEN amount ELSE 0 END`)), 'outflow'],
           ],
-          where: { cashAccountId: id, status: 'posted', occurredAt: { [Op.lte]: asOf } },
+          where: { cashAccountId: id, tenantId: tenantIdFrom(req), status: 'posted', occurredAt: { [Op.lte]: asOf } },
           raw: true,
         });
         inflow = Number(sums?.[0]?.inflow || 0);
@@ -913,15 +1008,14 @@ cash.get('/accounts/:id/balance', async (req, res) => {
     const opening = Number(account.openingBalance || 0);
     const closing = opening + inflow - outflow;
 
-    return res.json({ asOf: asOf.toISOString(), opening, inflow, outflow, closing });
+    return OK(res, { asOf: asOf.toISOString(), opening, inflow, outflow, closing });
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* -------- Cash Reconciliation (like Bank) -------- */
-// POST /banks/cash/transactions/:txId/reconcile
+/* Cash Reconciliation */
 cash.post('/transactions/:txId/reconcile', async (req, res) => {
   const { CashTransaction } = m(req);
   if (!CashTransaction) return respondMissingTable(res, 'cash transactions');
@@ -936,14 +1030,13 @@ cash.post('/transactions/:txId/reconcile', async (req, res) => {
       reconciledBy: req.user?.id || null,
       note: req.body?.note ?? tx.note,
     });
-    res.json(tx);
+    return OK(res, tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-// POST /banks/cash/transactions/:txId/unreconcile
 cash.post('/transactions/:txId/unreconcile', async (req, res) => {
   const { CashTransaction } = m(req);
   if (!CashTransaction) return respondMissingTable(res, 'cash transactions');
@@ -953,30 +1046,34 @@ cash.post('/transactions/:txId/unreconcile', async (req, res) => {
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
 
     await tx.update({ reconciled: false, reconciledAt: null, reconciledBy: null, note: req.body?.note ?? tx.note });
-    res.json(tx);
+    return OK(res, tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* -------- Cash Approvals (maker-checker) -------- */
-// GET /banks/cash/transactions/pending
+/* Cash Approvals */
 cash.get('/transactions/pending', async (req, res) => {
   const { CashTransaction } = m(req);
-  if (!CashTransaction) return res.json([]);
+  if (!CashTransaction) return OK(res, []);
   try {
+    const { limit, offset } = getPagination(req, 500);
     const where = { tenantId: tenantIdFrom(req), status: 'pending' };
-    const rows = await CashTransaction.findAll({ where, order: [['occurredAt','DESC'],['createdAt','DESC']] });
-    res.setHeader('X-Total-Count', String(rows.length));
-    res.json(rows);
+    const { rows, count } = await CashTransaction.findAndCountAll({
+      where,
+      order: [['occurredAt','DESC'],['createdAt','DESC']],
+      limit,
+      offset,
+    });
+    res.setHeader('X-Total-Count', String(count));
+    return OK(res, rows);
   } catch (e) {
-    if (isMissingTable(e)) return res.json([]);
+    if (isMissingTable(e)) return OK(res, []);
     return res.status(500).json({ error: e.message });
   }
 });
 
-// POST /banks/cash/transactions/:txId/approve
 cash.post('/transactions/:txId/approve', async (req, res) => {
   const { CashTransaction } = m(req);
   if (!CashTransaction) return respondMissingTable(res, 'cash transactions');
@@ -984,14 +1081,13 @@ cash.post('/transactions/:txId/approve', async (req, res) => {
     const tx = await CashTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     await tx.update({ status: 'posted', approvedBy: req.user?.id || null, approvedAt: new Date() });
-    res.json(tx);
+    return OK(res, tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-// POST /banks/cash/transactions/:txId/reject
 cash.post('/transactions/:txId/reject', async (req, res) => {
   const { CashTransaction } = m(req);
   if (!CashTransaction) return respondMissingTable(res, 'cash transactions');
@@ -999,34 +1095,40 @@ cash.post('/transactions/:txId/reject', async (req, res) => {
     const tx = await CashTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     await tx.update({ status: 'void', rejectionReason: req.body?.reason || null, rejectedBy: req.user?.id || null, rejectedAt: new Date() });
-    res.json(tx);
+    return OK(res, tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'cash transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* -------- Wire cash subrouter -------- */
+/* Wire cash subrouter */
 router.use('/cash', cash);
 
-/* ======================= BANKING APPROVALS (maker-checker) ================== */
+/* -----------------------------------------------------------------------------
+ * BANKING APPROVALS (maker-checker)
+ * ---------------------------------------------------------------------------*/
 
-// GET /banks/transactions/pending
 router.get('/transactions/pending', async (req, res) => {
   const { BankTransaction } = m(req);
-  if (!BankTransaction) return res.json([]);
+  if (!BankTransaction) return OK(res, []);
   try {
+    const { limit, offset } = getPagination(req, 500);
     const where = { tenantId: tenantIdFrom(req), status: 'pending' };
-    const rows = await BankTransaction.findAll({ where, order: [['occurredAt','DESC'],['createdAt','DESC']] });
-    res.setHeader('X-Total-Count', String(rows.length));
-    res.json(rows);
+    const { rows, count } = await BankTransaction.findAndCountAll({
+      where,
+      order: [['occurredAt','DESC'],['createdAt','DESC']],
+      limit,
+      offset,
+    });
+    res.setHeader('X-Total-Count', String(count));
+    return OK(res, rows);
   } catch (e) {
-    if (isMissingTable(e)) return res.json([]);
+    if (isMissingTable(e)) return OK(res, []);
     return res.status(500).json({ error: e.message });
   }
 });
 
-// POST /banks/transactions/:txId/approve
 router.post('/transactions/:txId/approve', async (req, res) => {
   const { BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -1034,14 +1136,13 @@ router.post('/transactions/:txId/approve', async (req, res) => {
     const tx = await BankTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     await tx.update({ status: 'posted', approvedBy: req.user?.id || null, approvedAt: new Date() });
-    res.json(tx);
+    return OK(res, tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-// POST /banks/transactions/:txId/reject
 router.post('/transactions/:txId/reject', async (req, res) => {
   const { BankTransaction } = m(req);
   if (!BankTransaction) return respondMissingTable(res, 'bank transactions');
@@ -1049,39 +1150,38 @@ router.post('/transactions/:txId/reject', async (req, res) => {
     const tx = await BankTransaction.findOne({ where: { id: String(req.params.txId), tenantId: tenantIdFrom(req) } });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     await tx.update({ status: 'void', rejectionReason: req.body?.reason || null, rejectedBy: req.user?.id || null, rejectedAt: new Date() });
-    res.json(tx);
+    return OK(res, tx);
   } catch (e) {
     if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* ============================ RULES & GL MAPPING ============================ */
+/* -----------------------------------------------------------------------------
+ * RULES & GL MAPPING
+ * ---------------------------------------------------------------------------*/
 /**
- * Store a single JSON blob in Settings to map bank/cash transaction types to GL accounts.
- * Shape suggestion:
+ * Settings blob shape suggestion:
  * {
  *   bank: { deposit: "1000", withdrawal: "2000", fee: "6xxx", ... },
  *   cash: { deposit: "1000", withdrawal: "2000", ... }
  * }
  */
 
-// GET /banks/rules/gl-mapping
-router.get('/rules/gl-mapping', async (req, res) => {
+async function getGLMap(req, res) {
   const { Setting } = m(req);
   const tenantId = tenantIdFrom(req);
-  if (!Setting) return res.json({ bank: {}, cash: {} });
+  if (!Setting) return OK(res, { bank: {}, cash: {} });
   try {
     const row = await Setting.findOne({ where: { key: 'bank.glMapping', tenantId } });
     const value = row?.value ? (typeof row.value === 'string' ? JSON.parse(row.value) : row.value) : { bank: {}, cash: {} };
-    res.json(value);
+    return OK(res, value);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
-});
+}
 
-// PUT /banks/rules/gl-mapping
-router.put('/rules/gl-mapping', async (req, res) => {
+async function putGLMap(req, res) {
   const { Setting } = m(req);
   const tenantId = tenantIdFrom(req);
   if (!Setting) return res.status(500).json({ error: 'Setting model unavailable' });
@@ -1092,19 +1192,25 @@ router.put('/rules/gl-mapping', async (req, res) => {
       defaults: { key: 'bank.glMapping', tenantId, value }
     });
     if (!created) await row.update({ value });
-    res.json({ ok: true, value });
+    return OK(res, { ok: true, value });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
-});
+}
 
-/* ============================== IMPORT BANK CSV ============================= */
-/**
- * UI can parse CSV client-side, then call this endpoint with an array of rows.
- * Each row: { occurredAt, amount, type, direction?, reference?, description?, status?, currency? }
- * We’ll apply defaults and create transactions in a batch.
- */
+// Canonical paths under /banks/...
+router.get('/rules/gl-mapping', getGLMap);
+router.put('/rules/gl-mapping', putGLMap);
 
+// ✅ Extra aliases to avoid frontend path mismatches (prevents 404)
+// If frontend calls /rules/gl-mapping directly (without /banks), mount these
+// when this router is attached at / (optional, harmless).
+router.get('/gl-mapping', getGLMap);
+router.put('/gl-mapping', putGLMap);
+
+/* -----------------------------------------------------------------------------
+ * IMPORT BANK CSV
+ * ---------------------------------------------------------------------------*/
 // POST /banks/:id/import
 router.post('/:id/import', async (req, res) => {
   const { Bank, BankTransaction, sequelize } = m(req);
@@ -1122,7 +1228,8 @@ router.post('/:id/import', async (req, res) => {
 
     const t = await sequelize.transaction();
     try {
-      const created = [];
+      let createdCount = 0;
+
       for (const r of rows) {
         const type = String(r.type || 'other');
         const direction = r.direction ||
@@ -1136,7 +1243,7 @@ router.post('/:id/import', async (req, res) => {
           type,
           amount: Number(r.amount || 0),
           currency: (r.currency || bank.currency || 'TZS').toUpperCase(),
-          occurredAt: r.occurredAt ? new Date(r.occurredAt) : new Date(),
+          occurredAt: parseDateSafe(r.occurredAt) || new Date(),
           reference: r.reference || null,
           bankRef: r.bankRef || null,
           description: r.description || null,
@@ -1153,20 +1260,23 @@ router.post('/:id/import', async (req, res) => {
           return res.status(400).json({ error: 'Each row amount must be > 0' });
         }
 
-        created.push(await BankTransaction.create(payload, { transaction: t }));
+        await BankTransaction.create(payload, { transaction: t });
+        createdCount += 1;
       }
 
       await t.commit();
-      res.status(201).json({ ok: true, created: created.length });
+      return CREATED(res, { ok: true, created: createdCount });
     } catch (e) {
       await t.rollback();
       if (isMissingTable(e)) return respondMissingTable(res, 'bank transactions');
-      res.status(500).json({ error: e.message });
+      return res.status(500).json({ error: e.message });
     }
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 });
 
-/* --------------------------------- EXPORT ---------------------------------- */
+/* -----------------------------------------------------------------------------
+ * Export
+ * ---------------------------------------------------------------------------*/
 module.exports = router;
