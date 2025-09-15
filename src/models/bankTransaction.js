@@ -24,10 +24,11 @@ module.exports = (sequelize, DataTypes) => {
   }, {
     tableName: 'bank_transactions',
     schema: 'public',
-    underscored: true,     // keep snake_case for non-timestamp fields
+    underscored: true,
     timestamps: true,
-    createdAt: 'createdAt',  // <-- tell Sequelize your DB uses camelCase
+    createdAt: 'createdAt',
     updatedAt: 'updatedAt',
   });
+
   return BankTransaction;
 };

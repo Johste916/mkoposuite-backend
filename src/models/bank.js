@@ -7,12 +7,16 @@ module.exports = (sequelize, DataTypes) => {
     code:            { type: DataTypes.STRING(64), allowNull: true },
     branch:          { type: DataTypes.STRING(160), allowNull: true },
     accountName:     { type: DataTypes.STRING(160), allowNull: true, field: 'account_name' },
-    accountNumber:   { type: DataTypes.STRING(64), allowNull: true, field: 'account_number' },
+    accountNumber:   { type: DataTypes.STRING(64),  allowNull: true, field: 'account_number' },
+
+    // legacy mirrors (DB might still have them)
     accountNameLegacy:   { type: DataTypes.STRING(160), allowNull: true, field: 'accountName' },
     accountNumberLegacy: { type: DataTypes.STRING(64),  allowNull: true, field: 'accountNumber' },
+
     swift:           { type: DataTypes.STRING(64), allowNull: true },
     phone:           { type: DataTypes.STRING(64), allowNull: true },
     address:         { type: DataTypes.TEXT, allowNull: true },
+
     currency:        { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS' },
     openingBalance:  { type: DataTypes.DECIMAL(18,2), allowNull: false, defaultValue: 0, field: 'opening_balance' },
     currentBalance:  { type: DataTypes.DECIMAL(18,2), allowNull: false, defaultValue: 0, field: 'current_balance' },
@@ -21,10 +25,11 @@ module.exports = (sequelize, DataTypes) => {
   }, {
     tableName: 'banks',
     schema: 'public',
-    underscored: true,
+    underscored: true,        // keep snake_case for non-timestamps
     timestamps: true,
-    createdAt: 'createdAt',
+    createdAt: 'createdAt',   // <-- explicit camelCase timestamp columns in DB
     updatedAt: 'updatedAt',
   });
+
   return Bank;
 };

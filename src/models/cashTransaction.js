@@ -27,5 +27,6 @@ module.exports = (sequelize, DataTypes) => {
     createdAt: 'createdAt',
     updatedAt: 'updatedAt',
   });
+
   return CashTransaction;
 };
