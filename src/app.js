@@ -210,6 +210,23 @@ function safeLoadRoutes(relPathFromSrc, dummyRouter) {
   return dummyRouter;
 }
 
+/* ✅ Helper: prefer first existing router path, with fallback */
+function safeLoadFirst(paths, dummyRouter) {
+  for (const p of paths) {
+    try {
+      const mod = require(p);
+      return mod && mod.default ? mod.default : mod;
+    } catch (e) {
+      if (e.code !== 'MODULE_NOT_FOUND') {
+        console.warn(`⚠️  Failed loading ${p}: ${e.message}`);
+        if (FORCE_REAL) throw e;
+      }
+    }
+  }
+  console.warn(`⚠️  Using dummy routes for [${paths.join(', ')}] — create one of these files to enable real API.`);
+  return dummyRouter;
+}
+
 /* --------------------- Shared in-memory stores for fallbacks --------------- */
 const SUPPORT_STORE = { TICKETS: new Map(), nextId: 1 };
 const SMS_LOGS = [];
@@ -799,7 +816,13 @@ const repaymentRoutes       = safeLoadRoutes('./routes/repaymentRoutes', makeDum
 const reportRoutes          = safeLoadRoutes('./routes/reportRoutes', makeDummyRouter({}));
 
 const settingRoutes         = safeLoadRoutes('./routes/settingRoutes', makeDummyRouter({}));
-const userRoutes            = safeLoadRoutes('./routes/userRoutes', makeDummyRouter([]));
+
+/* ✅ PREFER usersRoutes.js, fallback to userRoutes.js (prevents /users 404) */
+const userRoutes            = safeLoadFirst(
+  ['./routes/usersRoutes', './routes/userRoutes'],
+  makeDummyRouter([])
+);
+
 const roleRoutes            = safeLoadRoutes('./routes/roleRoutes', makeDummyRouter([])); // ✅ fixed
 const branchRoutes          = safeLoadRoutes('./routes/branchRoutes', makeDummyRouter([]));
 const userRoleRoutes        = safeLoadRoutes('./routes/userRoleRoutes', makeDummyRouter([]));
@@ -1074,7 +1097,7 @@ app.use('/api/admin/types',      ...auth, ...active, adminTypesRoutes);
 app.use('/api/admin/templates',  ...auth, ...active, adminTemplatesRoutes);
 
 /* Other core mounts */
-app.use('/api/users',          ...auth, ...active, userRoutes);
+app.use('/api/users',          ...auth, ...active, userRoutes);   // ← now prefers ./routes/usersRoutes.js
 app.use('/api/roles',          ...auth, ...active, roleRoutes);
 app.use('/api/branches',       ...auth, ...active, branchRoutes);
 app.use('/api/user-roles',     ...auth, ...active, userRoleRoutes);

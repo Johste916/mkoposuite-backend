@@ -1,3 +1,4 @@
+// backend/src/models/branch.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
@@ -8,27 +9,20 @@ module.exports = (sequelize, DataTypes) => {
       name:     { type: DataTypes.STRING, allowNull: false },
       code:     { type: DataTypes.STRING },
 
-      // ✅ New columns you said you'll add in DB
-      phone:    { type: DataTypes.STRING, allowNull: true },   // column: phone
-      address:  { type: DataTypes.TEXT,   allowNull: true },   // column: address
+      phone:    { type: DataTypes.STRING, allowNull: true },
+      address:  { type: DataTypes.TEXT,   allowNull: true },
 
-      // DB has "manager" (not manager_id). Map to a friendly attribute if you need it:
       managerId:{ type: DataTypes.STRING, field: 'manager', allowNull: true },
 
-      // DB has tenant_id
       tenantId: { type: DataTypes.STRING, field: 'tenant_id', allowNull: true },
     },
     {
       tableName: 'branches',
       timestamps: true,
-      // ✅ Your table uses snake_case timestamps
       createdAt: 'created_at',
       updatedAt: 'updated_at',
-
-      // ✅ Your table already has camel-cased "deletedAt"
       paranoid: true,
       deletedAt: 'deletedAt',
-
       underscored: false,
     }
   );

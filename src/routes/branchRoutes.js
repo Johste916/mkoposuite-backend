@@ -1,4 +1,4 @@
-// backend/routes/branchRoutes.js
+// backend/src/routes/branchRoutes.js
 'use strict';
 const express = require('express');
 const router = express.Router();
@@ -8,13 +8,8 @@ try { db = require('../models'); } catch {}
 const { sequelize } = db || {};
 const { Op } = require('sequelize');
 
-const { allow } = require('../middleware/permissions') || {};
-// Optional: your real auth middleware. Fallback if not available.
-const requireAuth = (req, res, next) => {
-  if (req.user) return next();
-  // if you attach user via JWT middleware elsewhere, keep that. This is just a fallback.
-  return res.status(401).json({ error: 'Unauthorized' });
-};
+const { allow } = (() => { try { return require('../middleware/permissions'); } catch { return {}; } })();
+const requireAuth = (req, res, next) => (req.user ? next() : res.status(401).json({ error: 'Unauthorized' }));
 
 const getModel = (name) => {
   const m = db?.[name] || db?.sequelize?.models?.[name];
@@ -23,7 +18,6 @@ const getModel = (name) => {
 };
 
 const tenantFilter = (model, req) => {
-  // prefer snake_case in DB. We support both.
   const key = model?.rawAttributes?.tenant_id ? 'tenant_id'
             : model?.rawAttributes?.tenantId ? 'tenantId'
             : null;
@@ -45,10 +39,7 @@ router.get(
       const Branch = getModel('Branch');
       const where = { ...tenantFilter(Branch, req) };
       if (req.query.q) where.name = { [Op.iLike]: `%${req.query.q}%` };
-      const rows = await Branch.findAll({
-        where,
-        order: [['name', 'ASC']],
-      });
+      const rows = await Branch.findAll({ where, order: [['name', 'ASC']] });
       res.json({ items: rows });
     } catch (e) { next(e); }
   }
@@ -120,10 +111,8 @@ router.post(
       const branch = await Branch.findOne({ where: { id: req.params.id, ...tenantFilter(Branch, req) } });
       if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
-      // upsert user_branches (raw SQL for portability)
       const tenantClause = branch.tenant_id ? 'tenant_id' : (branch.tenantId ? 'tenantId' : null);
       for (const uid of userIds) {
-        // upsert pattern
         const sql = `
           insert into public.user_branches (user_id, branch_id${tenantClause ? `, ${tenantClause}` : ''})
           values ($1, $2${tenantClause ? `, $3` : ''})
@@ -149,7 +138,6 @@ router.get(
   allow ? allow('branches:view') : (_req, _res, next) => next(),
   async (req, res, next) => {
     try {
-      // Works even if you don’t have a Sequelize model for user_branches
       const id = Number(req.params.id);
       const rows = await sequelize.query(
         `
@@ -177,10 +165,8 @@ router.get(
       const to   = req.query.to || null;
       const id   = Number(req.params.id);
 
-      // Defensive defaults if optional tables don’t exist yet
       let staffCount = 0, expenses = 0, loansOut = 0, collections = 0;
 
-      // Staff count (tolerate missing table)
       try {
         const r = await sequelize.query(
           `select count(*)::int as c from public.user_branches where branch_id = $1`,
@@ -189,7 +175,6 @@ router.get(
         staffCount = r?.[0]?.c || 0;
       } catch {}
 
-      // Expenses total
       try {
         const r = await sequelize.query(
           `
@@ -204,7 +189,6 @@ router.get(
         expenses = Number(r?.[0]?.total || 0);
       } catch {}
 
-      // Loans disbursed (principal)
       try {
         const r = await sequelize.query(
           `
@@ -220,7 +204,6 @@ router.get(
         loansOut = Number(r?.[0]?.total || 0);
       } catch {}
 
-      // Collections received
       try {
         const r = await sequelize.query(
           `
