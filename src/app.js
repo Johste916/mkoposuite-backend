@@ -819,7 +819,7 @@ const settingRoutes         = safeLoadRoutes('./routes/settingRoutes', makeDummy
 
 /* ✅ PREFER usersRoutes.js, fallback to userRoutes.js (prevents /users 404) */
 const userRoutes            = safeLoadFirst(
-  ['./routes/userRoutes', './routes/userRoutes'],
+  ['./routes/usersRoutes', './routes/userRoutes'],
   makeDummyRouter([])
 );
 
@@ -1002,7 +1002,6 @@ if (PUBLIC_SIDEBAR_ENABLED) {
   app.get('/api/settings/sidebar', async (req, res) => {
     // If you later add a real controller, prefer that and fall back to this payload.
     try {
-      // Example: try a controller if present (non-breaking)
       const controller = require('./controllers/settingController'); // optional
       if (controller?.publicSidebar) {
         return controller.publicSidebar(req, res);
@@ -1097,7 +1096,7 @@ app.use('/api/admin/types',      ...auth, ...active, adminTypesRoutes);
 app.use('/api/admin/templates',  ...auth, ...active, adminTemplatesRoutes);
 
 /* Other core mounts */
-app.use('/api/users',          ...auth, ...active, userRoutes);   // ← now prefers ./routes/usersRoutes.js
+app.use('/api/users',          ...auth, ...active, userRoutes);   // ← now tries plural then singular
 app.use('/api/roles',          ...auth, ...active, roleRoutes);
 app.use('/api/branches',       ...auth, ...active, branchRoutes);
 app.use('/api/user-roles',     ...auth, ...active, userRoleRoutes);
