@@ -1,5 +1,6 @@
+// backend/src/controllers/branchController.js
 'use strict';
-const { Op, Sequelize } = require('sequelize');
+const { Op } = require('sequelize');
 
 let db = {};
 try { db = require('../models'); } catch {}
@@ -9,246 +10,175 @@ const getModel = (name) => {
   return m;
 };
 const tenantFilter = (model, req) => {
-  const key = model?.rawAttributes?.tenantId ? 'tenantId'
-            : model?.rawAttributes?.tenant_id ? 'tenant_id' : null;
+  const hasTenant =
+    model?.rawAttributes?.tenantId || model?.rawAttributes?.tenant_id || model?.rawAttributes?.tenant_id;
   const tenantId =
     req?.tenant?.id ||
     req?.headers?.['x-tenant-id'] ||
     process.env.DEFAULT_TENANT_ID ||
     null;
-  return key && tenantId ? { [key]: tenantId } : {};
+  return hasTenant && tenantId ? { tenantId } : {};
 };
 
-// --- Helpers ---------------------------------------------------------------
-async function safeCount(table, whereSql, replacements = {}) {
-  const sequelize = db.sequelize;
-  try {
-    const [rows] = await sequelize.query(
-      `select count(*)::bigint as n from ${table} ${whereSql || ''}`, { replacements }
-    );
-    return Number(rows?.[0]?.n || 0);
-  } catch { return 0; }
-}
-async function safeSum(table, expr, whereSql, replacements = {}) {
-  const sequelize = db.sequelize;
-  try {
-    const [rows] = await sequelize.query(
-      `select coalesce(sum(${expr}),0)::numeric as s from ${table} ${whereSql || ''}`, { replacements }
-    );
-    return Number(rows?.[0]?.s || 0);
-  } catch { return 0; }
-}
+const clean = (v) => (typeof v === 'string' ? v.trim() : v);
+const toNull = (v) => {
+  if (v === undefined || v === null) return null;
+  if (typeof v === 'string' && v.trim() === '') return null;
+  return v;
+};
 
-// --- CRUD -------------------------------------------------------------------
+/* ------------------------------- LIST ------------------------------------- */
 exports.list = async (req, res, next) => {
   try {
     const Branch = getModel('Branch');
     const where = { ...tenantFilter(Branch, req) };
-    if (req.query.status) where.status = req.query.status;
+    if (req.query.q) where.name = { [Op.iLike]: `%${String(req.query.q).trim()}%` };
     const rows = await Branch.findAll({ where, order: [['name', 'ASC']] });
-    res.json({ items: rows });
+    res.setHeader('X-Total-Count', String(rows.length));
+    res.json(rows);
   } catch (e) { next(e); }
 };
 
+/* ------------------------------ CREATE ------------------------------------ */
 exports.create = async (req, res, next) => {
   try {
     const Branch = getModel('Branch');
+
     const rec = {
-      name: req.body?.name,
-      code: req.body?.code,
-      email: req.body?.email || null,
-      phone: req.body?.phone || null,
-      address: req.body?.address || null,
-      status: req.body?.status || 'active',
-      geoLat: req.body?.geoLat || null,
-      geoLng: req.body?.geoLng || null,
+      name: clean(req.body?.name),
+      code: String(req.body?.code ?? '').trim(),   // keep as string
+      phone: toNull(clean(req.body?.phone)),
+      address: toNull(clean(req.body?.address)),
+      managerId: toNull(clean(req.body?.managerId)),
       ...tenantFilter(Branch, req),
     };
+
     if (!rec.name || !rec.code) {
       return res.status(400).json({ error: 'name and code are required' });
     }
+
     const row = await Branch.create(rec);
     res.status(201).json(row);
   } catch (e) { next(e); }
 };
 
+/* ------------------------------- GET ONE ---------------------------------- */
 exports.getOne = async (req, res, next) => {
   try {
     const Branch = getModel('Branch');
-    const where = { id: req.params.id, ...tenantFilter(Branch, req) };
+    const id = Number(String(req.params.id || '').trim());
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid branch id' });
+
+    const where = { id, ...tenantFilter(Branch, req) };
     const row = await Branch.findOne({ where });
     if (!row) return res.status(404).json({ error: 'Branch not found' });
     res.json(row);
   } catch (e) { next(e); }
 };
 
+/* ------------------------------- UPDATE ----------------------------------- */
 exports.update = async (req, res, next) => {
   try {
     const Branch = getModel('Branch');
-    const where = { id: req.params.id, ...tenantFilter(Branch, req) };
+    const id = Number(String(req.params.id || '').trim());
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid branch id' });
+
+    const where = { id, ...tenantFilter(Branch, req) };
     const row = await Branch.findOne({ where });
     if (!row) return res.status(404).json({ error: 'Branch not found' });
-    await row.update(req.body || {});
+
+    const patch = {
+      name: clean(req.body?.name),
+      code: req.body?.code !== undefined ? String(req.body.code).trim() : undefined,
+      phone: toNull(clean(req.body?.phone)),
+      address: toNull(clean(req.body?.address)),
+      managerId: toNull(clean(req.body?.managerId)),
+    };
+
+    await row.update(patch);
     res.json(row);
   } catch (e) { next(e); }
 };
 
+/* ------------------------------- DELETE ----------------------------------- */
 exports.remove = async (req, res, next) => {
   try {
     const Branch = getModel('Branch');
-    const where = { id: req.params.id, ...tenantFilter(Branch, req) };
+    const id = Number(String(req.params.id || '').trim());
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid branch id' });
+
+    const where = { id, ...tenantFilter(Branch, req) };
     const n = await Branch.destroy({ where });
     if (!n) return res.status(404).json({ error: 'Branch not found' });
     res.json({ ok: true });
   } catch (e) { next(e); }
 };
 
-// --- Assignments ------------------------------------------------------------
-// Staff (user <-> branch)
+/* --------------------------- STAFF ASSIGNMENTS ----------------------------- */
 exports.listStaff = async (req, res, next) => {
   try {
     const sequelize = db.sequelize;
-    const branchId = Number(req.params.id);
-    const tenantId = req?.headers?.['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || null;
-    const [rows] = await sequelize.query(`
+    const branchId = Number(String(req.params.id || '').trim());
+    if (!Number.isFinite(branchId)) return res.status(400).json({ error: 'Invalid branch id' });
+
+    const rows = await sequelize.query(
+      `
       select u.id, coalesce(u.name, (u."firstName"||' '||u."lastName")) as name, u.email, u.role
-      from public.users u
-      join public.user_branches ub on ub.user_id = u.id
-      where ub.branch_id = :branchId
-        ${tenantId ? 'and coalesce(ub.tenant_id, :tenantId) = :tenantId' : ''}
+      from public.user_branches ub
+      join public.Users u on u.id = ub.user_id
+      where ub.branch_id = $1
       order by name asc
-    `, { replacements: { branchId, tenantId } });
+      `,
+      { bind: [branchId], type: sequelize.QueryTypes.SELECT }
+    );
     res.json({ items: rows || [] });
   } catch (e) { next(e); }
 };
 
 exports.assignStaff = async (req, res, next) => {
+  const t = await (db.sequelize?.transaction?.() ?? { commit: async()=>{}, rollback: async()=>{} });
   try {
     const sequelize = db.sequelize;
-    const branchId = Number(req.params.id);
-    const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [];
-    const tenantId = req?.headers?.['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || null;
+    const branchId = Number(String(req.params.id || '').trim());
+    if (!Number.isFinite(branchId)) return res.status(400).json({ error: 'Invalid branch id' });
 
+    const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds.filter(Boolean) : [];
     if (!userIds.length) return res.status(400).json({ error: 'userIds[] required' });
 
-    await sequelize.transaction(async (t) => {
-      for (const uid of userIds) {
-        await sequelize.query(`
-          insert into public.user_branches (user_id, branch_id, tenant_id)
-          values (:uid, :branchId, :tenantId)
-          on conflict (user_id, branch_id) do update set tenant_id = excluded.tenant_id
-        `, { replacements: { uid, branchId, tenantId }, transaction: t });
-      }
-    });
+    const tenantId = req?.headers?.['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || null;
 
-    res.status(201).json({ ok: true });
-  } catch (e) { next(e); }
+    for (const uid of userIds) {
+      await sequelize.query(
+        `
+          insert into public.user_branches (user_id, branch_id, tenant_id)
+          values ($1, $2, $3)
+          on conflict (user_id, branch_id)
+          do update set tenant_id = excluded.tenant_id
+        `,
+        { bind: [uid, branchId, tenantId], transaction: t }
+      );
+    }
+
+    await t.commit();
+    res.json({ ok: true, assigned: userIds.length });
+  } catch (e) {
+    await t.rollback();
+    next(e);
+  }
 };
 
 exports.unassignStaff = async (req, res, next) => {
   try {
     const sequelize = db.sequelize;
-    const branchId = Number(req.params.id);
-    const userId = Number(req.params.userId);
-    await sequelize.query(`delete from public.user_branches where user_id = :userId and branch_id = :branchId`,
-      { replacements: { userId, branchId } });
+    const branchId = Number(String(req.params.id || '').trim());
+    const userId = String(req.params.userId || '').trim();
+    if (!Number.isFinite(branchId) || !userId) {
+      return res.status(400).json({ error: 'Invalid ids' });
+    }
+    await sequelize.query(
+      `delete from public.user_branches where user_id = $1 and branch_id = $2`,
+      { bind: [userId, branchId] }
+    );
     res.json({ ok: true });
-  } catch (e) { next(e); }
-};
-
-// Borrowers (borrower <-> branch)
-exports.listBorrowers = async (req, res, next) => {
-  try {
-    const sequelize = db.sequelize;
-    const branchId = Number(req.params.id);
-    const [rows] = await sequelize.query(`
-      select b.id, b.name, b.phone
-      from public.borrowers b
-      join public.borrower_branches bb on bb.borrower_id = b.id
-      where bb.branch_id = :branchId
-      order by b.name asc
-    `, { replacements: { branchId } });
-    res.json({ items: rows || [] });
-  } catch (e) { next(e); }
-};
-
-exports.assignBorrowers = async (req, res, next) => {
-  try {
-    const sequelize = db.sequelize;
-    const branchId = Number(req.params.id);
-    const borrowerIds = Array.isArray(req.body?.borrowerIds) ? req.body.borrowerIds : [];
-    const tenantId = req?.headers?.['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || null;
-    if (!borrowerIds.length) return res.status(400).json({ error: 'borrowerIds[] required' });
-
-    await sequelize.transaction(async (t) => {
-      for (const bid of borrowerIds) {
-        await sequelize.query(`
-          insert into public.borrower_branches (borrower_id, branch_id, tenant_id)
-          values (:bid, :branchId, :tenantId)
-          on conflict (borrower_id, branch_id) do nothing
-        `, { replacements: { bid, branchId, tenantId }, transaction: t });
-      }
-    });
-
-    res.status(201).json({ ok: true });
-  } catch (e) { next(e); }
-};
-
-exports.unassignBorrower = async (req, res, next) => {
-  try {
-    const sequelize = db.sequelize;
-    const branchId = Number(req.params.id);
-    const borrowerId = Number(req.params.borrowerId);
-    await sequelize.query(`
-      delete from public.borrower_branches where borrower_id = :borrowerId and branch_id = :branchId
-    `, { replacements: { borrowerId, branchId } });
-    res.json({ ok: true });
-  } catch (e) { next(e); }
-};
-
-// --- KPIs / Stats -----------------------------------------------------------
-exports.stats = async (req, res, next) => {
-  try {
-    const branchId = Number(req.params.id);
-    const from = req.query.from || null;
-    const to   = req.query.to   || null;
-
-    // time filter snippets (used by safeSum/safeCount)
-    const between = (col) =>
-      from && to ? ` and ${col} >= :from and ${col} < (:to::date + interval '1 day')`
-      : from     ? ` and ${col} >= :from`
-      : to       ? ` and ${col} < (:to::date + interval '1 day')`
-                 : '';
-
-    // staff count
-    const staffCount = await safeCount('public.user_branches ub', 'where ub.branch_id = :branchId', { branchId });
-
-    // borrowers count
-    const borrowers = await safeCount('public.borrower_branches bb', 'where bb.branch_id = :branchId', { branchId });
-
-    // portfolio & disbursements, repayments (tolerate missing tables)
-    const disbursed = await safeSum(
-      'public.loans l',
-      'l.principal_amount',
-      `where l.branch_id = :branchId ${between('l.disbursement_date')}`,
-      { branchId, from, to }
-    );
-    const collected = await safeSum(
-      'public.repayments r',
-      'r.amount',
-      `where r.branch_id = :branchId ${between('r.date')}`,
-      { branchId, from, to }
-    );
-    const expenses  = await safeSum(
-      'public.expenses e',
-      'e.amount',
-      `where e.branch_id = :branchId ${between('e.date')}`,
-      { branchId, from, to }
-    );
-
-    res.json({
-      staffCount, borrowers, disbursed, collected, expenses,
-      period: { from, to }
-    });
   } catch (e) { next(e); }
 };
