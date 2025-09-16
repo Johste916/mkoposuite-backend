@@ -17,7 +17,7 @@ const getModel = (name) => {
   return m;
 };
 
-/** Safe tenant filter (same logic as controller) */
+/** Safe tenant filter (same logic used elsewhere) */
 function safeTenantFilter(model, req) {
   if (!model?.rawAttributes) return {};
   const attrKey =
@@ -46,6 +46,8 @@ function safeTenantFilter(model, req) {
     return { [attrKey]: String(incoming) };
   }
 }
+
+const isUuid = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 
 /* ============================== LIST BRANCHES ============================== */
 router.get(
@@ -126,20 +128,29 @@ router.post(
         return res.status(400).json({ error: 'userIds[] required' });
       }
 
-      // We don't try to pass tenant_id here to avoid type mismatches.
-      for (const uid of userIds) {
+      const branchId = Number(req.params.id);
+      const good = [];
+      const skipped = [];
+
+      for (const raw of userIds) {
+        const uid = String(raw);
+        if (isUuid(uid)) good.push(uid);
+        else skipped.push(uid);
+      }
+
+      for (const uid of good) {
         await sequelize.query(
           `
           insert into public.user_branches_rt (user_id, branch_id)
           values ($1::uuid, $2::int)
           on conflict (user_id, branch_id) do nothing
           `,
-          { bind: [uid, Number(req.params.id)], transaction: t }
+          { bind: [uid, branchId], transaction: t }
         );
       }
 
       await t.commit();
-      res.json({ ok: true, assigned: userIds.length });
+      return res.json({ ok: true, assigned: good.length, skipped });
     } catch (e) {
       await t.rollback();
       next(e);
@@ -166,6 +177,26 @@ router.get(
         { bind: [id], type: sequelize.QueryTypes.SELECT }
       );
       res.json({ items: rows });
+    } catch (e) { next(e); }
+  }
+);
+
+/* ============================== UNASSIGN STAFF ============================= */
+router.delete(
+  '/:id/staff/:userId',
+  requireAuth,
+  allow ? allow('branches:assign') : (_req, _res, next) => next(),
+  async (req, res, next) => {
+    try {
+      const branchId = Number(req.params.id);
+      const userId = String(req.params.userId);
+      if (!isUuid(userId)) return res.json({ ok: true, skipped: userId });
+
+      await sequelize.query(
+        `delete from public.user_branches_rt where user_id = $1::uuid and branch_id = $2::int`,
+        { bind: [userId, branchId] }
+      );
+      res.json({ ok: true });
     } catch (e) { next(e); }
   }
 );
