@@ -17,35 +17,17 @@ const getModel = (name) => {
   return m;
 };
 
-/** Safe tenant filter (same logic used elsewhere) */
-function safeTenantFilter(model, req) {
-  if (!model?.rawAttributes) return {};
-  const attrKey =
-    model.rawAttributes.tenantId ? 'tenantId' :
-    model.rawAttributes.tenant_id ? 'tenant_id' :
+const tenantFilter = (model, req) => {
+  const key = model?.rawAttributes?.tenant_id ? 'tenant_id'
+            : model?.rawAttributes?.tenantId ? 'tenantId'
+            : null;
+  const tenantId =
+    req?.tenant?.id ||
+    req?.headers?.['x-tenant-id'] ||
+    process.env.DEFAULT_TENANT_ID ||
     null;
-  if (!attrKey) return {};
-
-  const rawTypeKey = model.rawAttributes[attrKey]?.type?.key || '';
-  const wantsNumber = /INT|DECIMAL|BIGINT|FLOAT|DOUBLE|NUMERIC/.test(rawTypeKey);
-
-  const incoming =
-    req?.tenant?.id ??
-    req?.headers?.['x-tenant-id'] ??
-    process.env.DEFAULT_TENANT_ID ??
-    null;
-
-  if (incoming == null || incoming === '') return {};
-
-  const isNumeric = typeof incoming === 'number' || /^\d+$/.test(String(incoming));
-
-  if (wantsNumber) {
-    if (!isNumeric) return {};
-    return { [attrKey]: Number(incoming) };
-  } else {
-    return { [attrKey]: String(incoming) };
-  }
-}
+  return key && tenantId ? { [key]: tenantId } : {};
+};
 
 const isUuid = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 
@@ -57,7 +39,7 @@ router.get(
   async (req, res, next) => {
     try {
       const Branch = getModel('Branch');
-      const where = { ...safeTenantFilter(Branch, req) };
+      const where = { ...tenantFilter(Branch, req) };
       if (req.query.q) where.name = { [Op.iLike]: `%${req.query.q}%` };
       const rows = await Branch.findAll({ where, order: [['name', 'ASC']] });
       res.setHeader('X-Total-Count', String(rows.length));
@@ -74,7 +56,7 @@ router.post(
   async (req, res, next) => {
     try {
       const Branch = getModel('Branch');
-      const rec = { ...req.body, ...safeTenantFilter(Branch, req) };
+      const rec = { ...req.body, ...tenantFilter(Branch, req) };
       if (!rec.name) return res.status(400).json({ error: 'name is required' });
       const row = await Branch.create(rec);
       res.status(201).json(row);
@@ -90,7 +72,7 @@ router.patch(
   async (req, res, next) => {
     try {
       const Branch = getModel('Branch');
-      const where = { id: req.params.id, ...safeTenantFilter(Branch, req) };
+      const where = { id: req.params.id, ...tenantFilter(Branch, req) };
       const row = await Branch.findOne({ where });
       if (!row) return res.status(404).json({ error: 'Branch not found' });
       await row.update(req.body || {});
@@ -107,7 +89,7 @@ router.delete(
   async (req, res, next) => {
     try {
       const Branch = getModel('Branch');
-      const where = { id: req.params.id, ...safeTenantFilter(Branch, req) };
+      const where = { id: req.params.id, ...tenantFilter(Branch, req) };
       const n = await Branch.destroy({ where });
       if (!n) return res.status(404).json({ error: 'Branch not found' });
       res.json({ ok: true });
@@ -116,6 +98,12 @@ router.delete(
 );
 
 /* ============================== ASSIGN STAFF =============================== */
+/**
+ * IMPORTANT:
+ * - Writes go to public.user_branches_rt (TABLE)
+ * - public.user_branches is a VIEW over that table (reads only)
+ * - Types: user_id::uuid, branch_id::int
+ */
 router.post(
   '/:id/assign-staff',
   requireAuth,
@@ -123,80 +111,93 @@ router.post(
   async (req, res, next) => {
     const t = await (sequelize?.transaction?.() ?? { commit: async()=>{}, rollback: async()=>{} });
     try {
-      const { userIds } = req.body || {};
-      if (!Array.isArray(userIds) || userIds.length === 0) {
-        return res.status(400).json({ error: 'userIds[] required' });
+      if (!sequelize) throw Object.assign(new Error('DB not initialized'), { status: 500, expose: true });
+
+      const branchId = parseInt(String(req.params.id), 10);
+      if (!Number.isFinite(branchId)) {
+        return res.status(400).json({ error: 'Branch id must be an integer' });
       }
 
-      const branchId = Number(req.params.id);
-      const good = [];
-      const skipped = [];
-
-      for (const raw of userIds) {
-        const uid = String(raw);
-        if (isUuid(uid)) good.push(uid);
-        else skipped.push(uid);
+      const raw = req.body?.userIds;
+      const userIds = Array.isArray(raw) ? raw.filter(Boolean) : [];
+      if (userIds.length === 0) {
+        return res.status(400).json({ error: 'userIds[] required (UUIDs)' });
       }
 
-      for (const uid of good) {
-        await sequelize.query(
-          `
-          insert into public.user_branches_rt (user_id, branch_id)
-          values ($1::uuid, $2::int)
-          on conflict (user_id, branch_id) do nothing
-          `,
-          { bind: [uid, branchId], transaction: t }
-        );
+      // Validate UUIDs early to avoid 22P02
+      const bad = userIds.filter((id) => !isUuid(id));
+      if (bad.length) {
+        return res.status(400).json({
+          error: 'All userIds must be UUIDs (string)',
+          details: { invalid: bad }
+        });
+      }
+
+      // Ensure branch exists (optional but nice)
+      const Branch = getModel('Branch');
+      const branch = await Branch.findOne({ where: { id: branchId } });
+      if (!branch) return res.status(404).json({ error: 'Branch not found' });
+
+      // Insert into the RUNTIME table (NOT the view)
+      // Use ON CONFLICT DO NOTHING on (user_id, branch_id)
+      const sql = `
+        INSERT INTO public.user_branches_rt (user_id, branch_id, created_at)
+        VALUES (:uid::uuid, :bid::int, NOW())
+        ON CONFLICT (user_id, branch_id) DO NOTHING
+      `;
+
+      for (const uid of userIds) {
+        await sequelize.query(sql, {
+          replacements: { uid, bid: branchId },
+          transaction: t
+        });
       }
 
       await t.commit();
-      return res.json({ ok: true, assigned: good.length, skipped });
+      res.json({ ok: true, assigned: userIds.length });
     } catch (e) {
-      await t.rollback();
-      next(e);
+      try { await t.rollback(); } catch {}
+      // bubble with clearer message for common PG codes
+      const code = e?.original?.code || e?.parent?.code;
+      if (code === '22P02') {
+        return next(Object.assign(new Error('Invalid ID type — ensure userIds are UUID strings and branchId is integer.'), { status: 400, expose: true, original: e }));
+      }
+      return next(e);
     }
   }
 );
 
 /* ============================== LIST STAFF ================================= */
+/**
+ * Join the VIEW (user_branches) with users table.
+ * Both sides are UUID for user_id, so no casting needed if your Users.id is UUID.
+ */
 router.get(
   '/:id/staff',
   requireAuth,
   allow ? allow('branches:view') : (_req, _res, next) => next(),
   async (req, res, next) => {
     try {
-      const id = Number(req.params.id);
+      if (!sequelize) throw Object.assign(new Error('DB not initialized'), { status: 500, expose: true });
+      const branchId = parseInt(String(req.params.id), 10);
+      if (!Number.isFinite(branchId)) return res.status(400).json({ error: 'Branch id must be an integer' });
+
       const rows = await sequelize.query(
         `
-        select u.id, coalesce(u.name, (u."firstName" || ' ' || u."lastName")) as name, u.email, u.role
-        from public.user_branches ub
-        join public.users u on u.id = ub.user_id
-        where ub.branch_id = $1
-        order by name asc
+        SELECT
+          u.id,
+          COALESCE(u.name, (u."firstName" || ' ' || u."lastName")) AS name,
+          u.email,
+          u.role
+        FROM public.user_branches ub
+        JOIN "public"."Users" u ON u.id = ub.user_id
+        WHERE ub.branch_id = :bid
+        ORDER BY name ASC
         `,
-        { bind: [id], type: sequelize.QueryTypes.SELECT }
+        { replacements: { bid: branchId }, type: sequelize.QueryTypes.SELECT }
       );
-      res.json({ items: rows });
-    } catch (e) { next(e); }
-  }
-);
 
-/* ============================== UNASSIGN STAFF ============================= */
-router.delete(
-  '/:id/staff/:userId',
-  requireAuth,
-  allow ? allow('branches:assign') : (_req, _res, next) => next(),
-  async (req, res, next) => {
-    try {
-      const branchId = Number(req.params.id);
-      const userId = String(req.params.userId);
-      if (!isUuid(userId)) return res.json({ ok: true, skipped: userId });
-
-      await sequelize.query(
-        `delete from public.user_branches_rt where user_id = $1::uuid and branch_id = $2::int`,
-        { bind: [userId, branchId] }
-      );
-      res.json({ ok: true });
+      res.json({ items: rows || [] });
     } catch (e) { next(e); }
   }
 );
