@@ -5,20 +5,18 @@ module.exports = (sequelize, DataTypes) => {
   const Branch = sequelize.define(
     'Branch',
     {
-      id:       { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-      name:     { type: DataTypes.STRING, allowNull: false },
-      code:     { type: DataTypes.STRING, allowNull: false },
+      id:        { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+      name:      { type: DataTypes.STRING, allowNull: false },
+      code:      { type: DataTypes.STRING },
 
-      phone:    { type: DataTypes.STRING, allowNull: true },
-      address:  { type: DataTypes.TEXT,   allowNull: true },
+      phone:     { type: DataTypes.TEXT,   allowNull: true },
+      address:   { type: DataTypes.TEXT,   allowNull: true },
 
-      // keep compatibility with your existing field name mapping
-      managerId:{ type: DataTypes.STRING, field: 'manager', allowNull: true },
+      // DB column is "manager" (varchar)
+      managerId: { type: DataTypes.STRING, field: 'manager', allowNull: true },
 
-      tenantId: { type: DataTypes.STRING, field: 'tenant_id', allowNull: true },
-
-      // support paranoid
-      deletedAt: { type: DataTypes.DATE, allowNull: true },
+      // IMPORTANT: DB column is bigint. Use BIGINT so Sequelize knows it's numeric.
+      tenantId:  { type: DataTypes.BIGINT, field: 'tenant_id', allowNull: true },
     },
     {
       tableName: 'branches',
