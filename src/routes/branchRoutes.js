@@ -29,7 +29,8 @@ const tenantFilter = (model, req) => {
   return key && tenantId ? { [key]: tenantId } : {};
 };
 
-const isUuid = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+const isUuid = (v) => typeof v === 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 
 /* ============================== LIST BRANCHES ============================== */
 router.get(
@@ -99,10 +100,9 @@ router.delete(
 
 /* ============================== ASSIGN STAFF =============================== */
 /**
- * IMPORTANT:
- * - Writes go to public.user_branches_rt (TABLE)
- * - public.user_branches is a VIEW over that table (reads only)
- * - Types: user_id::uuid, branch_id::int
+ * Writes go to public.user_branches_rt (TABLE).
+ * public.user_branches is a VIEW for reads.
+ * Types: user_id::uuid, branch_id::int
  */
 router.post(
   '/:id/assign-staff',
@@ -124,43 +124,41 @@ router.post(
         return res.status(400).json({ error: 'userIds[] required (UUIDs)' });
       }
 
-      // Validate UUIDs early to avoid 22P02
-      const bad = userIds.filter((id) => !isUuid(id));
-      if (bad.length) {
+      const invalid = userIds.filter((id) => !isUuid(id));
+      if (invalid.length) {
         return res.status(400).json({
-          error: 'All userIds must be UUIDs (string)',
-          details: { invalid: bad }
+          error: 'All userIds must be UUID strings',
+          details: { invalid }
         });
       }
 
-      // Ensure branch exists (optional but nice)
+      // Ensure branch exists
       const Branch = getModel('Branch');
       const branch = await Branch.findOne({ where: { id: branchId } });
       if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
-      // Insert into the RUNTIME table (NOT the view)
-      // Use ON CONFLICT DO NOTHING on (user_id, branch_id)
+      // Bulk insert: one statement → no cascading 25P02
       const sql = `
+        WITH vals(uid) AS (SELECT unnest(:uids::uuid[]))
         INSERT INTO public.user_branches_rt (user_id, branch_id, created_at)
-        VALUES (:uid::uuid, :bid::int, NOW())
+        SELECT uid, :bid::int, NOW() FROM vals
         ON CONFLICT (user_id, branch_id) DO NOTHING
       `;
-
-      for (const uid of userIds) {
-        await sequelize.query(sql, {
-          replacements: { uid, bid: branchId },
-          transaction: t
-        });
-      }
+      await sequelize.query(sql, {
+        replacements: { uids: userIds, bid: branchId },
+        transaction: t,
+      });
 
       await t.commit();
       res.json({ ok: true, assigned: userIds.length });
     } catch (e) {
       try { await t.rollback(); } catch {}
-      // bubble with clearer message for common PG codes
       const code = e?.original?.code || e?.parent?.code;
       if (code === '22P02') {
-        return next(Object.assign(new Error('Invalid ID type — ensure userIds are UUID strings and branchId is integer.'), { status: 400, expose: true, original: e }));
+        return next(Object.assign(new Error('Invalid ID type — userIds must be UUID and branchId must be integer.'), { status: 400, expose: true, original: e }));
+      }
+      if (code === '42P01') {
+        return next(Object.assign(new Error('Missing table. Ensure public.user_branches_rt exists and migrations ran on this DB.'), { status: 500, expose: true, original: e }));
       }
       return next(e);
     }
@@ -168,10 +166,6 @@ router.post(
 );
 
 /* ============================== LIST STAFF ================================= */
-/**
- * Join the VIEW (user_branches) with users table.
- * Both sides are UUID for user_id, so no casting needed if your Users.id is UUID.
- */
 router.get(
   '/:id/staff',
   requireAuth,
@@ -190,7 +184,7 @@ router.get(
           u.email,
           u.role
         FROM public.user_branches ub
-        JOIN "public"."Users" u ON u.id = ub.user_id
+        JOIN public.users u ON u.id = ub.user_id
         WHERE ub.branch_id = :bid
         ORDER BY name ASC
         `,
