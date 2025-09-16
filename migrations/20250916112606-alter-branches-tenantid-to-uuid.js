@@ -1,54 +1,44 @@
+// migrations/2025xxxxxx-alter-branches-tenantid-to-uuid.js
 'use strict';
 
 module.exports = {
-  up: async (qi, Sequelize) => {
-    // ---- branches ----
-    // tenant_id: bigint -> uuid
-    // We need USING to coerce; if existing values aren't valid UUIDs, cast will yield NULL.
-    await qi.sequelize.query(`
-      ALTER TABLE public.branches
-      ALTER COLUMN tenant_id DROP DEFAULT,
-      ALTER COLUMN tenant_id TYPE uuid
-      USING NULLIF(tenant_id::text, '')::uuid
+  up: async (queryInterface, Sequelize) => {
+    // Drop tenant index if it exists (will be recreated)
+    await queryInterface.sequelize.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_branches_tenant') THEN
+          DROP INDEX IF EXISTS public.idx_branches_tenant;
+        END IF;
+      END$$;
     `);
 
-    // Optional: align types with model (harmless if already correct)
-    try { await qi.changeColumn('branches', 'code',   { type: Sequelize.STRING, allowNull: false }); } catch {}
-    try { await qi.changeColumn('branches', 'phone',  { type: Sequelize.STRING, allowNull: true  }); } catch {}
-    try { await qi.changeColumn('branches', 'address',{ type: Sequelize.TEXT,   allowNull: true  }); } catch {}
+    // Convert bigint -> uuid (casting via text when possible)
+    await queryInterface.sequelize.query(`
+      ALTER TABLE public.branches
+      ALTER COLUMN tenant_id TYPE uuid
+      USING (
+        CASE
+          WHEN tenant_id IS NULL THEN NULL
+          ELSE (tenant_id::text)::uuid
+        END
+      );
+    `);
 
-    // Optional: helpful indexes
-    try { await qi.addIndex('branches', ['tenant_id'], { concurrently: true, name: 'branches_tenant_id_idx' }); } catch {}
-
-    // ---- user_branches (if you use it) ----
-    // Make sure tenant_id can hold UUID too.
-    try {
-      await qi.sequelize.query(`
-        ALTER TABLE public.user_branches
-        ALTER COLUMN tenant_id DROP DEFAULT,
-        ALTER COLUMN tenant_id TYPE uuid
-        USING NULLIF(tenant_id::text, '')::uuid
-      `);
-    } catch {}
-
-    // Enforce uniqueness of (user_id, branch_id) to prevent dup assignments (safe if exists)
-    try {
-      await qi.addConstraint('user_branches', {
-        fields: ['user_id', 'branch_id'],
-        type: 'unique',
-        name: 'user_branches_user_branch_unique',
-      });
-    } catch {}
+    // Recreate tenant index on uuid column
+    await queryInterface.sequelize.query(`
+      CREATE INDEX IF NOT EXISTS idx_branches_tenant
+      ON public.branches USING btree (tenant_id);
+    `);
   },
 
-  down: async (qi /*, Sequelize */) => {
-    // We usually avoid narrowing back to bigint in down.
-    // If you must, uncomment below — it will stringify UUIDs, then try to cast:
-    // await qi.sequelize.query(`
-    //   ALTER TABLE public.branches
-    //   ALTER COLUMN tenant_id TYPE bigint
-    //   USING NULLIF(translate(tenant_id::text, '-', ''), '')::bigint
-    // `);
-    // Same for user_branches if needed.
+  down: async (queryInterface, Sequelize) => {
+    // Reverse (uuid -> bigint) if you ever need it
+    await queryInterface.sequelize.query(`
+      DROP INDEX IF EXISTS public.idx_branches_tenant;
+      ALTER TABLE public.branches
+      ALTER COLUMN tenant_id TYPE bigint
+      USING (NULL); -- can't safely downcast; set NULL or customize if you track mapping
+    `);
   },
 };
