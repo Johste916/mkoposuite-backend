@@ -819,7 +819,7 @@ const settingRoutes         = safeLoadRoutes('./routes/settingRoutes', makeDummy
 
 /* ✅ PREFER usersRoutes.js, fallback to userRoutes.js (prevents /users 404) */
 const userRoutes            = safeLoadFirst(
-  ['./routes/usersRoutes', './routes/userRoutes'],
+  ['./routes/userRoutes', './routes/userRoutes'],
   makeDummyRouter([])
 );
 

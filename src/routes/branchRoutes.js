@@ -5,7 +5,7 @@ const router = express.Router();
 
 let db = {};
 try { db = require('../models'); } catch {}
-const { sequelize } = db || {};
+const sequelize = db?.sequelize;
 const { Op } = require('sequelize');
 
 const { allow } = (() => { try { return require('../middleware/permissions'); } catch { return {}; } })();
@@ -40,7 +40,8 @@ router.get(
       const where = { ...tenantFilter(Branch, req) };
       if (req.query.q) where.name = { [Op.iLike]: `%${req.query.q}%` };
       const rows = await Branch.findAll({ where, order: [['name', 'ASC']] });
-      res.json({ items: rows });
+      res.setHeader('X-Total-Count', String(rows.length));
+      res.json(rows);                  // ✅ plain array for FE compatibility
     } catch (e) { next(e); }
   }
 );
@@ -107,8 +108,9 @@ router.post(
         return res.status(400).json({ error: 'userIds[] required' });
       }
 
+      // Get tenant id from branch row when present
       const Branch = getModel('Branch');
-      const branch = await Branch.findOne({ where: { id: req.params.id, ...tenantFilter(Branch, req) } });
+      const branch = await Branch.findOne({ where: { id: req.params.id } });
       if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
       const tenantClause = branch.tenant_id ? 'tenant_id' : (branch.tenantId ? 'tenantId' : null);

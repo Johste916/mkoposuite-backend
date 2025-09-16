@@ -8,7 +8,6 @@ try { db = require('../models'); } catch {}
 const sequelize = db?.sequelize;
 const { Op } = require('sequelize');
 
-// Optional middlewares/controllers (use if present; no crash if missing)
 let authenticateUser = (_req, _res, next) => next();
 try { ({ authenticateUser } = require('../middleware/authMiddleware')); } catch {}
 
@@ -24,13 +23,8 @@ const getModel = (name) => {
 const tenantIdFrom = (req) =>
   req?.tenant?.id || req?.headers?.['x-tenant-id'] || process.env.DEFAULT_TENANT_ID || null;
 
-// The app likely already mounts auth; but this is harmless if double-used.
 router.use(authenticateUser);
 
-/**
- * GET /users
- * Use controller if present; else provide a safe fallback list with ?q and ?limit.
- */
 router.get('/', async (req, res, next) => {
   if (typeof userCtrl.getUsers === 'function') {
     return userCtrl.getUsers(req, res, next);
@@ -78,13 +72,6 @@ router.patch('/:id/status', (req, res, next) => {
   return res.status(501).json({ error: 'toggleStatus not implemented' });
 });
 
-/**
- * ✅ POST /users/:id/assign
- * Body: { roleId?: number|null, branchId?: number|null }
- * - Tries to set users.role_id directly; if not available, upserts user_roles (by user_id)
- * - Always upserts user_branches for branchId (many-to-many safe)
- * - Respects x-tenant-id if provided
- */
 router.post('/:id/assign', async (req, res) => {
   const userId = Number(req.params.id);
   const roleId = req.body?.roleId ? Number(req.body.roleId) : null;
@@ -97,7 +84,6 @@ router.post('/:id/assign', async (req, res) => {
 
   try {
     await sequelize.transaction(async (t) => {
-      // Ensure user exists
       const [rows] = await sequelize.query(
         `select id from public.users where id = :userId`,
         { replacements: { userId }, transaction: t }
@@ -106,19 +92,16 @@ router.post('/:id/assign', async (req, res) => {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      // Role assignment
       if (roleId) {
-        let updatedViaColumn = false;
+        let viaColumn = false;
         try {
           await sequelize.query(
             `update public.users set role_id = :roleId where id = :userId`,
             { replacements: { roleId, userId }, transaction: t }
           );
-          updatedViaColumn = true;
-        } catch (_) {
-          // If users.role_id column doesn't exist, fall back to user_roles table
-        }
-        if (!updatedViaColumn) {
+          viaColumn = true;
+        } catch {}
+        if (!viaColumn) {
           await sequelize.query(
             `
             insert into public.user_roles (user_id, role_id${tenantId ? ', tenant_id' : ''})
@@ -130,7 +113,6 @@ router.post('/:id/assign', async (req, res) => {
         }
       }
 
-      // Branch assignment upsert
       if (branchId) {
         await sequelize.query(
           `
