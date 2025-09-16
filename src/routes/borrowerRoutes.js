@@ -41,6 +41,10 @@ router.post('/',                         authenticateUser, ctrl.createBorrower);
 router.put('/:id',                       authenticateUser, ctrl.updateBorrower);
 router.delete('/:id',                    authenticateUser, ctrl.deleteBorrower);
 
+// Explicit branch assign/unassign (additive, optional to use)
+router.post('/:id/branch',               authenticateUser, ctrl.assignBranch);
+router.delete('/:id/branch',             authenticateUser, ctrl.unassignBranch);
+
 // Nested
 router.get('/:id/loans',                 authenticateUser, ctrl.getLoansByBorrower);
 router.get('/:id/repayments',            authenticateUser, ctrl.getRepaymentsByBorrower);

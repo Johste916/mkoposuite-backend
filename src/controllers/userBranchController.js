@@ -13,6 +13,8 @@ const isUuid = (v) =>
  *   branchId: 1,                     // integer
  *   userIds: ["uuid-1","uuid-2"]     // array of UUID strings
  * }
+ *
+ * Enforces: one active branch per user until unassigned.
  */
 exports.assignBranch = async (req, res, next) => {
   try {
@@ -28,6 +30,28 @@ exports.assignBranch = async (req, res, next) => {
     const invalid = userIds.filter((id) => !isUuid(id));
     if (invalid.length) {
       return res.status(400).json({ error: 'All userIds must be UUID strings', details: { invalid } });
+    }
+
+    // Conflict check: user already assigned to another branch?
+    const conflicts = await sequelize.query(`
+      SELECT ub.user_id AS "userId", ub.branch_id AS "branchId",
+             b.name AS "branchName"
+      FROM public.user_branches ub
+      JOIN public.branches b ON b.id = ub.branch_id
+      WHERE ub.user_id = ANY($1::uuid[])
+        AND ub.branch_id <> $2::int
+    `, { bind: [userIds, branchId], type: sequelize.QueryTypes.SELECT });
+
+    if (conflicts && conflicts.length) {
+      return res.status(409).json({
+        error: 'User(s) already assigned to another branch — unassign first.',
+        conflicts: conflicts.map(c => ({
+          userId: c.userId,
+          currentBranchId: c.branchId,
+          currentBranchName: c.branchName,
+          unassignUrl: `/api/branches/${c.branchId}/staff/${c.userId}`,
+        })),
+      });
     }
 
     // Single bulk insert; safe binding

@@ -151,13 +151,33 @@ exports.updateBorrower = async (req, res) => {
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     const { name, fullName, nationalId, phone, email, address, branchId, status } = req.body || {};
+
+    // 🔒 Single-branch policy for borrowers:
+    // If an update attempts to change branchId from an existing value to a different one,
+    // require explicit unassign first.
+    if (Borrower.rawAttributes.branchId && typeof branchId !== 'undefined') {
+      const current = b.branchId;
+      if (current && Number(current) !== Number(branchId)) {
+        return res.status(409).json({
+          error: "Borrower already assigned to a branch — unassign first before reassigning.",
+          currentBranchId: current,
+          requestedBranchId: Number(branchId),
+          unassignUrl: `/api/borrowers/${b.id}/branch`,
+          method: "DELETE",
+        });
+      }
+    }
+
     await b.update({
       name: (name ?? fullName) ?? b.name,
       nationalId: nationalId ?? b.nationalId,
       phone: phone ?? b.phone,
       email: email ?? b.email,
       address: address ?? b.address,
-      branchId: Borrower.rawAttributes.branchId ? (branchId ?? b.branchId) : b.branchId,
+      // Only allow setting branchId if either unchanged, or was null.
+      branchId: Borrower.rawAttributes.branchId
+        ? ((typeof branchId === 'undefined' || b.branchId) ? b.branchId : branchId)
+        : b.branchId,
       status: status ?? b.status,
     });
 
@@ -179,6 +199,81 @@ exports.deleteBorrower = async (req, res) => {
   } catch (error) {
     console.error("deleteBorrower error:", error);
     res.status(500).json({ error: "Failed to delete borrower" });
+  }
+};
+
+// ---------- Explicit Branch Assign/Unassign (Additive) ----------
+/**
+ * POST /api/borrowers/:id/branch
+ * Body: { branchId: 123 }
+ * - Assigns when currently unassigned, or no-op if same branch.
+ * - If already assigned to another branch → 409 with unassign hint.
+ */
+exports.assignBranch = async (req, res) => {
+  try {
+    if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
+    if (!Borrower.rawAttributes.branchId) return res.status(422).json({ error: "Borrower model has no branchId column" });
+
+    const b = await Borrower.findByPk(req.params.id);
+    if (!b) return res.status(404).json({ error: "Borrower not found" });
+
+    const newBranchId = Number.parseInt(String(req.body?.branchId), 10);
+    if (!Number.isFinite(newBranchId)) return res.status(400).json({ error: "branchId must be an integer" });
+
+    const current = b.branchId ?? null;
+
+    if (current && Number(current) !== newBranchId) {
+      return res.status(409).json({
+        error: "Borrower already assigned to another branch — unassign first.",
+        currentBranchId: current,
+        requestedBranchId: newBranchId,
+        unassignUrl: `/api/borrowers/${b.id}/branch`,
+        method: "DELETE",
+      });
+    }
+
+    if (!current) {
+      await b.update({ branchId: newBranchId });
+    }
+
+    return res.json({ ok: true, borrowerId: b.id, branchId: b.branchId ?? newBranchId });
+  } catch (error) {
+    console.error("assignBranch error:", error);
+    return res.status(500).json({ error: "Failed to assign branch" });
+  }
+};
+
+/**
+ * DELETE /api/borrowers/:id/branch
+ * - Unassigns borrower from branch (sets branchId = NULL) **only if** column is nullable.
+ * - If non-nullable, returns 422 (cannot unassign in this schema).
+ */
+exports.unassignBranch = async (req, res) => {
+  try {
+    if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
+    if (!Borrower.rawAttributes.branchId) return res.status(422).json({ error: "Borrower model has no branchId column" });
+
+    const b = await Borrower.findByPk(req.params.id);
+    if (!b) return res.status(404).json({ error: "Borrower not found" });
+
+    const allowNull = Borrower.rawAttributes.branchId.allowNull !== false;
+
+    if (!allowNull) {
+      return res.status(422).json({
+        error: "This environment does not allow unassign (branchId is NOT NULL).",
+        hint: "Reassignment is blocked by policy; contact admin if a transfer workflow is needed.",
+      });
+    }
+
+    if (b.branchId === null || typeof b.branchId === 'undefined') {
+      return res.json({ ok: true, borrowerId: b.id, branchId: null });
+    }
+
+    await b.update({ branchId: null });
+    return res.json({ ok: true, borrowerId: b.id, branchId: null });
+  } catch (error) {
+    console.error("unassignBranch error:", error);
+    return res.status(500).json({ error: "Failed to unassign branch" });
   }
 };
 
