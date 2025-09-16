@@ -1,4 +1,4 @@
-// backend/src/models/branch.js
+// models/branch.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
@@ -8,14 +8,9 @@ module.exports = (sequelize, DataTypes) => {
       id:        { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
       name:      { type: DataTypes.STRING, allowNull: false },
       code:      { type: DataTypes.STRING },
-
       phone:     { type: DataTypes.TEXT,   allowNull: true },
       address:   { type: DataTypes.TEXT,   allowNull: true },
-
-      // DB column is "manager" (varchar)
       managerId: { type: DataTypes.STRING, field: 'manager', allowNull: true },
-
-      // IMPORTANT: DB column is bigint. Use BIGINT so Sequelize knows it's numeric.
       tenantId:  { type: DataTypes.BIGINT, field: 'tenant_id', allowNull: true },
     },
     {

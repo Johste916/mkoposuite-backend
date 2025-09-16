@@ -1,4 +1,5 @@
-// backend/src/routes/userBranchRoutes.js
+// routes/userBranchRoutes.js
+'use strict';
 const express = require('express');
 const router = express.Router();
 
@@ -7,16 +8,11 @@ try {
   authenticateUser = require('../middleware/authMiddleware').authenticateUser || authenticateUser;
 } catch {}
 
-let userBranchController;
-try { userBranchController = require('../controllers/userBranchController'); } catch { userBranchController = null; }
+const ctrl = require('../controllers/userBranchController');
 
 router.use(authenticateUser);
 
-if (!userBranchController) {
-  router.all('*', (_req, res) => res.status(501).json({ error: 'userBranchController not available' }));
-} else {
-  // Assign user to a branch
-  router.post('/assign', userBranchController.assignBranch);
-}
+// POST /api/user-branches/assign  { branchId, userIds[] }
+router.post('/assign', ctrl.assignBranch);
 
 module.exports = router;

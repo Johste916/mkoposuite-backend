@@ -1,40 +1,42 @@
 // models/UserBranch.js
+'use strict';
+
 module.exports = (sequelize, DataTypes) => {
+  // Runtime table for writes
   const UserBranch = sequelize.define(
     'UserBranch',
     {
       userId: {
-        type: DataTypes.UUID,         // 👈 match Users.id (UUID)
+        type: DataTypes.UUID,
         allowNull: false,
+        field: 'user_id',
       },
       branchId: {
         type: DataTypes.INTEGER,
         allowNull: false,
+        field: 'branch_id',
       },
     },
     {
-      tableName: 'UserBranches',      // 👈 keep the exact through table your User model references
-      timestamps: true,               // if your table has createdAt/updatedAt
-      // underscored: true,           // enable only if the physical table uses created_at/updated_at
+      tableName: 'user_branches_rt',   // ✅ runtime TABLE
+      schema: 'public',
+      timestamps: true,
+      underscored: true,
+      createdAt: 'created_at',
+      updatedAt: 'updated_at',
       indexes: [
-        { unique: true, fields: ['userId', 'branchId'] }, // prevent duplicates
-        { fields: ['branchId'] },
+        { unique: true, fields: ['user_id', 'branch_id'] },
+        { fields: ['branch_id'] },
       ],
     }
   );
 
   UserBranch.associate = (models) => {
     if (models.User) {
-      UserBranch.belongsTo(models.User, {
-        foreignKey: 'userId',
-        onDelete: 'CASCADE',
-      });
+      UserBranch.belongsTo(models.User, { foreignKey: 'user_id', targetKey: 'id' });
     }
     if (models.Branch) {
-      UserBranch.belongsTo(models.Branch, {
-        foreignKey: 'branchId',
-        onDelete: 'CASCADE',
-      });
+      UserBranch.belongsTo(models.Branch, { foreignKey: 'branch_id', targetKey: 'id' });
     }
   };
 
