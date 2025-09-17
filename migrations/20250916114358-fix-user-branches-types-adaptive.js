@@ -1,65 +1,85 @@
 'use strict';
 
 /**
- * This migration is adaptive:
- * - Works whether your table is public.user_branches or public."UserBranches"
- * - Works whether columns are snake_case (user_id) or camelCase ("userId")
- * - Only alters columns that actually exist (guards with IF EXISTS checks)
- * - Recreates the unique index used by ON CONFLICT (user_id, branch_id)
+ * Adaptive + safe:
+ * - If public.user_branches is a VIEW, we skip altering it and operate on the real table if present (public."UserBranches").
+ * - If public.user_branches is a TABLE, we operate on it directly.
+ * - Only alters columns that exist; creates a unique index on the physical table.
+ * - No-op if neither physical form exists.
  */
-
 module.exports = {
   up: async (queryInterface /*, Sequelize */) => {
     const sql = `
 DO $mig$
 DECLARE
-  -- Which physical table exists?
-  tbl_snake boolean := EXISTS (
-    SELECT 1 FROM information_schema.tables
-    WHERE table_schema='public' AND table_name='user_branches'
-  );
-  tbl_camel boolean := EXISTS (
+  -- Object existence + kind
+  has_snake_tbl  boolean := FALSE;
+  has_snake_view boolean := FALSE;
+  has_camel_tbl  boolean := FALSE;
+
+  tgt_schema text := 'public';
+  tgt_table  text := NULL;      -- physical table we will alter
+  -- Column existence flags for the chosen target
+  has_user   boolean := FALSE;
+  has_branch boolean := FALSE;
+  has_tenant boolean := FALSE;
+
+  -- Helpers
+  relkind_snake text;
+BEGIN
+  -- Detect snake object + kind (r = table, v = view, m = materialized view)
+  SELECT c.relkind
+    INTO relkind_snake
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public' AND c.relname = 'user_branches'
+  LIMIT 1;
+
+  has_snake_tbl  := (relkind_snake = 'r');
+  has_snake_view := (relkind_snake = 'v' OR relkind_snake = 'm');
+
+  -- Detect camel table
+  SELECT EXISTS (
     SELECT 1 FROM information_schema.tables
     WHERE table_schema='public' AND table_name='UserBranches'
-  );
+  ) INTO has_camel_tbl;
 
-  -- Helper to check column presence
-  has_col_snake_user  boolean;
-  has_col_snake_branch boolean;
-  has_col_snake_tenant boolean;
-
-  has_col_camel_user  boolean;
-  has_col_camel_branch boolean;
-  has_col_camel_tenant boolean;
-BEGIN
-  IF NOT (tbl_snake OR tbl_camel) THEN
-    RAISE NOTICE 'No user_branches/UserBranches table found; skipping migration.';
+  -- Choose a physical target table:
+  -- 1) If snake is a table, prefer it
+  -- 2) Else if camel table exists, use it
+  IF has_snake_tbl THEN
+    tgt_table := 'user_branches';
+  ELSIF has_camel_tbl THEN
+    tgt_table := 'UserBranches';
+  ELSE
+    RAISE NOTICE 'No physical user-branches table found (only a view, or nothing) — skipping.';
     RETURN;
   END IF;
 
-  IF tbl_snake THEN
+  RAISE NOTICE 'Altering %.% ...', tgt_schema, tgt_table;
+
+  -- Figure out which column names to use on the chosen physical table
+  IF tgt_table = 'user_branches' THEN
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='user_branches' AND column_name='user_id'
-    ) INTO has_col_snake_user;
-
+      WHERE table_schema=tgt_schema AND table_name=tgt_table AND column_name='user_id'
+    ) INTO has_user;
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='user_branches' AND column_name='branch_id'
-    ) INTO has_col_snake_branch;
-
+      WHERE table_schema=tgt_schema AND table_name=tgt_table AND column_name='branch_id'
+    ) INTO has_branch;
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='user_branches' AND column_name='tenant_id'
-    ) INTO has_col_snake_tenant;
+      WHERE table_schema=tgt_schema AND table_name=tgt_table AND column_name='tenant_id'
+    ) INTO has_tenant;
 
-    -- Drop conflicting indexes if they exist
+    -- Drop conflicting unique index if it exists (name may vary across envs)
     IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'user_branches_user_id_branch_id_key') THEN
       EXECUTE 'DROP INDEX IF EXISTS public.user_branches_user_id_branch_id_key';
     END IF;
 
-    -- Alter types safely (only when the column exists)
-    IF has_col_snake_user THEN
+    -- Cast to proper types, guarded by existence
+    IF has_user THEN
       EXECUTE '
         ALTER TABLE public.user_branches
         ALTER COLUMN user_id TYPE uuid
@@ -67,7 +87,7 @@ BEGIN
       ';
     END IF;
 
-    IF has_col_snake_branch THEN
+    IF has_branch THEN
       EXECUTE '
         ALTER TABLE public.user_branches
         ALTER COLUMN branch_id TYPE integer
@@ -75,7 +95,7 @@ BEGIN
       ';
     END IF;
 
-    IF has_col_snake_tenant THEN
+    IF has_tenant THEN
       EXECUTE '
         ALTER TABLE public.user_branches
         ALTER COLUMN tenant_id TYPE uuid
@@ -83,20 +103,15 @@ BEGIN
       ';
     END IF;
 
-    -- Recreate unique index for UPSERT
-    IF has_col_snake_user AND has_col_snake_branch THEN
+    -- Recreate UPSERT/uniqueness index on the physical table
+    IF has_user AND has_branch THEN
       EXECUTE '
         CREATE UNIQUE INDEX IF NOT EXISTS user_branches_user_id_branch_id_key
         ON public.user_branches (user_id, branch_id)
       ';
     END IF;
 
-    -- Helpful tenant index
-    IF has_col_snake_tenant THEN
-      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_user_branches_tenant ON public.user_branches (tenant_id)';
-    END IF;
-
-    -- Ensure created_at default if present
+    -- Optional: default for created_at if present
     IF EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_schema='public' AND table_name='user_branches' AND column_name='created_at'
@@ -104,26 +119,23 @@ BEGIN
       EXECUTE 'ALTER TABLE public.user_branches ALTER COLUMN created_at SET DEFAULT NOW()';
     END IF;
 
-  ELSIF tbl_camel THEN
-    -- CamelCase + quoted identifiers
+  ELSE
+    -- Target is the CamelCase physical table "UserBranches"
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='UserBranches' AND column_name='userId'
-    ) INTO has_col_camel_user;
-
+      WHERE table_schema=tgt_schema AND table_name=tgt_table AND column_name='userId'
+    ) INTO has_user;
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='UserBranches' AND column_name='branchId'
-    ) INTO has_col_camel_branch;
-
+      WHERE table_schema=tgt_schema AND table_name=tgt_table AND column_name='branchId'
+    ) INTO has_branch;
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='UserBranches' AND column_name='tenantId'
-    ) INTO has_col_camel_tenant;
+      WHERE table_schema=tgt_schema AND table_name=tgt_table AND column_name='tenantId'
+    ) INTO has_tenant;
 
-    -- Drop conflicting indexes if they exist (name likely different; skip if unknown)
-    -- Change types
-    IF has_col_camel_user THEN
+    -- Cast to proper types, guarded by existence
+    IF has_user THEN
       EXECUTE '
         ALTER TABLE public."UserBranches"
         ALTER COLUMN "userId" TYPE uuid
@@ -131,7 +143,7 @@ BEGIN
       ';
     END IF;
 
-    IF has_col_camel_branch THEN
+    IF has_branch THEN
       EXECUTE '
         ALTER TABLE public."UserBranches"
         ALTER COLUMN "branchId" TYPE integer
@@ -139,7 +151,7 @@ BEGIN
       ';
     END IF;
 
-    IF has_col_camel_tenant THEN
+    IF has_tenant THEN
       EXECUTE '
         ALTER TABLE public."UserBranches"
         ALTER COLUMN "tenantId" TYPE uuid
@@ -147,20 +159,15 @@ BEGIN
       ';
     END IF;
 
-    -- Unique index for UPSERT (name it consistently)
-    IF has_col_camel_user AND has_col_camel_branch THEN
+    -- Recreate uniqueness index (consistent name for camel)
+    IF has_user AND has_branch THEN
       EXECUTE '
         CREATE UNIQUE INDEX IF NOT EXISTS "UserBranches_userId_branchId_key"
         ON public."UserBranches" ("userId","branchId")
       ';
     END IF;
 
-    -- Tenant index
-    IF has_col_camel_tenant THEN
-      EXECUTE 'CREATE INDEX IF NOT EXISTS "idx_UserBranches_tenant" ON public."UserBranches" ("tenantId")';
-    END IF;
-
-    -- createdAt default if present
+    -- Optional: default for createdAt if present
     IF EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_schema='public' AND table_name='UserBranches' AND column_name='createdAt'
@@ -169,16 +176,19 @@ BEGIN
     END IF;
   END IF;
 
-  RAISE NOTICE 'UserBranches type fix completed.';
+  -- If snake object is a VIEW, leave it intact (no ALTER/INDEX on a view)
+  IF has_snake_view THEN
+    RAISE NOTICE 'Note: public.user_branches is a VIEW; it was not altered.';
+  END IF;
+
+  RAISE NOTICE 'UserBranches alignment completed successfully.';
 END
 $mig$;
 `;
     await queryInterface.sequelize.query(sql);
   },
 
-  down: async (queryInterface /*, Sequelize */) => {
-    // Non-destructive down; we won't force types back to bigint.
-    // If you really need a rollback, add symmetrical casts here,
-    // but keeping "up" permanent is usually best once aligned.
+  down: async () => {
+    // Non-destructive: keep aligned types.
   },
 };

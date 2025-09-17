@@ -1,68 +1,76 @@
-'use strict';
+// migrations/20250808121236-create-activity-comments.js
+"use strict";
 
 module.exports = {
   async up(queryInterface, Sequelize) {
-    // 1️⃣ Create the activity_comments table without FK first
-    await queryInterface.createTable('activity_comments', {
-      id: {
-        type: Sequelize.INTEGER,
-        primaryKey: true,
-        autoIncrement: true
-      },
-      activityLogId: {
-        type: Sequelize.INTEGER,
-        allowNull: true
-      },
-      comment: {
-        type: Sequelize.TEXT,
-        allowNull: false
-      },
-      createdBy: {
-        type: Sequelize.UUID, // or INTEGER depending on your users.id type
-        allowNull: true
-      },
-      createdAt: {
-        allowNull: false,
-        type: Sequelize.DATE,
-        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP')
-      },
-      updatedAt: {
-        allowNull: false,
-        type: Sequelize.DATE,
-        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP')
-      }
-    });
-
-    // 2️⃣ Conditionally add FK to activity_logs if it exists
+    // 1) Create table only if it doesn't exist
     await queryInterface.sequelize.query(`
       DO $$
       BEGIN
-        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'activity_logs') THEN
-          ALTER TABLE activity_comments
-          ADD CONSTRAINT fk_activity_comments_activity_log
-          FOREIGN KEY ("activityLogId")
-          REFERENCES activity_logs(id)
-          ON DELETE CASCADE;
+        IF to_regclass('public.activity_comments') IS NULL THEN
+          CREATE TABLE public.activity_comments (
+            id             SERIAL PRIMARY KEY,
+            "activityLogId" INTEGER NULL,
+            comment        TEXT NOT NULL,
+            "createdBy"    UUID NULL,
+            "createdAt"    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            "updatedAt"    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
         END IF;
       END$$;
     `);
 
-    // 3️⃣ Conditionally add FK to users if it exists
+    // 2) Conditionally add FK -> activity_logs(id)
     await queryInterface.sequelize.query(`
       DO $$
       BEGIN
-        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'users') THEN
-          ALTER TABLE activity_comments
+        IF to_regclass('public.activity_logs') IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM pg_constraint c
+             JOIN pg_class t ON t.oid = c.conrelid
+             WHERE c.conname = 'fk_activity_comments_activity_log'
+               AND t.relname = 'activity_comments'
+           )
+        THEN
+          ALTER TABLE public.activity_comments
+          ADD CONSTRAINT fk_activity_comments_activity_log
+          FOREIGN KEY ("activityLogId")
+          REFERENCES public.activity_logs(id)
+          ON DELETE CASCADE
+          ON UPDATE CASCADE;
+        END IF;
+      END$$;
+    `);
+
+    // 3) Conditionally add FK -> public."Users"(id) (note the case)
+    await queryInterface.sequelize.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public."Users"') IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM pg_constraint c
+             JOIN pg_class t ON t.oid = c.conrelid
+             WHERE c.conname = 'fk_activity_comments_created_by'
+               AND t.relname = 'activity_comments'
+           )
+        THEN
+          ALTER TABLE public.activity_comments
           ADD CONSTRAINT fk_activity_comments_created_by
           FOREIGN KEY ("createdBy")
-          REFERENCES users(id)
-          ON DELETE SET NULL;
+          REFERENCES public."Users"(id)
+          ON DELETE SET NULL
+          ON UPDATE CASCADE;
         END IF;
       END$$;
     `);
   },
 
-  async down(queryInterface) {
-    await queryInterface.dropTable('activity_comments');
-  }
+  async down(queryInterface /*, Sequelize */) {
+    // Drop whole table safely (will also drop FKs)
+    await queryInterface.sequelize.query(`
+      DROP TABLE IF EXISTS public.activity_comments CASCADE;
+    `);
+  },
 };
