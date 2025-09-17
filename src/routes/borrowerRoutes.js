@@ -20,18 +20,37 @@ const requireMulterSingleFile = hasMulter
   ? upload.single('file')
   : (_req, res) => res.status(501).json({ error: 'File upload not enabled.' });
 
+/* ---------------- Try load the new Groups controller (optional) ----------- */
+let groupCtrl = null;
+try {
+  const models = require('../models'); // works because routes run inside the API project
+  const build = require('../controllers/borrowerGroupController');
+  groupCtrl = build && typeof build === 'function' ? build({ models }) : null;
+} catch { /* keep null to fallback to ctrl.* */ }
+
 /* ---------------- Reports BEFORE :id routes ---------------- */
 router.get('/reports/summary',           authenticateUser, borrowerReportsCtrl.getBorrowerSummary);
 router.get('/groups/reports/summary',    authenticateUser, groupReportsCtrl.getGroupSummary);
 router.get('/reports',                   authenticateUser, ctrl.globalBorrowerReport);
 
 /* ---------------- Groups ---------------- */
-router.get('/groups',                    authenticateUser, ctrl.listGroups);
-router.post('/groups',                   authenticateUser, ctrl.createGroup);
-router.get('/groups/:groupId',           authenticateUser, ctrl.getGroup);
-router.put('/groups/:groupId',           authenticateUser, ctrl.updateGroup);
-router.post('/groups/:groupId/members',  authenticateUser, ctrl.addGroupMember);
-router.delete('/groups/:groupId/members/:borrowerId', authenticateUser, ctrl.removeGroupMember);
+/* Prefer new controller if available; otherwise fallback to existing ctrl.* */
+router.get('/groups',                    authenticateUser, (req, res, next) =>
+  groupCtrl ? groupCtrl.list(req, res, next) : ctrl.listGroups(req, res, next)
+);
+router.post('/groups',                   authenticateUser, (req, res, next) =>
+  groupCtrl ? groupCtrl.create(req, res, next) : ctrl.createGroup(req, res, next)
+);
+router.get('/groups/:groupId',           authenticateUser, (req, res, next) =>
+  groupCtrl ? groupCtrl.getOne(req, res, next) : ctrl.getGroup(req, res, next)
+);
+router.put('/groups/:groupId',           authenticateUser, ctrl.updateGroup); // keep your existing PUT
+router.post('/groups/:groupId/members',  authenticateUser, (req, res, next) =>
+  groupCtrl ? groupCtrl.addMember(req, res, next) : ctrl.addGroupMember(req, res, next)
+);
+router.delete('/groups/:groupId/members/:borrowerId', authenticateUser, (req, res, next) =>
+  groupCtrl ? groupCtrl.removeMember(req, res, next) : ctrl.removeGroupMember(req, res, next)
+);
 router.get('/groups/reports',            authenticateUser, ctrl.groupReports);
 router.post('/groups/:groupId/import',   authenticateUser, requireMulterSingleFile, ctrl.importGroupMembers);
 

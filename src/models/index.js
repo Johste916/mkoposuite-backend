@@ -9,10 +9,9 @@ const common = {
   dialect: 'postgres',
   logging: LOG_SQL ? (msg) => console.log('[sql]', msg) : false,
   benchmark: LOG_SQL,
-  // ✅ Postgres understands 'UTC' or '+00:00' — NOT 'Z'
   timezone: 'UTC',
-  quoteIdentifiers: true,        // keep case of "createdAt"/"updatedAt"
-  searchPath: 'public',          // ensure we hit the public schema
+  quoteIdentifiers: true,
+  searchPath: 'public',
   retry: { max: 3 },
   pool: {
     max: Number(process.env.DB_POOL_MAX || 10),
@@ -22,13 +21,10 @@ const common = {
   },
   define: {
     schema: 'public',
-    // ⬇️ Critical: our tables use camelCase timestamp columns
     timestamps: true,
     createdAt: 'createdAt',
     updatedAt: 'updatedAt',
-    // Do NOT set underscored globally; individual models may still use snake_case via `field: '...'`
   },
-  // Ensure models that specify underscored don't downgrade timestamps to created_at
   hooks: {
     beforeDefine: (_attrs, options) => {
       if (!Object.prototype.hasOwnProperty.call(options, 'timestamps')) options.timestamps = true;
@@ -42,7 +38,7 @@ const sequelize = process.env.DATABASE_URL
   ? new Sequelize(process.env.DATABASE_URL, {
       ...common,
       dialectOptions: {
-        ssl: { require: true, rejectUnauthorized: false }, // Supabase/managed PG
+        ssl: { require: true, rejectUnauthorized: false },
         keepAlive: true,
         application_name: process.env.APP_NAME || 'mkoposuite',
       },
@@ -135,6 +131,10 @@ db.Plan            = tryLoad(() => require('./plan')(sequelize, DataTypes), 'Pla
 db.Entitlement     = tryLoad(() => require('./entitlement')(sequelize, DataTypes), 'Entitlement');
 db.PlanEntitlement = tryLoad(() => require('./planentitlement')(sequelize, DataTypes), 'PlanEntitlement');
 
+/* 🆕 Borrower Groups */
+db.BorrowerGroup       = tryLoad(() => require('./borrowergroup')(sequelize, DataTypes), 'BorrowerGroup');
+db.BorrowerGroupMember = tryLoad(() => require('./borrowergroupmember')(sequelize, DataTypes), 'BorrowerGroupMember');
+
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
   db.User.belongsTo(db.Branch,   { foreignKey: 'branchId' });
@@ -142,7 +142,6 @@ if (db.User && db.Branch) {
 }
 
 if (db.Borrower && db.Branch) {
-  // ✅ Use the model attribute `branchId` (which maps to DB column branch_id via field)
   db.Borrower.belongsTo(db.Branch, { foreignKey: 'branchId' });
   db.Branch.hasMany(db.Borrower,   { foreignKey: 'branchId' });
 }
@@ -363,6 +362,29 @@ if (db.CashTransaction && db.Loan) {
 }
 if (db.CashTransaction && db.Borrower) {
   db.CashTransaction.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
+}
+
+/* 🆕 Borrower Groups associations */
+if (db.BorrowerGroup && db.BorrowerGroupMember) {
+  db.BorrowerGroup.hasMany(db.BorrowerGroupMember, { foreignKey: 'groupId', as: 'groupMembers', onDelete: 'CASCADE' });
+  db.BorrowerGroupMember.belongsTo(db.BorrowerGroup, { foreignKey: 'groupId', as: 'group' });
+}
+if (db.BorrowerGroupMember && db.Borrower) {
+  db.BorrowerGroupMember.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
+}
+if (db.BorrowerGroup && db.Borrower && db.BorrowerGroupMember) {
+  db.BorrowerGroup.belongsToMany(db.Borrower, {
+    through: db.BorrowerGroupMember,
+    foreignKey: 'groupId',
+    otherKey: 'borrowerId',
+    as: 'members',
+  });
+  db.Borrower.belongsToMany(db.BorrowerGroup, {
+    through: db.BorrowerGroupMember,
+    foreignKey: 'borrowerId',
+    otherKey: 'groupId',
+    as: 'groups',
+  });
 }
 
 /* ---------- Export ---------- */
