@@ -1,61 +1,48 @@
 // src/models/Borrower.js
 module.exports = (sequelize, DataTypes) => {
   const Borrower = sequelize.define('Borrower', {
-    id: {
-      type: DataTypes.INTEGER,
-      primaryKey: true,
-      autoIncrement: true,
-    },
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
     // Real DB column is "name"
-    name: {
-      type: DataTypes.STRING,
-      allowNull: false,
-      field: 'name',
-    },
+    name: { type: DataTypes.STRING, allowNull: false, field: 'name' },
 
     // Optional: virtual alias so existing code using fullName still works
     fullName: {
       type: DataTypes.VIRTUAL,
-      get() {
-        return this.getDataValue('name');
-      },
-      set(val) {
-        // writing to fullName will store in name
-        this.setDataValue('name', val);
-      },
+      get() { return this.getDataValue('name'); },
+      set(val) { this.setDataValue('name', val); },
     },
 
-    nationalId: {
-      type: DataTypes.STRING,
-      allowNull: false,
-      unique: true,
-    },
-    phone: {
-      type: DataTypes.STRING,
-      allowNull: false,
-    },
-    address: {
-      type: DataTypes.STRING,
-      allowNull: true,
-    },
+    nationalId: { type: DataTypes.STRING, allowNull: false, unique: true },
+    phone:      { type: DataTypes.STRING, allowNull: false },
+    address:    { type: DataTypes.STRING, allowNull: true },
 
-    // ✅ Model attribute uses camelCase; DB column uses snake_case (branch_id)
-    //    Keep allowNull true to avoid breaking existing rows until backfilled.
+    // ✅ Map camelCase attribute to snake_case DB column if you added it that way
+    // If your DB column is "branch_id", keep field:'branch_id'.
+    // If you migrated a camel column "branchId", change field to 'branchId'.
     branchId: {
       type: DataTypes.INTEGER,
-      allowNull: true,
-      field: 'branch_id',
+      allowNull: true,          // keep loose to avoid breaking inserts that don't set it
+      field: 'branch_id',       // <-- matches your earlier mapping
+    },
+
+    // ✅ NEW: status column your controllers expect
+    status: {
+      type: DataTypes.STRING(32),
+      allowNull: false,
+      defaultValue: 'active',   // rows created before the migration will read as 'active'
+      field: 'status',
     },
   }, {
-    tableName: 'Borrowers',  // matches your DB (per your inspection)
+    tableName: 'Borrowers',     // matches your DB table name with capital B
     timestamps: true,
   });
 
-  // (Optional) Association helper. Index wiring already covers this, but harmless to keep.
+  // Associations (unchanged)
   Borrower.associate = (models) => {
     if (models.Branch) {
-      Borrower.belongsTo(models.Branch, { as: 'Branch', foreignKey: 'branchId' });
+      // Uses the physical DB column name
+      Borrower.belongsTo(models.Branch, { as: 'Branch', foreignKey: 'branch_id' });
     }
   };
 
