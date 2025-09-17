@@ -1,11 +1,20 @@
 "use strict";
+
 module.exports = (sequelize, DataTypes) => {
   const BorrowerGroup = sequelize.define(
     "BorrowerGroup",
     {
+      id: {
+        type: DataTypes.UUID,
+        defaultValue: sequelize.literal("gen_random_uuid()"),
+        primaryKey: true,
+        allowNull: false,
+      },
       name: { type: DataTypes.STRING(160), allowNull: false },
-      branchId: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
-      officerId: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
+
+      branchId: { type: DataTypes.UUID, allowNull: true },
+      officerId: { type: DataTypes.UUID, allowNull: true },
+
       meetingDay: {
         type: DataTypes.ENUM(
           "monday",
@@ -24,16 +33,31 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: "active",
       },
+
+      createdAt: { type: DataTypes.DATE, allowNull: false },
+      updatedAt: { type: DataTypes.DATE, allowNull: false },
+      deletedAt: { type: DataTypes.DATE, allowNull: true },
     },
     {
-      paranoid: true,
       tableName: "BorrowerGroups",
+      paranoid: true,
+      timestamps: true,
       underscored: false,
+      hooks: {
+        beforeValidate(instance) {
+          if (instance.meetingDay) {
+            instance.meetingDay = String(instance.meetingDay).toLowerCase();
+          }
+          // Treat empty strings as null to satisfy UUID/ENUM columns
+          ["branchId", "officerId", "notes"].forEach((k) => {
+            if (instance[k] === "") instance[k] = null;
+          });
+        },
+      },
     }
   );
 
   BorrowerGroup.associate = (models) => {
-    // optional FK associations (left non-required to avoid breaking)
     if (models.Branch) {
       BorrowerGroup.belongsTo(models.Branch, {
         foreignKey: "branchId",
@@ -46,20 +70,11 @@ module.exports = (sequelize, DataTypes) => {
         as: "officer",
       });
     }
-
-    BorrowerGroup.hasMany(models.BorrowerGroupMember, {
-      foreignKey: "groupId",
-      as: "groupMembers",
-      onDelete: "CASCADE",
-    });
-
-    if (models.Borrower) {
-      // convenience many-to-many
-      BorrowerGroup.belongsToMany(models.Borrower, {
-        through: models.BorrowerGroupMember,
+    if (models.BorrowerGroupMember) {
+      BorrowerGroup.hasMany(models.BorrowerGroupMember, {
         foreignKey: "groupId",
-        otherKey: "borrowerId",
         as: "members",
+        onDelete: "CASCADE",
       });
     }
   };
