@@ -22,24 +22,300 @@ const isUuid = (v) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 
 const getTenantId = (req) => req.headers['x-tenant-id'] || req.context?.tenantId || req.user?.tenantId || null;
+const toIntOrNull = (v) => {
+  const n = Number.parseInt(String(v ?? '').trim(), 10);
+  return Number.isFinite(n) ? n : null;
+};
 
-/* … list/create/update/delete branches remain unchanged … */
+const columnExists = async (table, column) => {
+  const [rows] = await sequelize.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name=$2 LIMIT 1`,
+    { bind: [table, column] }
+  );
+  return !!rows.length;
+};
+
+/* ============================== LIST ============================== */
+// GET /api/branches
+router.get(
+  '/',
+  requireAuth,
+  allow ? allow('branches:view') : (_req, _res, next) => next(),
+  async (req, res, next) => {
+    try {
+      const Branch = getModel('Branch');
+
+      // q, limit, offset
+      const q = String(req.query.q || '').trim();
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const offset = Math.max(Number(req.query.offset) || 0, 0);
+
+      const where = {};
+      if (q) {
+        where[Op.or] = [
+          { name: { [Op.iLike]: `%${q}%` } },
+          { code: { [Op.iLike]: `%${q}%` } },
+          { phone: { [Op.iLike]: `%${q}%` } },
+          { address: { [Op.iLike]: `%${q}%` } },
+        ];
+      }
+
+      // optional multi-tenant filter if branches.tenant_id exists and tenantId is numeric
+      const tId = getTenantId(req);
+      if (await columnExists('branches', 'tenant_id')) {
+        const tNum = toIntOrNull(tId);
+        if (tNum !== null) where.tenantId = tNum;
+      }
+
+      const { rows, count } = await Branch.findAndCountAll({
+        where,
+        order: [['name', 'ASC']],
+        limit,
+        offset,
+      });
+
+      res.setHeader('X-Total-Count', String(count));
+      return res.json(rows);
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ============================== CREATE ============================ */
+// POST /api/branches
+router.post(
+  '/',
+  requireAuth,
+  allow ? allow('branches:manage') : (_req, _res, next) => next(),
+  async (req, res, next) => {
+    try {
+      const Branch = getModel('Branch');
+      const body = req.body || {};
+
+      const payload = {
+        name: (body.name || '').trim(),
+        code: body.code == null ? null : String(body.code).trim(),
+        phone: body.phone == null ? null : String(body.phone).trim(),
+        address: body.address == null ? null : String(body.address).trim(),
+      };
+
+      if (!payload.name) return res.status(400).json({ error: 'name is required' });
+
+      // optional tenant_id column
+      const tId = getTenantId(req);
+      if (await columnExists('branches', 'tenant_id')) {
+        const tNum = toIntOrNull(tId);
+        if (tNum !== null) payload.tenantId = tNum;
+      }
+
+      const created = await Branch.create(payload);
+      return res.status(201).json(created);
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ============================== READ ONE ========================== */
+// GET /api/branches/:id
+router.get(
+  '/:id',
+  requireAuth,
+  allow ? allow('branches:view') : (_req, _res, next) => next(),
+  async (req, res, next) => {
+    try {
+      const Branch = getModel('Branch');
+      const id = toIntOrNull(req.params.id);
+      if (id === null) return res.status(400).json({ error: 'Branch id must be an integer' });
+
+      const where = { id };
+      // optional tenant filter
+      const tId = getTenantId(req);
+      if (await columnExists('branches', 'tenant_id')) {
+        const tNum = toIntOrNull(tId);
+        if (tNum !== null) where.tenantId = tNum;
+      }
+
+      const found = await Branch.findOne({ where });
+      if (!found) return res.status(404).json({ error: 'Branch not found' });
+      return res.json(found);
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ============================== UPDATE =========================== */
+// PUT /api/branches/:id
+router.put(
+  '/:id',
+  requireAuth,
+  allow ? allow('branches:manage') : (_req, _res, next) => next(),
+  async (req, res, next) => {
+    try {
+      const Branch = getModel('Branch');
+      const id = toIntOrNull(req.params.id);
+      if (id === null) return res.status(400).json({ error: 'Branch id must be an integer' });
+
+      const where = { id };
+      const tId = getTenantId(req);
+      if (await columnExists('branches', 'tenant_id')) {
+        const tNum = toIntOrNull(tId);
+        if (tNum !== null) where.tenantId = tNum;
+      }
+
+      const found = await Branch.findOne({ where });
+      if (!found) return res.status(404).json({ error: 'Branch not found' });
+
+      const body = req.body || {};
+      const updates = {};
+      if (typeof body.name === 'string') updates.name = body.name.trim();
+      if ('code' in body)   updates.code   = body.code == null ? null : String(body.code).trim();
+      if ('phone' in body)  updates.phone  = body.phone == null ? null : String(body.phone).trim();
+      if ('address' in body)updates.address= body.address == null ? null : String(body.address).trim();
+      if ('managerId' in body) updates.managerId = body.managerId == null ? null : String(body.managerId);
+
+      await found.update(updates);
+      return res.json(found);
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ============================== DELETE =========================== */
+// DELETE /api/branches/:id
+router.delete(
+  '/:id',
+  requireAuth,
+  allow ? allow('branches:manage') : (_req, _res, next) => next(),
+  async (req, res, next) => {
+    try {
+      const Branch = getModel('Branch');
+      const id = toIntOrNull(req.params.id);
+      if (id === null) return res.status(400).json({ error: 'Branch id must be an integer' });
+
+      const where = { id };
+      const tId = getTenantId(req);
+      if (await columnExists('branches', 'tenant_id')) {
+        const tNum = toIntOrNull(tId);
+        if (tNum !== null) where.tenantId = tNum;
+      }
+
+      const found = await Branch.findOne({ where });
+      if (!found) return res.status(404).json({ error: 'Branch not found' });
+
+      await found.destroy(); // respects paranoid if enabled
+      return res.status(204).end();
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ============================== BRANCH REPORT ===================== */
+// GET /api/branches/:id/report?from=YYYY-MM-DD&to=YYYY-MM-DD
+router.get(
+  '/:id/report',
+  requireAuth,
+  allow ? allow('branches:view') : (_req, _res, next) => next(),
+  async (req, res, next) => {
+    try {
+      const branchId = toIntOrNull(req.params.id);
+      if (branchId === null) return res.status(400).json({ error: 'Branch id must be an integer' });
+
+      const from = String(req.query.from || '').trim() || null;
+      const to   = String(req.query.to || '').trim()   || null;
+
+      const dateFilter = (col) => {
+        if (from && to)   return ` AND ${col} >= $2::date AND ${col} < ($3::date + INTERVAL '1 day') `;
+        if (from && !to)  return ` AND ${col} >= $2::date `;
+        if (!from && to)  return ` AND ${col} < ($2::date + INTERVAL '1 day') `;
+        return '';
+      };
+      const bindWith = (...extra) => [branchId, ...extra.filter(Boolean)];
+
+      const q = async (sql, bind = []) => {
+        try { return await sequelize.query(sql, { bind, type: sequelize.QueryTypes.SELECT }); }
+        catch { return null; }
+      };
+
+      // Staff via user_branches view
+      const staff = await q(
+        `SELECT COUNT(*)::int AS count FROM public.user_branches ub WHERE ub.branch_id = $1`,
+        [branchId]
+      );
+
+      // Expenses (optional)
+      const expenses = await q(
+        `
+        SELECT COALESCE(SUM(e.amount),0)::numeric AS amount
+        FROM public.expenses e
+        WHERE e."branchId" = $1
+        ${dateFilter('e."createdAt"')}
+        `,
+        from && to ? bindWith(from, to) : from ? bindWith(from) : to ? bindWith(to) : [branchId]
+      );
+
+      // Loans disbursed (optional)
+      const loansOut = await q(
+        `
+        SELECT COALESCE(SUM(l."principalDisbursed"),0)::numeric AS amount
+        FROM public."Loans" l
+        WHERE l."branchId" = $1
+        ${dateFilter('l."createdAt"')}
+        `,
+        from && to ? bindWith(from, to) : from ? bindWith(from) : to ? bindWith(to) : [branchId]
+      );
+
+      // Collections (LoanPayments → fallback LoanRepayments)
+      let collections = await q(
+        `
+        SELECT COALESCE(SUM(lp.amount),0)::numeric AS amount
+        FROM public."LoanPayments" lp
+        JOIN public."Loans" l ON l.id = lp."loanId"
+        WHERE l."branchId" = $1
+        ${dateFilter('lp."createdAt"')}
+        `,
+        from && to ? bindWith(from, to) : from ? bindWith(from) : to ? bindWith(to) : [branchId]
+      );
+      if (!collections || collections.length === 0) {
+        collections = await q(
+          `
+          SELECT COALESCE(SUM(lr.amount),0)::numeric AS amount
+          FROM public."LoanRepayments" lr
+          JOIN public."Loans" l ON l.id = lr."loanId"
+          WHERE l."branchId" = $1
+          ${dateFilter('lr."createdAt"')}
+          `,
+          from && to ? bindWith(from, to) : from ? bindWith(from) : to ? bindWith(to) : [branchId]
+        );
+      }
+
+      return res.json({
+        kpis: {
+          staffCount: staff?.[0]?.count ?? 0,
+          expenses:   expenses?.[0]?.amount ?? 0,
+          loansOut:   loansOut?.[0]?.amount ?? 0,
+          collections: collections?.[0]?.amount ?? 0,
+        },
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
 
 /* ============================== BRANCH OVERVIEW ============================ */
-/**
- * Additive overview that computes safe, read-only KPIs.
- * - Multi-tenant aware when tables expose tenant_id
- * - Skips sections that error (never breaks)
- */
+// (kept as you had; now coexists with /:id/report)
 router.get(
   '/:id/overview',
   requireAuth,
   allow ? allow('branches:view') : (_req, _res, next) => next(),
   async (req, res, next) => {
-    const branchId = parseInt(String(req.params.id), 10);
-    if (!Number.isFinite(branchId)) return res.status(400).json({ error: 'Branch id must be an integer' });
-
-    const tId = getTenantId(req);
+    const branchId = toIntOrNull(req.params.id);
+    if (branchId === null) return res.status(400).json({ error: 'Branch id must be an integer' });
 
     const q = async (sql, bind = []) => {
       try { return await sequelize.query(sql, { bind, type: sequelize.QueryTypes.SELECT }); }
@@ -47,13 +323,12 @@ router.get(
     };
 
     try {
-      // Header
       const header = await q(`
         SELECT b.id, b.name, b.code,
                COALESCE(b.phone, NULL)   AS phone,
                COALESCE(b.address, NULL) AS address,
-               b.created_at              AS createdAt,
-               NULLIF(b.manager, '')     AS managerId,
+               b.created_at              AS "createdAt",
+               NULLIF(b.manager, '')     AS "managerId",
                CASE WHEN EXISTS (
                  SELECT 1 FROM information_schema.columns
                  WHERE table_schema='public' AND table_name='branches' AND column_name='tenant_id'
@@ -65,21 +340,18 @@ router.get(
 
       if (!header || !header[0]) return res.status(404).json({ error: 'Branch not found' });
 
-      // Staff count (via VIEW)
       const staff = await q(`
         SELECT COUNT(*)::int AS count
         FROM public.user_branches ub
         WHERE ub.branch_id = $1
       `, [branchId]);
 
-      // Borrowers
       const borrowers = await q(`
         SELECT COUNT(*)::int AS count
         FROM public."Borrowers" bo
         WHERE bo."branchId" = $1
       `, [branchId]);
 
-      // Loans (safe counts; outstanding may not exist → try catch)
       const loans = await q(`
         SELECT COUNT(*)::int AS total
         FROM public."Loans" l
@@ -94,11 +366,9 @@ router.get(
           WHERE l."branchId" = $1
         `, { bind: [branchId], type: sequelize.QueryTypes.SELECT });
         outstanding = out?.[0]?.outstanding ?? null;
-      } catch { /* field may not exist; skip */ }
+      } catch {}
 
-      // Collections last 30d (LoanPayments or LoanRepayments)
-      let collections30 = null;
-      collections30 = await q(`
+      let collections30 = await q(`
         SELECT COALESCE(SUM(lp.amount),0)::numeric AS amount
         FROM public."LoanPayments" lp
         JOIN public."Loans" l ON l.id = lp."loanId"
@@ -112,26 +382,23 @@ router.get(
           AND lr."createdAt" >= (NOW() - INTERVAL '30 days')
       `, [branchId]);
 
-      // Expenses this month (optional)
       const expenses = await q(`
         SELECT COALESCE(SUM(e.amount),0)::numeric AS amount
         FROM public.expenses e
-        WHERE e.branchId = $1
+        WHERE e."branchId" = $1
           AND date_trunc('month', e."createdAt") = date_trunc('month', CURRENT_DATE)
       `, [branchId]);
 
-      // Savings in/out this month (optional)
       const savings = await q(`
         SELECT
-          COALESCE(SUM(CASE WHEN st.type ILIKE 'deposit%'   THEN st.amount ELSE 0 END),0)::numeric AS deposits,
-          COALESCE(SUM(CASE WHEN st.type ILIKE 'withdraw%'  THEN st.amount ELSE 0 END),0)::numeric AS withdrawals
+          COALESCE(SUM(CASE WHEN st.type ILIKE 'deposit%'  THEN st.amount ELSE 0 END),0)::numeric AS deposits,
+          COALESCE(SUM(CASE WHEN st.type ILIKE 'withdraw%' THEN st.amount ELSE 0 END),0)::numeric AS withdrawals
         FROM public.savingstransactions st
         JOIN public."Borrowers" bo ON bo.id = st."borrowerId"
         WHERE bo."branchId" = $1
           AND date_trunc('month', st."createdAt") = date_trunc('month', CURRENT_DATE)
       `, [branchId]);
 
-      // Response (skip nulls gracefully)
       return res.json({
         branch: {
           id: header[0].id,
@@ -139,7 +406,7 @@ router.get(
           code: header[0].code,
           phone: header[0].phone,
           address: header[0].address,
-          createdAt: header[0].createdat || header[0].createdAt,
+          createdAt: header[0].createdAt,
           tenantId: header[0].tenant_id || null,
         },
         kpis: {
@@ -149,55 +416,43 @@ router.get(
             total: loans?.[0]?.total ?? 0,
             outstanding: outstanding,
           },
-          collections: {
-            last30Days: collections30?.[0]?.amount ?? null,
-          },
-          expenses: {
-            thisMonth: expenses?.[0]?.amount ?? null,
-          },
+          collections: { last30Days: collections30?.[0]?.amount ?? null },
+          expenses: { thisMonth: expenses?.[0]?.amount ?? null },
           savings: savings ? {
             depositsThisMonth: savings?.[0]?.deposits ?? null,
             withdrawalsThisMonth: savings?.[0]?.withdrawals ?? null,
           } : null,
         },
       });
-    } catch (e) {
-      return next(e);
-    }
+    } catch (e) { return next(e); }
   }
 );
 
 /* ============================== ASSIGN STAFF =============================== */
-/** Enforces: one active branch per user until unassigned */
 router.post(
   '/:id/assign-staff',
   requireAuth,
   allow ? allow('branches:assign') : (_req, _res, next) => next(),
   async (req, res, next) => {
     try {
-      const branchId = parseInt(String(req.params.id), 10);
-      if (!Number.isFinite(branchId)) {
-        return res.status(400).json({ error: 'Branch id must be an integer' });
-      }
+      const branchId = toIntOrNull(req.params.id);
+      if (branchId === null) return res.status(400).json({ error: 'Branch id must be an integer' });
 
       const raw = req.body?.userIds;
       const userIds = Array.isArray(raw) ? raw.filter(Boolean) : [];
-      if (userIds.length === 0) {
-        return res.status(400).json({ error: 'userIds[] required (UUIDs)' });
-      }
+      if (userIds.length === 0) return res.status(400).json({ error: 'userIds[] required (UUIDs)' });
 
       const invalid = userIds.filter((id) => !isUuid(id));
       if (invalid.length) {
         return res.status(400).json({ error: 'All userIds must be UUID strings', details: { invalid } });
       }
 
-      // Ensure branch exists (+ tenant id if present)
+      // Ensure branch exists
       const Branch = getModel('Branch');
       const branch = await Branch.findOne({ where: { id: branchId } });
       if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
-      // Conflict check: any user currently assigned to a different branch?
-      // We use VIEW (user_branches) and join branches to retrieve name/tenant (tenant is optional)
+      // Conflicts
       const conflicts = await sequelize.query(`
         SELECT ub.user_id AS "userId", ub.branch_id AS "branchId",
                b.name AS "branchName"
@@ -207,9 +462,7 @@ router.post(
           AND ub.branch_id <> $2::int
       `, { bind: [userIds, branchId], type: sequelize.QueryTypes.SELECT });
 
-      if (conflicts && conflicts.length) {
-        // Return first conflict, but list all for the client
-        const first = conflicts[0];
+      if (conflicts?.length) {
         return res.status(409).json({
           error: 'User(s) already assigned to another branch — unassign first.',
           conflicts: conflicts.map(c => ({
@@ -221,7 +474,6 @@ router.post(
         });
       }
 
-      // Bulk insert: one statement → avoids 25P02 chains
       await sequelize.query(
         `
         INSERT INTO public.user_branches_rt (user_id, branch_id, created_at)
@@ -249,9 +501,9 @@ router.delete(
   allow ? allow('branches:assign') : (_req, _res, next) => next(),
   async (req, res, next) => {
     try {
-      const branchId = parseInt(String(req.params.id), 10);
+      const branchId = toIntOrNull(req.params.id);
       const userId = String(req.params.userId || '');
-      if (!Number.isFinite(branchId)) return res.status(400).json({ error: 'Branch id must be an integer' });
+      if (branchId === null) return res.status(400).json({ error: 'Branch id must be an integer' });
       if (!isUuid(userId)) return res.status(400).json({ error: 'userId must be a UUID' });
 
       const result = await sequelize.query(
@@ -271,8 +523,8 @@ router.get(
   allow ? allow('branches:view') : (_req, _res, next) => next(),
   async (req, res, next) => {
     try {
-      const branchId = parseInt(String(req.params.id), 10);
-      if (!Number.isFinite(branchId)) return res.status(400).json({ error: 'Branch id must be an integer' });
+      const branchId = toIntOrNull(req.params.id);
+      if (branchId === null) return res.status(400).json({ error: 'Branch id must be an integer' });
 
       const rows = await sequelize.query(
         `
