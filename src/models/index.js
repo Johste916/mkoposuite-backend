@@ -142,6 +142,7 @@ if (db.User && db.Branch) {
 }
 
 if (db.Borrower && db.Branch) {
+  // ✅ Use the model attribute `branchId` (which maps to DB column branch_id via field)
   db.Borrower.belongsTo(db.Branch, { foreignKey: 'branchId' });
   db.Branch.hasMany(db.Borrower,   { foreignKey: 'branchId' });
 }

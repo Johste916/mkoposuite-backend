@@ -40,21 +40,22 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true,
     },
 
-    // ✅ Map camelCase attribute to snake_case DB column
+    // ✅ Model attribute uses camelCase; DB column uses snake_case (branch_id)
+    //    Keep allowNull true to avoid breaking existing rows until backfilled.
     branchId: {
       type: DataTypes.INTEGER,
-      allowNull: false,
+      allowNull: true,
       field: 'branch_id',
     },
   }, {
-    tableName: 'Borrowers',  // matches your DB (per the error log)
+    tableName: 'Borrowers',  // matches your DB (per your inspection)
     timestamps: true,
   });
 
-  // ✅ Non-breaking: add association so includes work when available
+  // (Optional) Association helper. Index wiring already covers this, but harmless to keep.
   Borrower.associate = (models) => {
     if (models.Branch) {
-      Borrower.belongsTo(models.Branch, { as: 'Branch', foreignKey: 'branch_id' });
+      Borrower.belongsTo(models.Branch, { as: 'Branch', foreignKey: 'branchId' });
     }
   };
 

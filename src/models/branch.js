@@ -1,4 +1,3 @@
-// models/branch.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
@@ -28,9 +27,9 @@ module.exports = (sequelize, DataTypes) => {
     if (models.User) {
       Branch.hasMany(models.User, { foreignKey: 'branchId', as: 'Users' });
     }
-    // ✅ Non-breaking: expose Borrowers relation using actual DB column branch_id
+    // ✅ Non-breaking: use the Borrower model attribute "branchId" (maps to DB column branch_id)
     if (models.Borrower) {
-      Branch.hasMany(models.Borrower, { foreignKey: 'branch_id', as: 'Borrowers' });
+      Branch.hasMany(models.Borrower, { foreignKey: 'branchId', as: 'Borrowers' });
     }
   };
 
