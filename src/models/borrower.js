@@ -39,15 +39,24 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING,
       allowNull: true,
     },
+
+    // ✅ Map camelCase attribute to snake_case DB column
     branchId: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      field: 'branchId',
+      field: 'branch_id',
     },
   }, {
     tableName: 'Borrowers',  // matches your DB (per the error log)
     timestamps: true,
   });
+
+  // ✅ Non-breaking: add association so includes work when available
+  Borrower.associate = (models) => {
+    if (models.Branch) {
+      Borrower.belongsTo(models.Branch, { as: 'Branch', foreignKey: 'branch_id' });
+    }
+  };
 
   return Borrower;
 };

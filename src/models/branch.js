@@ -28,6 +28,10 @@ module.exports = (sequelize, DataTypes) => {
     if (models.User) {
       Branch.hasMany(models.User, { foreignKey: 'branchId', as: 'Users' });
     }
+    // ✅ Non-breaking: expose Borrowers relation using actual DB column branch_id
+    if (models.Borrower) {
+      Branch.hasMany(models.Borrower, { foreignKey: 'branch_id', as: 'Borrowers' });
+    }
   };
 
   return Branch;
