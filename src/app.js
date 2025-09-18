@@ -1184,6 +1184,41 @@ try {
         res.status(500).json({ error: e.message });
       }
     });
+
+    /* ✅ NEW: Branches-related tables/views presence check */
+    app.get('/api/health/db/branches-tables', async (_req, res) => {
+      // These are the tables/views your Branch UI & routes commonly rely on.
+      const expected = [
+        'branches',           // core table
+        'users',              // or "Users" depending on old migrations
+        'user_branches',      // often a VIEW used for listing assignments
+        'user_branches_rt',   // runtime relation used by assign-staff
+        'Borrowers',          // Sequelize default-cased table in some setups
+        'Loans',
+        'LoanPayments',
+        'LoanRepayments',
+        'expenses',
+        'savingstransactions'
+      ];
+      try {
+        const [tables] = await sequelize2.query(`
+          SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'
+        `);
+        const [views] = await sequelize2.query(`
+          SELECT table_name FROM information_schema.views WHERE table_schema = 'public'
+        `);
+        const presentNames = new Set([
+          ...tables.map(t => t.table_name),
+          ...views.map(v => v.table_name),
+        ]);
+        const present = expected.filter(t => presentNames.has(t));
+        const missing = expected.filter(t => !presentNames.has(t));
+        res.json({ ok: missing.length === 0, present, missing, totalSeenInPublic: presentNames.size });
+      } catch (e) {
+        console.error('DB table check error:', e);
+        res.status(500).json({ error: e.message });
+      }
+    });
   }
 } catch {}
 
