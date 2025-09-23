@@ -71,9 +71,10 @@ module.exports = (sequelize, DataTypes) => {
       });
     }
     if (models.BorrowerGroupMember) {
+      // 👇 align alias with controllers/search lists
       BorrowerGroup.hasMany(models.BorrowerGroupMember, {
         foreignKey: "groupId",
-        as: "members",
+        as: "groupMembers",
         onDelete: "CASCADE",
       });
     }

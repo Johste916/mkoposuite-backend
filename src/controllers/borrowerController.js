@@ -2,6 +2,8 @@
 
 const { Op } = require("sequelize");
 const models = require("../models");
+const fs = require("fs");
+const path = require("path");
 
 // Models (nullable-safe)
 const Borrower           = models.Borrower || null;
@@ -57,6 +59,22 @@ const toApi = (b) => {
 
 const safeNum = (v) => Number(v || 0);
 
+/* helper: store an uploaded photo if the Borrower has a photoUrl column */
+async function maybePersistPhoto(borrowerId, file) {
+  if (!file || !Borrower?.rawAttributes?.photoUrl) return null;
+  try {
+    const uploadsRoot = path.resolve(__dirname, "..", "uploads", "borrowers");
+    fs.mkdirSync(uploadsRoot, { recursive: true });
+    const ext = (file.originalname?.split(".").pop() || "jpg").toLowerCase();
+    const fname = `${borrowerId}-${Date.now()}.${ext}`;
+    const out = path.join(uploadsRoot, fname);
+    fs.writeFileSync(out, file.buffer);
+    return `/uploads/borrowers/${fname}`;
+  } catch {
+    return null;
+  }
+}
+
 // ---------- CRUD ----------
 exports.getAllBorrowers = async (req, res) => {
   try {
@@ -99,32 +117,60 @@ exports.createBorrower = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
 
-    const { name, fullName, nationalId, phone, email, address } = req.body || {};
-    if (!name && !fullName) return res.status(400).json({ error: "name is required" });
+    const existingCols = await getExistingColumns(Borrower);
 
-    // If model defines branchId and it's NOT NULL, require it from body or header.
+    // Accept both JSON and multipart/form-data (fields from AddBorrower)
+    const b = req.body || {};
+    const firstName = (b.firstName || "").trim();
+    const lastName  = (b.lastName || "").trim();
+    const displayName = (b.name || b.fullName || `${firstName} ${lastName}`.trim()).trim();
+
+    if (!displayName) return res.status(400).json({ error: "name is required" });
+
+    // Branch requirement if column exists and is NOT NULL
     const needsBranchId =
       !!Borrower.rawAttributes.branchId &&
       Borrower.rawAttributes.branchId.allowNull === false;
     const incomingBranchId =
-      req.body?.branchId || req.headers["x-branch-id"] || req.user?.branchId || null;
+      b.branchId || req.headers["x-branch-id"] || req.user?.branchId || null;
     if (needsBranchId && !incomingBranchId) {
       return res.status(400).json({ error: "branchId is required" });
     }
 
-    const payload = {
-      name: name || fullName || "",
-      nationalId: nationalId || null,
-      phone: phone || null,
-      email: email || null,
-      address: address || null,
-      status: "active",
-    };
-    if (Borrower.rawAttributes.branchId && incomingBranchId) {
-      payload.branchId = incomingBranchId;
+    // Build payload only with columns that exist in DB
+    const payload = {};
+    if (existingCols.includes("name"))        payload.name = displayName;
+    if (existingCols.includes("nationalId"))  payload.nationalId = b.nationalId || b.idNumber || null;
+    if (existingCols.includes("phone"))       payload.phone = b.phone || null;
+    if (existingCols.includes("email"))       payload.email = b.email || null;
+    if (existingCols.includes("address"))     payload.address = b.addressLine || b.address || null;
+    if (existingCols.includes("status"))      payload.status = "active";
+    if (existingCols.includes("branch_id") || existingCols.includes("branchId")) {
+      if (incomingBranchId) payload.branchId = incomingBranchId;
     }
 
+    // Optional extras — only assign if such columns exist in your schema
+    if (existingCols.includes("gender"))        payload.gender = b.gender || null;
+    if (existingCols.includes("birthDate"))     payload.birthDate = b.birthDate || null;
+    if (existingCols.includes("employmentStatus")) payload.employmentStatus = b.employmentStatus || null;
+    if (existingCols.includes("idType"))        payload.idType = b.idType || null;
+    if (existingCols.includes("idIssuedDate"))  payload.idIssuedDate = b.idIssuedDate || null;
+    if (existingCols.includes("idExpiryDate"))  payload.idExpiryDate = b.idExpiryDate || null;
+    if (existingCols.includes("nextKinName"))   payload.nextKinName = b.nextKinName || null;
+    if (existingCols.includes("nextKinPhone"))  payload.nextKinPhone = b.nextKinPhone || null;
+    if (existingCols.includes("regDate"))       payload.regDate = b.regDate || null;
+    if (existingCols.includes("loanOfficerId")) payload.loanOfficerId = b.loanOfficerId || null;
+    if (existingCols.includes("groupId"))       payload.groupId = b.loanType === "group" ? (b.groupId || null) : null;
+
     const created = await Borrower.create(payload);
+
+    // If a photo file was posted and DB has photoUrl, persist it
+    const file = Array.isArray(req.files) && req.files.find(f => f.fieldname === "photo");
+    const photoUrl = await maybePersistPhoto(created.id, file);
+    if (photoUrl && existingCols.includes("photoUrl")) {
+      await created.update({ photoUrl });
+    }
+
     res.status(201).json(toApi(created));
   } catch (error) {
     console.error("createBorrower error:", error);
@@ -153,8 +199,6 @@ exports.updateBorrower = async (req, res) => {
     const { name, fullName, nationalId, phone, email, address, branchId, status } = req.body || {};
 
     // 🔒 Single-branch policy for borrowers:
-    // If an update attempts to change branchId from an existing value to a different one,
-    // require explicit unassign first.
     if (Borrower.rawAttributes.branchId && typeof branchId !== 'undefined') {
       const current = b.branchId;
       if (current && Number(current) !== Number(branchId)) {
@@ -174,7 +218,6 @@ exports.updateBorrower = async (req, res) => {
       phone: phone ?? b.phone,
       email: email ?? b.email,
       address: address ?? b.address,
-      // Only allow setting branchId if either unchanged, or was null.
       branchId: Borrower.rawAttributes.branchId
         ? ((typeof branchId === 'undefined' || b.branchId) ? b.branchId : branchId)
         : b.branchId,
@@ -203,12 +246,6 @@ exports.deleteBorrower = async (req, res) => {
 };
 
 // ---------- Explicit Branch Assign/Unassign (Additive) ----------
-/**
- * POST /api/borrowers/:id/branch
- * Body: { branchId: 123 }
- * - Assigns when currently unassigned, or no-op if same branch.
- * - If already assigned to another branch → 409 with unassign hint.
- */
 exports.assignBranch = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
@@ -243,11 +280,6 @@ exports.assignBranch = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/borrowers/:id/branch
- * - Unassigns borrower from branch (sets branchId = NULL) **only if** column is nullable.
- * - If non-nullable, returns 422 (cannot unassign in this schema).
- */
 exports.unassignBranch = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
@@ -298,7 +330,7 @@ exports.getRepaymentsByBorrower = async (req, res) => {
     if (!Loan || !LoanRepayment) return res.json([]);
     const rows = await LoanRepayment.findAll({
       include: [{ model: Loan, where: { borrowerId: req.params.id } }],
-      order: [["dueDate", "DESC"], ["createdAt", "DESC"]], // dueDate not "date"
+      order: [["dueDate", "DESC"], ["createdAt", "DESC"]],
       limit: 500,
     });
     res.json(rows || []);
@@ -381,7 +413,7 @@ exports.getSavingsByBorrower = async (req, res) => {
       "amount",
       "date",
       "notes",
-      "reference", // will be skipped if not in DB
+      "reference",
       "status",
       "reversed",
       "createdAt",
@@ -724,6 +756,8 @@ exports.importBorrowers = async (req, res) => {
       return res.status(400).json({ error: 'CSV must include a "name" column' });
 
     const created = [];
+    const existingCols = await getExistingColumns(Borrower);
+
     for (let i = 1; i < lines.length; i++) {
       const cols = lines[i].split(",").map((c) => c.trim());
       const name = cols[nameIdx];
@@ -731,7 +765,12 @@ exports.importBorrowers = async (req, res) => {
       const phone = phoneIdx !== -1 ? cols[phoneIdx] : null;
       const nationalId = nidIdx !== -1 ? cols[nidIdx] : null;
 
-      const b = await Borrower.create({ name, phone, nationalId, status: "active" });
+      const payload = { status: "active" };
+      if (existingCols.includes("name")) payload.name = name;
+      if (existingCols.includes("phone")) payload.phone = phone;
+      if (existingCols.includes("nationalId")) payload.nationalId = nationalId;
+
+      const b = await Borrower.create(payload);
       created.push(toApi(b));
       if (created.length >= 1000) break;
     }
@@ -762,7 +801,6 @@ exports.summaryReport = async (req, res) => {
         include: [{ model: Loan, where: { borrowerId: b.id }, attributes: [] }],
       });
     }
-    // fallback to 'amount' if 'amountPaid' does not exist
     const totalRepayments = reps.reduce(
       (acc, r) => acc + safeNum(r.amountPaid ?? r.amount),
       0
@@ -778,7 +816,7 @@ exports.summaryReport = async (req, res) => {
         "amount",
         "date",
         "notes",
-        "reference", // skipped if absent in DB
+        "reference",
         "status",
         "reversed",
         "createdAt",

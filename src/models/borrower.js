@@ -13,36 +13,35 @@ module.exports = (sequelize, DataTypes) => {
       set(val) { this.setDataValue('name', val); },
     },
 
-    nationalId: { type: DataTypes.STRING, allowNull: false, unique: true },
-    phone:      { type: DataTypes.STRING, allowNull: false },
+    // Made nullable to avoid blocking first-time captures
+    nationalId: { type: DataTypes.STRING, allowNull: true, unique: true },
+    phone:      { type: DataTypes.STRING, allowNull: true },
     address:    { type: DataTypes.STRING, allowNull: true },
 
-    // ✅ Map camelCase attribute to snake_case DB column if you added it that way
-    // If your DB column is "branch_id", keep field:'branch_id'.
-    // If you migrated a camel column "branchId", change field to 'branchId'.
+    // Attribute "branchId" mapped to DB column "branch_id"
     branchId: {
       type: DataTypes.INTEGER,
-      allowNull: true,          // keep loose to avoid breaking inserts that don't set it
-      field: 'branch_id',       // <-- matches your earlier mapping
+      allowNull: true,
+      field: 'branch_id',
     },
 
-    // ✅ NEW: status column your controllers expect
+    // Present in controllers; keep default here
     status: {
       type: DataTypes.STRING(32),
       allowNull: false,
-      defaultValue: 'active',   // rows created before the migration will read as 'active'
+      defaultValue: 'active',
       field: 'status',
     },
   }, {
-    tableName: 'Borrowers',     // matches your DB table name with capital B
+    tableName: 'Borrowers',
     timestamps: true,
   });
 
-  // Associations (unchanged)
+  // Associations
   Borrower.associate = (models) => {
     if (models.Branch) {
-      // Uses the physical DB column name
-      Borrower.belongsTo(models.Branch, { as: 'Branch', foreignKey: 'branch_id' });
+      // Use the attribute name; Sequelize maps it to 'branch_id' column via `field`
+      Borrower.belongsTo(models.Branch, { as: 'Branch', foreignKey: 'branchId' });
     }
   };
 

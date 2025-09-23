@@ -56,7 +56,14 @@ router.post('/groups/:groupId/import',   authenticateUser, requireMulterSingleFi
 
 /* ---------------- Borrowers CRUD ---------------- */
 router.get('/',                          authenticateUser, ctrl.getAllBorrowers);
-router.post('/',                         authenticateUser, ctrl.createBorrower);
+
+/**
+ * 🆕 IMPORTANT:
+ * Frontend sends multipart/form-data (optional photo). We must parse it.
+ * Using upload.any() keeps backward compatibility if no files are sent.
+ */
+router.post('/',                         authenticateUser, requireMulterAny, ctrl.createBorrower);
+
 router.put('/:id',                       authenticateUser, ctrl.updateBorrower);
 router.delete('/:id',                    authenticateUser, ctrl.deleteBorrower);
 
