@@ -72,6 +72,12 @@ db.Borrower      = tryLoad(() => require('./borrower')(sequelize, DataTypes), 'B
 db.Loan          = tryLoad(() => require('./loan')(sequelize, DataTypes), 'Loan');
 db.LoanRepayment = tryLoad(() => require('./loanrepayment')(sequelize, DataTypes), 'LoanRepayment');
 db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes), 'LoanPayment');
+
+/* 🆕 Ensure LoanSchedule is registered regardless of file casing */
+db.LoanSchedule =
+  tryLoad(() => require('./loanschedule')(sequelize, DataTypes), 'LoanSchedule') ||
+  tryLoad(() => require('./loanSchedule')(sequelize, DataTypes), 'LoanSchedule');
+
 db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes), 'LoanProduct');
 
@@ -137,8 +143,6 @@ db.BorrowerGroupMember = tryLoad(() => require('./borrowergroupmember')(sequeliz
 
 /* ------------------------------------------------------------------
    ✅ Repayment model compatibility shim
-   Ensures both names exist (db & sequelize.models), so controller can
-   use either LoanPayment or LoanRepayment without crashing.
 ------------------------------------------------------------------- */
 try {
   if (db.LoanPayment && !db.LoanRepayment) db.LoanRepayment = db.LoanPayment;
@@ -177,6 +181,12 @@ if (db.Loan && db.Branch) {
   db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
   db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId' });
   db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId', as: 'loans' });
+}
+
+/* 🆕 LoanSchedule associations (only if model loaded) */
+if (db.LoanSchedule && db.Loan) {
+  db.LoanSchedule.belongsTo(db.Loan, { foreignKey: 'loanId' });
+  db.Loan.hasMany(db.LoanSchedule,   { foreignKey: 'loanId' });
 }
 
 if (db.LoanRepayment && db.Loan) {
@@ -394,7 +404,6 @@ if (db.BorrowerGroup && db.User && hasAttr(db.BorrowerGroup, 'officerId')) {
   db.BorrowerGroup.belongsTo(db.User, { foreignKey: 'officerId', as: 'officer' });
   db.User.hasMany(db.BorrowerGroup,   { foreignKey: 'officerId', as: 'officerGroups' });
 }
-
 if (db.BorrowerGroup && db.BorrowerGroupMember) {
   db.BorrowerGroup.hasMany(db.BorrowerGroupMember, { foreignKey: 'groupId', as: 'groupMembers', onDelete: 'CASCADE' });
   db.BorrowerGroupMember.belongsTo(db.BorrowerGroup, { foreignKey: 'groupId', as: 'group' });

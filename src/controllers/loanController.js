@@ -5,8 +5,8 @@ const {
   Branch,
   User,
   LoanProduct,
-  LoanRepayment,   // keep existing import to avoid breaking other parts
-  LoanPayment,     // NEW: prefer this when available
+  LoanRepayment, // keep existing import to avoid breaking other parts
+  LoanPayment,   // NEW: import explicitly so we never get undefined
   LoanSchedule,
   AuditLog,
   sequelize,
@@ -53,6 +53,7 @@ let LOAN_COLUMNS_CACHE = null;
 let LOAN_TABLE_DESC_CACHE = null;
 let USERS_TABLE_DESC_CACHE = null;
 let LOAN_PAYMENTS_DESC_CACHE = null;
+let LOAN_SCHEDULES_DESC_CACHE = null;
 
 const getTableNameFromModel = (Model, fallback) => {
   const t = Model?.getTableName ? Model.getTableName() : fallback;
@@ -86,10 +87,18 @@ async function describeTableCached(tableName) {
       if (!LOAN_PAYMENTS_DESC_CACHE) LOAN_PAYMENTS_DESC_CACHE = await qi.describeTable("loan_payments");
       return LOAN_PAYMENTS_DESC_CACHE;
     }
+    if (tableName === "loan_schedules") {
+      if (!LOAN_SCHEDULES_DESC_CACHE) LOAN_SCHEDULES_DESC_CACHE = await qi.describeTable("loan_schedules");
+      return LOAN_SCHEDULES_DESC_CACHE;
+    }
     return await qi.describeTable(tableName);
   } catch {
     return null;
   }
+}
+
+async function tableExists(tableName) {
+  return !!(await describeTableCached(tableName));
 }
 
 async function getLoanColumns() {
@@ -280,7 +289,10 @@ const createLoan = async (req, res) => {
 
     // initiatedBy only if present in model
     if ("initiatedBy" in (Loan.rawAttributes || {})) {
-      body.initiatedBy = req.user?.id || null;
+      // only set if FK type is compatible
+      if (await loanUserFkIsCompatible("initiatedBy")) {
+        body.initiatedBy = req.user?.id || null;
+      }
     }
 
     const loan = await Loan.create(body);
@@ -384,32 +396,17 @@ const getLoanById = async (req, res) => {
     };
 
     if (includeRepayments === "true") {
-      // Prefer direct imports; fallback to registry names if needed
+      // Prefer explicit imports (guaranteed), then registry fallbacks
       const RepaymentModel =
         LoanPayment ||
         LoanRepayment ||
-        (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment)) ||
-        null;
+        (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment));
 
       if (!RepaymentModel || typeof RepaymentModel.findAll !== "function") {
         console.warn("[loans] No repayment model registered; returning empty repayments list");
       } else {
-        // Pick safest ordering column by inspecting table definition if possible
-        let orderCol = "paymentDate";
-        try {
-          const qi = sequelize.getQueryInterface();
-          const tn = RepaymentModel.getTableName
-            ? RepaymentModel.getTableName()
-            : "loan_payments";
-          const tableName = typeof tn === "string" ? tn : tn.tableName || "loan_payments";
-          const desc = await qi.describeTable(tableName);
-          if (!desc?.paymentDate && desc?.date) orderCol = "date";
-          if (!desc?.paymentDate && !desc?.date && desc?.createdAt) orderCol = "createdAt";
-        } catch (_) {
-          // fallback to rawAttributes if describeTable isn't available
-          const attrs = RepaymentModel.rawAttributes || {};
-          orderCol = attrs.paymentDate ? "paymentDate" : attrs.date ? "date" : "createdAt";
-        }
+        const attrs = RepaymentModel.rawAttributes || {};
+        let orderCol = attrs.paymentDate ? "paymentDate" : attrs.date ? "date" : "createdAt";
 
         try {
           repayments = await RepaymentModel.findAll({
@@ -449,11 +446,20 @@ const getLoanById = async (req, res) => {
     }
 
     let schedule = [];
-    if (includeSchedule === "true") {
-      schedule = await LoanSchedule.findAll({
-        where: { loanId: loan.id },
-        order: [["period", "ASC"]],
-      });
+    if (includeSchedule === "true" && LoanSchedule && typeof LoanSchedule.findAll === "function") {
+      if (await tableExists("loan_schedules")) {
+        try {
+          schedule = await LoanSchedule.findAll({
+            where: { loanId: loan.id },
+            order: [["period", "ASC"]],
+          });
+        } catch (e) {
+          console.warn(`[loans] schedule query failed: ${e.message}`);
+          schedule = [];
+        }
+      } else {
+        console.warn("[loans] loan_schedules table missing; returning empty schedule");
+      }
     }
 
     res.json({
@@ -621,37 +627,42 @@ const updateLoanStatus = async (req, res) => {
       }
       fields.disbursementDate = new Date();
 
-      const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
-      if (count === 0) {
-        const input = {
-          amount: Number(loan.amount || 0),
-          interestRate: Number(loan.interestRate || 0),
-          term: loan.termMonths,
-          issueDate: loan.startDate,
-        };
-        const gen =
-          loan.interestMethod === "flat"
-            ? generateFlatRateSchedule(input)
-            : loan.interestMethod === "reducing"
-            ? generateReducingBalanceSchedule(input)
-            : [];
+      // Only touch schedule if model + table exist
+      if (LoanSchedule && typeof LoanSchedule.count === "function" && (await tableExists("loan_schedules"))) {
+        const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
+        if (count === 0) {
+          const input = {
+            amount: Number(loan.amount || 0),
+            interestRate: Number(loan.interestRate || 0),
+            term: loan.termMonths,
+            issueDate: loan.startDate,
+          };
+          const gen =
+            loan.interestMethod === "flat"
+              ? generateFlatRateSchedule(input)
+              : loan.interestMethod === "reducing"
+              ? generateReducingBalanceSchedule(input)
+              : [];
 
-        const rows = gen.map((s, i) => ({
-          loanId: loan.id,
-          period: i + 1,
-          dueDate: s.dueDate,
-          principal: Number(s.principal || 0),
-          interest: Number(s.interest || 0),
-          fees: Number(s.fees || 0),
-          penalties: 0,
-          total: Number(
-            s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)
-          ),
-        }));
+          const rows = gen.map((s, i) => ({
+            loanId: loan.id,
+            period: i + 1,
+            dueDate: s.dueDate,
+            principal: Number(s.principal || 0),
+            interest: Number(s.interest || 0),
+            fees: Number(s.fees || 0),
+            penalties: 0,
+            total: Number(
+              s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)
+            ),
+          }));
 
-        if (rows.length) {
-          await LoanSchedule.bulkCreate(rows, { transaction: t });
+          if (rows.length) {
+            await LoanSchedule.bulkCreate(rows, { transaction: t });
+          }
         }
+      } else {
+        console.warn("[loans] Skipping schedule generation (model/table missing)");
       }
     }
 
