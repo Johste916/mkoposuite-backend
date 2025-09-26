@@ -75,7 +75,7 @@ db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),
 
 /* 🆕 Ensure LoanSchedule is registered regardless of file casing */
 db.LoanSchedule =
-  tryLoad(() => require('./loanschedule')(sequelize, DataTypes), 'LoanSchedule') ||
+  tryLoad(() => require('./loanSchedule')(sequelize, DataTypes), 'LoanSchedule') ||
   tryLoad(() => require('./loanSchedule')(sequelize, DataTypes), 'LoanSchedule');
 
 db.Setting       = require('./setting')(sequelize, DataTypes);

@@ -5,8 +5,8 @@ const {
   Branch,
   User,
   LoanProduct,
-  LoanRepayment,   // keep existing import to avoid breaking other parts
-  LoanPayment,     // explicit to avoid undefined
+  LoanRepayment, // keep existing import to avoid breaking other parts
+  LoanPayment,   // explicit to avoid undefined
   LoanSchedule,
   AuditLog,
   sequelize,
@@ -299,9 +299,11 @@ const createLoan = async (req, res) => {
     body.status = "pending";
 
     // initiatedBy only if present in model AND types match AND column exists
-    if ("initiatedBy" in (Loan.rawAttributes || {})
-        && await loanUserFkIsCompatible("initiatedBy")
-        && await loanColumnExists("initiatedBy")) {
+    if (
+      "initiatedBy" in (Loan.rawAttributes || {}) &&
+      (await loanUserFkIsCompatible("initiatedBy")) &&
+      (await loanColumnExists("initiatedBy"))
+    ) {
       body.initiatedBy = req.user?.id || null;
     }
 
@@ -609,7 +611,7 @@ const updateLoanStatus = async (req, res) => {
     const { status, override } = req.body;
     const next = String(status || "").toLowerCase();
 
-    const loan = await Loan.findByPk(req.params.id, { transaction: t });
+    const loan = await Loan.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
     if (!loan) {
       await t.rollback();
       return res.status(404).json({ error: "Loan not found" });
@@ -627,12 +629,12 @@ const updateLoanStatus = async (req, res) => {
       fields.status = next;
     } else {
       await t.rollback();
-      return res.status(500).json({ error: 'loans.status column missing' });
+      return res.status(500).json({ error: "loans.status column missing" });
     }
 
     if (next === "approved") {
       // Only set approvedBy if loans.approvedBy exists and FK types match
-      if (await loanColumnExists("approvedBy") && (await loanUserFkIsCompatible("approvedBy"))) {
+      if ((await loanColumnExists("approvedBy")) && (await loanUserFkIsCompatible("approvedBy"))) {
         fields.approvedBy = req.user?.id || null;
       }
       if (await loanColumnExists("approvalDate")) {
@@ -640,8 +642,17 @@ const updateLoanStatus = async (req, res) => {
       }
     }
 
+    if (next === "rejected") {
+      if ((await loanColumnExists("rejectedBy")) && (await loanUserFkIsCompatible("rejectedBy"))) {
+        fields.rejectedBy = req.user?.id || null;
+      }
+      if (await loanColumnExists("rejectedDate")) {
+        fields.rejectedDate = new Date();
+      }
+    }
+
     if (next === "disbursed") {
-      if (await loanColumnExists("disbursedBy") && (await loanUserFkIsCompatible("disbursedBy"))) {
+      if ((await loanColumnExists("disbursedBy")) && (await loanUserFkIsCompatible("disbursedBy"))) {
         fields.disbursedBy = req.user?.id || null;
       }
       if (await loanColumnExists("disbursementDate")) {
@@ -693,7 +704,7 @@ const updateLoanStatus = async (req, res) => {
         await t.rollback();
         return res.status(400).json({ error: "Outstanding > 0, override required" });
       }
-      if (await loanColumnExists("closedBy") && (await loanUserFkIsCompatible("closedBy"))) {
+      if ((await loanColumnExists("closedBy")) && (await loanUserFkIsCompatible("closedBy"))) {
         fields.closedBy = req.user?.id || null;
       }
       if (await loanColumnExists("closedDate")) {
@@ -744,7 +755,7 @@ const updateLoanStatus = async (req, res) => {
       loan: updatedLoan,
     });
   } catch (err) {
-    try { await t.rollback(); } catch {}
+    try { await sequelize.transaction(t => t.rollback?.()); } catch {}
     console.error("Update loan status error:", err);
     res.status(500).json({ error: "Failed to update loan status" });
   }
