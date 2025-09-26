@@ -135,6 +135,27 @@ db.PlanEntitlement = tryLoad(() => require('./planentitlement')(sequelize, DataT
 db.BorrowerGroup       = tryLoad(() => require('./borrowergroup')(sequelize, DataTypes), 'BorrowerGroup');
 db.BorrowerGroupMember = tryLoad(() => require('./borrowergroupmember')(sequelize, DataTypes), 'BorrowerGroupMember');
 
+/* ------------------------------------------------------------------
+   ✅ Repayment model compatibility shim
+   Ensures both names exist (db & sequelize.models), so controller can
+   use either LoanPayment or LoanRepayment without crashing.
+------------------------------------------------------------------- */
+try {
+  if (db.LoanPayment && !db.LoanRepayment) db.LoanRepayment = db.LoanPayment;
+  if (db.LoanRepayment && !db.LoanPayment) db.LoanPayment = db.LoanRepayment;
+
+  if (sequelize.models) {
+    if (sequelize.models.LoanPayment && !sequelize.models.LoanRepayment) {
+      sequelize.models.LoanRepayment = sequelize.models.LoanPayment;
+    }
+    if (sequelize.models.LoanRepayment && !sequelize.models.LoanPayment) {
+      sequelize.models.LoanPayment = sequelize.models.LoanRepayment;
+    }
+  }
+} catch (e) {
+  console.warn('⚠️  Repayment alias setup skipped:', e.message);
+}
+
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
   db.User.belongsTo(db.Branch,   { foreignKey: 'branchId' });
