@@ -5,8 +5,8 @@ const {
   Branch,
   User,
   LoanProduct,
-  LoanRepayment, // keep existing import to avoid breaking other parts
-  LoanPayment,   // NEW: import explicitly so we never get undefined
+  LoanRepayment,   // keep existing import to avoid breaking other parts
+  LoanPayment,     // explicit to avoid undefined
   LoanSchedule,
   AuditLog,
   sequelize,
@@ -115,6 +115,17 @@ async function getLoanColumns() {
     Object.values(Loan.rawAttributes || {}).map((a) => a.field || a.fieldName || a)
   );
   return LOAN_COLUMNS_CACHE;
+}
+
+/** Map a model attr to its DB field name */
+function toDbField(attrName) {
+  return Loan?.rawAttributes?.[attrName]?.field || attrName;
+}
+
+/** Does this logical attr exist as a DB column on loans? */
+async function loanColumnExists(attrName) {
+  const cols = await getLoanColumns();
+  return cols.has(toDbField(attrName));
 }
 
 /** Return list of model attribute names whose mapped DB field actually exists */
@@ -287,12 +298,11 @@ const createLoan = async (req, res) => {
     // Persisted status starts as pending
     body.status = "pending";
 
-    // initiatedBy only if present in model
-    if ("initiatedBy" in (Loan.rawAttributes || {})) {
-      // only set if FK type is compatible
-      if (await loanUserFkIsCompatible("initiatedBy")) {
-        body.initiatedBy = req.user?.id || null;
-      }
+    // initiatedBy only if present in model AND types match AND column exists
+    if ("initiatedBy" in (Loan.rawAttributes || {})
+        && await loanUserFkIsCompatible("initiatedBy")
+        && await loanColumnExists("initiatedBy")) {
+      body.initiatedBy = req.user?.id || null;
     }
 
     const loan = await Loan.create(body);
@@ -610,22 +620,33 @@ const updateLoanStatus = async (req, res) => {
       return res.status(400).json({ error: `Cannot change ${loan.status} → ${next}` });
     }
 
-    const before = loan.toJSON();
-    const fields = { status: next };
+    // Build fields only for columns that actually exist
+    const fields = {};
+
+    if (await loanColumnExists("status")) {
+      fields.status = next;
+    } else {
+      await t.rollback();
+      return res.status(500).json({ error: 'loans.status column missing' });
+    }
 
     if (next === "approved") {
-      // Only set approvedBy if loans.approvedBy type matches Users.id type
-      if ("approvedBy" in Loan.rawAttributes && (await loanUserFkIsCompatible("approvedBy"))) {
+      // Only set approvedBy if loans.approvedBy exists and FK types match
+      if (await loanColumnExists("approvedBy") && (await loanUserFkIsCompatible("approvedBy"))) {
         fields.approvedBy = req.user?.id || null;
       }
-      fields.approvalDate = new Date();
+      if (await loanColumnExists("approvalDate")) {
+        fields.approvalDate = new Date();
+      }
     }
 
     if (next === "disbursed") {
-      if ("disbursedBy" in Loan.rawAttributes && (await loanUserFkIsCompatible("disbursedBy"))) {
+      if (await loanColumnExists("disbursedBy") && (await loanUserFkIsCompatible("disbursedBy"))) {
         fields.disbursedBy = req.user?.id || null;
       }
-      fields.disbursementDate = new Date();
+      if (await loanColumnExists("disbursementDate")) {
+        fields.disbursementDate = new Date();
+      }
 
       // Only touch schedule if model + table exist
       if (LoanSchedule && typeof LoanSchedule.count === "function" && (await tableExists("loan_schedules"))) {
@@ -672,19 +693,33 @@ const updateLoanStatus = async (req, res) => {
         await t.rollback();
         return res.status(400).json({ error: "Outstanding > 0, override required" });
       }
-      if ("closedBy" in Loan.rawAttributes && (await loanUserFkIsCompatible("closedBy"))) {
+      if (await loanColumnExists("closedBy") && (await loanUserFkIsCompatible("closedBy"))) {
         fields.closedBy = req.user?.id || null;
       }
-      fields.closedDate = new Date();
-      if (override) fields.closeReason = "override";
+      if (await loanColumnExists("closedDate")) {
+        fields.closedDate = new Date();
+      }
+      if (override && (await loanColumnExists("closeReason"))) {
+        fields.closeReason = "override";
+      }
     }
 
-    await loan.update(fields, { transaction: t });
+    // Log what we are about to SET (helps pinpoint missing columns locally)
+    try {
+      await loan.update(fields, { transaction: t });
+    } catch (e) {
+      console.error(
+        "[loans] loan.update failed with fields=",
+        Object.keys(fields).map(k => `${k}→${toDbField(k)}`).join(", "),
+        "error:", e?.parent?.code || e?.name, e?.parent?.message || e?.message
+      );
+      throw e;
+    }
 
     await writeAudit({
       entityId: loan.id,
       action: `status:${next}`,
-      before,
+      before: loan.toJSON(),
       after: loan.toJSON(),
       req,
     });
@@ -709,7 +744,7 @@ const updateLoanStatus = async (req, res) => {
       loan: updatedLoan,
     });
   } catch (err) {
-    await t.rollback();
+    try { await t.rollback(); } catch {}
     console.error("Update loan status error:", err);
     res.status(500).json({ error: "Failed to update loan status" });
   }
