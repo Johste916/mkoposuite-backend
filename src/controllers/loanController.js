@@ -51,6 +51,7 @@ const writeAudit = async ({ entityId, action, before, after, req }) => {
 let LOAN_COLUMNS_CACHE = null;
 let LOAN_TABLE_DESC_CACHE = null;
 let USERS_TABLE_DESC_CACHE = null;
+let LOAN_PAYMENTS_DESC_CACHE = null;
 
 const getTableNameFromModel = (Model, fallback) => {
   const t = Model?.getTableName ? Model.getTableName() : fallback;
@@ -79,6 +80,10 @@ async function describeTableCached(tableName) {
     if (tableName === getUsersTableName()) {
       if (!USERS_TABLE_DESC_CACHE) USERS_TABLE_DESC_CACHE = await qi.describeTable(tableName);
       return USERS_TABLE_DESC_CACHE;
+    }
+    if (tableName === "loan_payments") {
+      if (!LOAN_PAYMENTS_DESC_CACHE) LOAN_PAYMENTS_DESC_CACHE = await qi.describeTable("loan_payments");
+      return LOAN_PAYMENTS_DESC_CACHE;
     }
     return await qi.describeTable(tableName);
   } catch {
@@ -177,22 +182,6 @@ async function loanUserFkIsCompatible(fkAttr /* e.g., 'approvedBy' or 'disbursed
   } catch {
     // Be conservative: if we can't tell, don't write FK
     return false;
-  }
-}
-
-/** If loans.<fk> is INT, coerce req.user.id to INT; otherwise return the original */
-async function coerceUserIdForLoanFk(fkAttr, userId) {
-  try {
-    const loansDesc = await describeTableCached(getLoansTableName());
-    const fkDbField = Loan.rawAttributes?.[fkAttr]?.field || fkAttr;
-    const loanFkType = normalizePgType(loansDesc?.[fkDbField]?.type || "unknown");
-    if (loanFkType === "int") {
-      const n = Number(userId);
-      return Number.isInteger(n) ? n : null;
-    }
-    return userId ?? null; // uuid or other types
-  } catch {
-    return null;
   }
 }
 
@@ -394,38 +383,40 @@ const getLoanById = async (req, res) => {
     };
 
     if (includeRepayments === "true") {
-      // Prefer LoanPayment; else fall back to LoanRepayment; else skip
+      // Prefer registered models; fall back to imported LoanRepayment
       const RepaymentModel =
-        sequelize.models.LoanPayment ||
-        sequelize.models.LoanRepayment ||
-        LoanRepayment ||
-        null;
+        (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment)) ||
+        LoanRepayment;
 
-      if (RepaymentModel && typeof RepaymentModel.findAll === "function") {
-        // Choose order column based on the model's attributes
-        const ra = RepaymentModel.rawAttributes || {};
-        const orderCol = ra.paymentDate
-          ? "paymentDate"
-          : ra.date
-          ? "date"
-          : ra.paidAt
-          ? "paidAt"
-          : "createdAt";
+      if (!RepaymentModel || typeof RepaymentModel.findAll !== "function") {
+        console.warn("[loans] No repayment model registered; returning empty repayments list");
+      } else {
+        // Decide order column safely from model attributes; fallback to createdAt
+        const attrs = RepaymentModel.rawAttributes || {};
+        let orderCol = attrs.paymentDate ? "paymentDate" : attrs.date ? "date" : "createdAt";
 
-        repayments = await RepaymentModel.findAll({
-          where: { loanId: loan.id },
-          order: [[orderCol, "DESC"], ["createdAt", "DESC"]],
-        });
+        try {
+          repayments = await RepaymentModel.findAll({
+            where: { loanId: loan.id },
+            order: [[orderCol, "DESC"], ["createdAt", "DESC"]],
+          });
+        } catch (e) {
+          // If DB complains about the chosen column, retry with createdAt only (keeps endpoint alive)
+          console.warn(`[loans] repayment query failed (${e.code || e.name}): ${e.message} — retrying with createdAt`);
+          repayments = await RepaymentModel.findAll({
+            where: { loanId: loan.id },
+            order: [["createdAt", "DESC"]],
+          });
+        }
 
         for (const r of repayments) {
-          const alloc = r.allocation || [];
+          const alloc = Array.isArray(r.allocation) ? r.allocation : (r.allocation ? [r.allocation] : []);
           for (const a of alloc) {
             totals.principal += Number(a.principal || 0);
             totals.interest += Number(a.interest || 0);
             totals.fees += Number(a.fees || 0);
             totals.penalties += Number(a.penalties || 0);
           }
-          // Prefer amountPaid; fallback for older schemas
           totals.totalPaid += Number(r.amountPaid ?? r.amount ?? r.total ?? 0);
         }
 
@@ -595,21 +586,18 @@ const updateLoanStatus = async (req, res) => {
     const before = loan.toJSON();
     const fields = { status: next };
 
-    // Helper that safely sets a user FK when compatible (and coerces INT)
-    const maybeSetUserFk = async (fkAttr) => {
-      if (!(fkAttr in (Loan.rawAttributes || {}))) return;
-      if (await loanUserFkIsCompatible(fkAttr)) {
-        fields[fkAttr] = await coerceUserIdForLoanFk(fkAttr, req.user?.id);
-      }
-    };
-
     if (next === "approved") {
-      await maybeSetUserFk("approvedBy");
+      // Only set approvedBy if loans.approvedBy type matches Users.id type
+      if ("approvedBy" in Loan.rawAttributes && (await loanUserFkIsCompatible("approvedBy"))) {
+        fields.approvedBy = req.user?.id || null;
+      }
       fields.approvalDate = new Date();
     }
 
     if (next === "disbursed") {
-      await maybeSetUserFk("disbursedBy");
+      if ("disbursedBy" in Loan.rawAttributes && (await loanUserFkIsCompatible("disbursedBy"))) {
+        fields.disbursedBy = req.user?.id || null;
+      }
       fields.disbursementDate = new Date();
 
       const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
@@ -652,7 +640,9 @@ const updateLoanStatus = async (req, res) => {
         await t.rollback();
         return res.status(400).json({ error: "Outstanding > 0, override required" });
       }
-      await maybeSetUserFk("closedBy");
+      if ("closedBy" in Loan.rawAttributes && (await loanUserFkIsCompatible("closedBy"))) {
+        fields.closedBy = req.user?.id || null;
+      }
       fields.closedDate = new Date();
       if (override) fields.closeReason = "override";
     }
