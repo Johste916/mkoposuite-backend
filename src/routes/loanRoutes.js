@@ -1,12 +1,19 @@
-// backend/routes/loanRoutes.js
 const express = require("express");
 const router = express.Router();
+const multer = require("multer");
+const upload = multer(); // memory storage; only used to parse multipart bodies
+
 const { authenticateUser } = require("../middleware/authMiddleware");
 const ctrl = require("../controllers/loanController");
 
 // Loan CRUD
 router.get("/", authenticateUser, ctrl.getAllLoans);
-router.post("/", authenticateUser, ctrl.createLoan);
+
+// Accept both JSON and multipart:
+// - JSON: express.json() handles it upstream
+// - multipart: multer parses fields/files into req.body / req.files
+router.post("/", authenticateUser, upload.any(), ctrl.createLoan);
+
 router.get("/:id", authenticateUser, ctrl.getLoanById);
 router.put("/:id", authenticateUser, ctrl.updateLoan);
 router.delete("/:id", authenticateUser, ctrl.deleteLoan);

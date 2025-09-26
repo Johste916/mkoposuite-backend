@@ -174,33 +174,71 @@ async function buildUserIncludesIfPossible() {
 =========================== */
 const createLoan = async (req, res) => {
   try {
-    const body = { ...req.body };
+    // Support both JSON and multipart:
+    // - multipart: frontend sends { payload: "<json string>", files..., filesMeta... }
+    // - json: frontend sends pure JSON
+    const raw = typeof req.body?.payload === "string" ? req.body.payload : null;
+    let body = raw ? JSON.parse(raw) : { ...req.body };
 
-    if (body.productId) {
-      const p = await LoanProduct.findByPk(body.productId);
-      if (!p) return res.status(400).json({ error: "Invalid loan product selected" });
-
-      const a = Number(body.amount || 0);
-      const t = Number(body.termMonths || 0);
-
-      if (p.minPrincipal && a < Number(p.minPrincipal))
-        return res.status(400).json({ error: `Amount must be at least ${p.minPrincipal}` });
-      if (p.maxPrincipal && a > Number(p.maxPrincipal))
-        return res.status(400).json({ error: `Amount must not exceed ${p.maxPrincipal}` });
-      if (p.minTermMonths && t < Number(p.minTermMonths))
-        return res.status(400).json({ error: `Term must be at least ${p.minTermMonths} months` });
-      if (p.maxTermMonths && t > Number(p.maxTermMonths))
-        return res.status(400).json({ error: `Term must not exceed ${p.maxTermMonths} months` });
-
-      if (!body.interestMethod) body.interestMethod = p.interestMethod || "flat";
-      if (body.interestRate == null) body.interestRate = Number(p.interestRate || 0);
+    // Map frontend names → model names (no-ops if already correct)
+    if (body.durationMonths != null && body.termMonths == null) {
+      body.termMonths = Number(body.durationMonths);
+    }
+    if (body.releaseDate && !body.startDate) {
+      body.startDate = body.releaseDate;
     }
 
-    const loan = await Loan.create({
-      ...body,
-      initiatedBy: req.user?.id || null,
-      status: "pending",
-    });
+    // Coerce numerics
+    if (body.amount != null) body.amount = Number(body.amount);
+    if (body.termMonths != null) body.termMonths = Number(body.termMonths);
+    if (body.interestRate != null && body.interestRate !== "") {
+      body.interestRate = Number(body.interestRate);
+    }
+
+    // Basic requireds
+    if (!body.borrowerId) {
+      return res.status(400).json({ error: "borrowerId is required" });
+    }
+    if (!body.productId) {
+      return res.status(400).json({ error: "productId is required" });
+    }
+    if (!Number.isFinite(body.amount) || body.amount <= 0) {
+      return res.status(400).json({ error: "amount must be a positive number" });
+    }
+    if (!Number.isFinite(body.termMonths) || body.termMonths <= 0) {
+      return res.status(400).json({ error: "termMonths must be a positive number" });
+    }
+
+    // Product validations + defaults
+    const p = await LoanProduct.findByPk(body.productId);
+    if (!p) return res.status(400).json({ error: "Invalid loan product selected" });
+
+    const a = Number(body.amount || 0);
+    const t = Number(body.termMonths || 0);
+
+    if (p.minPrincipal && a < Number(p.minPrincipal))
+      return res.status(400).json({ error: `Amount must be at least ${p.minPrincipal}` });
+    if (p.maxPrincipal && a > Number(p.maxPrincipal))
+      return res.status(400).json({ error: `Amount must not exceed ${p.maxPrincipal}` });
+    if (p.minTermMonths && t < Number(p.minTermMonths))
+      return res.status(400).json({ error: `Term must be at least ${p.minTermMonths} months` });
+    if (p.maxTermMonths && t > Number(p.maxTermMonths))
+      return res.status(400).json({ error: `Term must not exceed ${p.maxTermMonths} months` });
+
+    if (!body.interestMethod) body.interestMethod = p.interestMethod || "flat";
+    if (body.interestRate == null || Number.isNaN(body.interestRate)) {
+      body.interestRate = Number(p.interestRate || 0);
+    }
+
+    // Always start with pending on creation
+    body.status = "pending";
+
+    // Only set initiatedBy if the attribute/column exists
+    if ("initiatedBy" in (Loan.rawAttributes || {})) {
+      body.initiatedBy = req.user?.id || null;
+    }
+
+    const loan = await Loan.create(body);
 
     await writeAudit({
       entityId: loan.id,
@@ -209,6 +247,8 @@ const createLoan = async (req, res) => {
       after: loan.toJSON(),
       req,
     });
+
+    // NOTE: If you want to persist uploaded files (req.files), handle them here.
 
     res.status(201).json(loan);
   } catch (err) {
@@ -347,7 +387,7 @@ const getLoanById = async (req, res) => {
       schedule,
     });
   } catch (err) {
-    console.error("Get loan by id error:", err);
+    console.error("Error fetching loan:", err);
     res.status(500).json({ error: "Error fetching loan" });
   }
 };
