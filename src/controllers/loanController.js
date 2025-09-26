@@ -17,14 +17,14 @@ const {
 
 const BORROWER_ATTRS = ["id", "name", "nationalId", "phone"];
 
-// NOTE: DB enum usually does NOT contain "active". We treat "active" as *derived* (disbursed & not closed).
+// NOTE: DB enum usually does NOT contain "active". We treat "active" as derived (disbursed & not closed).
 const DB_ENUM_STATUSES = new Set(["pending", "approved", "rejected", "disbursed", "closed"]);
 
-// Allowed transitions for the *persisted* enum only
+// Allowed transitions for the persisted enum only
 const ALLOWED = {
   pending: ["approved", "rejected"],
   approved: ["disbursed"],
-  disbursed: ["closed"], // "active" is derived; do not persist it
+  disbursed: ["closed"],
 };
 
 const writeAudit = async ({ entityId, action, before, after, req }) => {
@@ -62,7 +62,7 @@ const getUsersTableName = () => getTableNameFromModel(User, "Users");
 function normalizePgType(t = "") {
   const s = String(t).toLowerCase();
   if (s.includes("uuid")) return "uuid";
-  if (s.includes("int")) return "int"; // covers int2/int4/int8/bigint/integer
+  if (s.includes("int")) return "int";
   if (s.includes("char") || s.includes("text") || s.includes("varying")) return "text";
   if (s.includes("timestamp") || s.includes("date")) return "date";
   return s || "unknown";
@@ -79,7 +79,6 @@ async function describeTableCached(tableName) {
       if (!USERS_TABLE_DESC_CACHE) USERS_TABLE_DESC_CACHE = await qi.describeTable(tableName);
       return USERS_TABLE_DESC_CACHE;
     }
-    // generic (rarely used here)
     return await qi.describeTable(tableName);
   } catch {
     return null;
@@ -102,7 +101,7 @@ async function getLoanColumns() {
   return LOAN_COLUMNS_CACHE;
 }
 
-/** Return list of *model attribute names* whose mapped DB field actually exists */
+/** Return list of model attribute names whose mapped DB field actually exists */
 async function getSafeLoanAttributeNames() {
   const cols = await getLoanColumns();
   const attrs = Loan.rawAttributes || {};
@@ -113,7 +112,7 @@ async function getSafeLoanAttributeNames() {
 }
 
 /**
- * Build includes for the User associations on Loan, but **only** if the FK type
+ * Build includes for the User associations on Loan, but only if the FK type
  * matches Users PK type (prevents integer vs uuid join errors).
  */
 async function buildUserIncludesIfPossible() {
@@ -130,7 +129,6 @@ async function buildUserIncludesIfPossible() {
   );
 
   for (const [as, assoc] of assocEntries) {
-    // Determine the FK attribute name on Loan (e.g., 'approvedBy')
     const fkAttrName =
       assoc.foreignKey ||
       assoc.foreignKeyAttribute?.fieldName ||
@@ -139,13 +137,9 @@ async function buildUserIncludesIfPossible() {
 
     if (!fkAttrName) continue;
 
-    // Map to actual DB field on loans
     const fkDbField = Loan.rawAttributes?.[fkAttrName]?.field || fkAttrName;
-
-    // Get FK DB column type
     const fkType = normalizePgType(loansTableDesc?.[fkDbField]?.type || "unknown");
 
-    // Compare with Users PK type
     const compatible =
       (fkType === "uuid" && usersPkType === "uuid") ||
       (fkType === "int" && usersPkType === "int");
@@ -157,9 +151,8 @@ async function buildUserIncludesIfPossible() {
       continue;
     }
 
-    // Safe to include
     includes.push({
-      association: assoc, // disambiguates multiple belongsTo(User)
+      association: assoc,
       attributes: ["id", "name"],
       required: false,
     });
@@ -169,22 +162,36 @@ async function buildUserIncludesIfPossible() {
 }
 
 /* ===========================
+   Date helper
+=========================== */
+function addMonthsDateOnly(dateStr, months) {
+  // dateStr is "YYYY-MM-DD"
+  const [y, m, d] = String(dateStr).split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const targetMonthIndex = dt.getUTCMonth() + Number(months);
+  const target = new Date(Date.UTC(dt.getUTCFullYear(), targetMonthIndex, dt.getUTCDate()));
+  // Handle end-of-month rollover
+  if (target.getUTCMonth() !== ((m - 1 + Number(months)) % 12 + 12) % 12) {
+    target.setUTCDate(0);
+  }
+  return target.toISOString().slice(0, 10);
+}
+
+/* ===========================
    CREATE LOAN
 =========================== */
 const createLoan = async (req, res) => {
   try {
-    // Support both JSON and multipart:
-    // - multipart: frontend sends { payload: "<json string>", files..., filesMeta... }
-    // - json: frontend sends pure JSON
+    // Support JSON or multipart { payload: "<json>" }
     const raw = typeof req.body?.payload === "string" ? req.body.payload : null;
     let body = raw ? JSON.parse(raw) : { ...req.body };
 
-    // Map frontend names → model names (no-ops if already correct)
+    // Name normalization
     if (body.durationMonths != null && body.termMonths == null) {
       body.termMonths = Number(body.durationMonths);
     }
     if (body.releaseDate && !body.startDate) {
-      body.startDate = body.releaseDate; // expect YYYY-MM-DD (DATEONLY)
+      body.startDate = body.releaseDate; // "YYYY-MM-DD"
     }
 
     // Coerce numerics
@@ -194,13 +201,16 @@ const createLoan = async (req, res) => {
       body.interestRate = Number(body.interestRate);
     }
 
-    // If startDate is still missing, default to today (prevents NOT NULL violation)
+    // Defaults
     if (!body.startDate) {
       const today = new Date();
       body.startDate = today.toISOString().slice(0, 10);
     }
+    if (!body.currency) body.currency = "TZS";
+    if (!body.repaymentFrequency) body.repaymentFrequency = "monthly";
+    if (!body.interestMethod) body.interestMethod = "flat";
 
-    // Basic requireds
+    // Requireds
     if (!body.borrowerId) {
       return res.status(400).json({ error: "borrowerId is required" });
     }
@@ -230,15 +240,20 @@ const createLoan = async (req, res) => {
     if (p.maxTermMonths && t > Number(p.maxTermMonths))
       return res.status(400).json({ error: `Term must not exceed ${p.maxTermMonths} months` });
 
-    if (!body.interestMethod) body.interestMethod = p.interestMethod || "flat";
+    if (body.interestMethod == null) body.interestMethod = p.interestMethod || "flat";
     if (body.interestRate == null || Number.isNaN(body.interestRate)) {
       body.interestRate = Number(p.interestRate || 0);
     }
 
-    // Always start with pending on creation
+    // Ensures DB NOT NULL on endDate
+    if (!body.endDate) {
+      body.endDate = addMonthsDateOnly(body.startDate, Number(body.termMonths));
+    }
+
+    // Persisted status starts as pending
     body.status = "pending";
 
-    // Only set initiatedBy if the attribute/column exists
+    // initiatedBy only if present in model
     if ("initiatedBy" in (Loan.rawAttributes || {})) {
       body.initiatedBy = req.user?.id || null;
     }
@@ -252,8 +267,6 @@ const createLoan = async (req, res) => {
       after: loan.toJSON(),
       req,
     });
-
-    // NOTE: If you want to persist uploaded files (req.files), handle them here.
 
     res.status(201).json(loan);
   } catch (err) {
@@ -269,42 +282,33 @@ const getAllLoans = async (req, res) => {
   try {
     const where = {};
 
-    // Never pass unknown statuses into an enum column
     const rawStatus = String(req.query.status || "").toLowerCase();
     const scope = String(req.query.scope || "").toLowerCase();
 
     if (rawStatus && rawStatus !== "all" && DB_ENUM_STATUSES.has(rawStatus)) {
-      // safe to pass to DB
       where.status = rawStatus;
     }
-    // If rawStatus === "active" or any other derived, we DO NOT add to where;
-    // we'll filter in-memory below.
 
     const attributes = await getSafeLoanAttributeNames();
     const userIncludes = await buildUserIncludesIfPossible();
 
     const loans = await Loan.findAll({
       where,
-      attributes, // avoid selecting non-existent columns
+      attributes,
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
-        // include branch with new phone/address fields
         { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
         { model: LoanProduct },
-        ...userIncludes, // only type-safe user includes
+        ...userIncludes,
       ],
       order: [["createdAt", "DESC"]],
       limit: 500,
     });
 
-    // Derived lists (client or "scope" based)
     let result = loans;
 
-    // Treat "active" as disbursed & not closed (best-effort; usually just "disbursed")
     if (rawStatus === "active" || scope === "active") {
-      result = result.filter(
-        (l) => String(l.status || "").toLowerCase() === "disbursed"
-      );
+      result = result.filter((l) => String(l.status || "").toLowerCase() === "disbursed");
     }
 
     if (scope === "delinquent") {
@@ -429,6 +433,15 @@ const updateLoan = async (req, res) => {
         body.interestMethod = loan.interestMethod || p.interestMethod || "flat";
       if (body.interestRate === undefined)
         body.interestRate = loan.interestRate || Number(p.interestRate || 0);
+    }
+
+    // If termMonths or startDate change and endDate not explicitly provided, recompute
+    const willChangeTerm = body.termMonths != null && Number(body.termMonths) !== Number(loan.termMonths);
+    const willChangeStart = body.startDate && String(body.startDate) !== String(loan.startDate);
+    if (!body.endDate && (willChangeTerm || willChangeStart)) {
+      const nextTerm = Number(body.termMonths ?? loan.termMonths);
+      const nextStart = String(body.startDate ?? loan.startDate);
+      body.endDate = addMonthsDateOnly(nextStart, nextTerm);
     }
 
     await loan.update(body);
@@ -560,8 +573,7 @@ const updateLoanStatus = async (req, res) => {
           fees: Number(s.fees || 0),
           penalties: 0,
           total: Number(
-            s.total ??
-              Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)
+            s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)
           ),
         }));
 
