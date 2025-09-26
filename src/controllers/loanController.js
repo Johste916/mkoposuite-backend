@@ -6,6 +6,7 @@ const {
   User,
   LoanProduct,
   LoanRepayment,   // keep existing import to avoid breaking other parts
+  LoanPayment,     // NEW: prefer this when available
   LoanSchedule,
   AuditLog,
   sequelize,
@@ -383,17 +384,32 @@ const getLoanById = async (req, res) => {
     };
 
     if (includeRepayments === "true") {
-      // Prefer registered models; fall back to imported LoanRepayment
+      // Prefer direct imports; fallback to registry names if needed
       const RepaymentModel =
+        LoanPayment ||
+        LoanRepayment ||
         (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment)) ||
-        LoanRepayment;
+        null;
 
       if (!RepaymentModel || typeof RepaymentModel.findAll !== "function") {
         console.warn("[loans] No repayment model registered; returning empty repayments list");
       } else {
-        // Decide order column safely from model attributes; fallback to createdAt
-        const attrs = RepaymentModel.rawAttributes || {};
-        let orderCol = attrs.paymentDate ? "paymentDate" : attrs.date ? "date" : "createdAt";
+        // Pick safest ordering column by inspecting table definition if possible
+        let orderCol = "paymentDate";
+        try {
+          const qi = sequelize.getQueryInterface();
+          const tn = RepaymentModel.getTableName
+            ? RepaymentModel.getTableName()
+            : "loan_payments";
+          const tableName = typeof tn === "string" ? tn : tn.tableName || "loan_payments";
+          const desc = await qi.describeTable(tableName);
+          if (!desc?.paymentDate && desc?.date) orderCol = "date";
+          if (!desc?.paymentDate && !desc?.date && desc?.createdAt) orderCol = "createdAt";
+        } catch (_) {
+          // fallback to rawAttributes if describeTable isn't available
+          const attrs = RepaymentModel.rawAttributes || {};
+          orderCol = attrs.paymentDate ? "paymentDate" : attrs.date ? "date" : "createdAt";
+        }
 
         try {
           repayments = await RepaymentModel.findAll({
@@ -401,8 +417,9 @@ const getLoanById = async (req, res) => {
             order: [[orderCol, "DESC"], ["createdAt", "DESC"]],
           });
         } catch (e) {
-          // If DB complains about the chosen column, retry with createdAt only (keeps endpoint alive)
-          console.warn(`[loans] repayment query failed (${e.code || e.name}): ${e.message} — retrying with createdAt`);
+          console.warn(
+            `[loans] repayment query failed (${e.code || e.name}): ${e.message} — retrying with createdAt`
+          );
           repayments = await RepaymentModel.findAll({
             where: { loanId: loan.id },
             order: [["createdAt", "DESC"]],
@@ -410,7 +427,11 @@ const getLoanById = async (req, res) => {
         }
 
         for (const r of repayments) {
-          const alloc = Array.isArray(r.allocation) ? r.allocation : (r.allocation ? [r.allocation] : []);
+          const alloc = Array.isArray(r.allocation)
+            ? r.allocation
+            : r.allocation
+            ? [r.allocation]
+            : [];
           for (const a of alloc) {
             totals.principal += Number(a.principal || 0);
             totals.interest += Number(a.interest || 0);

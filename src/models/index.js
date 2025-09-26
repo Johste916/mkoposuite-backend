@@ -386,18 +386,15 @@ if (db.CashTransaction && db.Borrower) {
 }
 
 /* 🆕 Borrower Groups associations */
-// Link group -> branch (and reverse)
 if (db.BorrowerGroup && db.Branch && hasAttr(db.BorrowerGroup, 'branchId')) {
   db.BorrowerGroup.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
   db.Branch.hasMany(db.BorrowerGroup,   { foreignKey: 'branchId', as: 'groups' });
 }
-// Link group -> officer (User) (and reverse)
 if (db.BorrowerGroup && db.User && hasAttr(db.BorrowerGroup, 'officerId')) {
   db.BorrowerGroup.belongsTo(db.User, { foreignKey: 'officerId', as: 'officer' });
   db.User.hasMany(db.BorrowerGroup,   { foreignKey: 'officerId', as: 'officerGroups' });
 }
 
-// Junction + many-to-many
 if (db.BorrowerGroup && db.BorrowerGroupMember) {
   db.BorrowerGroup.hasMany(db.BorrowerGroupMember, { foreignKey: 'groupId', as: 'groupMembers', onDelete: 'CASCADE' });
   db.BorrowerGroupMember.belongsTo(db.BorrowerGroup, { foreignKey: 'groupId', as: 'group' });
