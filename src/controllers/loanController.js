@@ -1,10 +1,11 @@
+// src/controllers/loanController.js
 const {
   Loan,
   Borrower,
   Branch,
   User,
   LoanProduct,
-  LoanRepayment,
+  LoanRepayment,   // keep existing import to avoid breaking other parts
   LoanSchedule,
   AuditLog,
   sequelize,
@@ -17,7 +18,7 @@ const {
 
 const BORROWER_ATTRS = ["id", "name", "nationalId", "phone"];
 
-// NOTE: DB enum usually does NOT contain "active". We treat "active" as derived (disbursed & not closed).
+// DB statuses (persisted). "active" is derived (disbursed & not closed) and is not persisted.
 const DB_ENUM_STATUSES = new Set(["pending", "approved", "rejected", "disbursed", "closed"]);
 
 // Allowed transitions for the persisted enum only
@@ -50,6 +51,7 @@ const writeAudit = async ({ entityId, action, before, after, req }) => {
 let LOAN_COLUMNS_CACHE = null;
 let LOAN_TABLE_DESC_CACHE = null;
 let USERS_TABLE_DESC_CACHE = null;
+let LOAN_PAYMENTS_DESC_CACHE = null;
 
 const getTableNameFromModel = (Model, fallback) => {
   const t = Model?.getTableName ? Model.getTableName() : fallback;
@@ -62,7 +64,7 @@ const getUsersTableName = () => getTableNameFromModel(User, "Users");
 function normalizePgType(t = "") {
   const s = String(t).toLowerCase();
   if (s.includes("uuid")) return "uuid";
-  if (s.includes("int")) return "int";
+  if (s.includes("int")) return "int"; // covers int2/4/8
   if (s.includes("char") || s.includes("text") || s.includes("varying")) return "text";
   if (s.includes("timestamp") || s.includes("date")) return "date";
   return s || "unknown";
@@ -78,6 +80,10 @@ async function describeTableCached(tableName) {
     if (tableName === getUsersTableName()) {
       if (!USERS_TABLE_DESC_CACHE) USERS_TABLE_DESC_CACHE = await qi.describeTable(tableName);
       return USERS_TABLE_DESC_CACHE;
+    }
+    if (tableName === "loan_payments") {
+      if (!LOAN_PAYMENTS_DESC_CACHE) LOAN_PAYMENTS_DESC_CACHE = await qi.describeTable("loan_payments");
+      return LOAN_PAYMENTS_DESC_CACHE;
     }
     return await qi.describeTable(tableName);
   } catch {
@@ -159,6 +165,24 @@ async function buildUserIncludesIfPossible() {
   }
 
   return includes;
+}
+
+/** Check if loans.<fkAttr> type is compatible with Users.id type */
+async function loanUserFkIsCompatible(fkAttr /* e.g., 'approvedBy' or 'disbursedBy' */) {
+  try {
+    const usersDesc = await describeTableCached(getUsersTableName());
+    const loansDesc = await describeTableCached(getLoansTableName());
+    const usersPkType = normalizePgType(usersDesc?.id?.type || "unknown");
+    const fkDbField = Loan.rawAttributes?.[fkAttr]?.field || fkAttr;
+    const loanFkType = normalizePgType(loansDesc?.[fkDbField]?.type || "unknown");
+    return (
+      (usersPkType === "uuid" && loanFkType === "uuid") ||
+      (usersPkType === "int" && loanFkType === "int")
+    );
+  } catch {
+    // Be conservative: if we can't tell, don't write FK
+    return false;
+  }
 }
 
 /* ===========================
@@ -359,9 +383,20 @@ const getLoanById = async (req, res) => {
     };
 
     if (includeRepayments === "true") {
-      repayments = await LoanRepayment.findAll({
+      // Pick whichever repayment model exists (LoanPayment preferred)
+      const RepaymentModel =
+        sequelize.models.LoanPayment || sequelize.models.LoanRepayment || LoanRepayment;
+
+      // Decide order column safely: prefer paymentDate, fallback to date
+      let orderCol = "paymentDate";
+      const lpDesc = await describeTableCached("loan_payments");
+      if (lpDesc && !lpDesc.paymentDate && lpDesc.date) {
+        orderCol = "date";
+      }
+
+      repayments = await RepaymentModel.findAll({
         where: { loanId: loan.id },
-        order: [["date", "DESC"], ["createdAt", "DESC"]],
+        order: [[orderCol, "DESC"], ["createdAt", "DESC"]],
       });
 
       for (const r of repayments) {
@@ -372,7 +407,8 @@ const getLoanById = async (req, res) => {
           totals.fees += Number(a.fees || 0);
           totals.penalties += Number(a.penalties || 0);
         }
-        totals.totalPaid += Number(r.amount || r.total || 0);
+        // Prefer amountPaid; fallback keeps backward-compat if older column exists
+        totals.totalPaid += Number(r.amountPaid ?? r.amount ?? r.total ?? 0);
       }
 
       totals.outstanding = Math.max(
@@ -541,12 +577,17 @@ const updateLoanStatus = async (req, res) => {
     const fields = { status: next };
 
     if (next === "approved") {
-      if ("approvedBy" in Loan.rawAttributes) fields.approvedBy = req.user?.id || null;
+      // Only set approvedBy if loans.approvedBy type matches Users.id type
+      if ("approvedBy" in Loan.rawAttributes && (await loanUserFkIsCompatible("approvedBy"))) {
+        fields.approvedBy = req.user?.id || null;
+      }
       fields.approvalDate = new Date();
     }
 
     if (next === "disbursed") {
-      if ("disbursedBy" in Loan.rawAttributes) fields.disbursedBy = req.user?.id || null;
+      if ("disbursedBy" in Loan.rawAttributes && (await loanUserFkIsCompatible("disbursedBy"))) {
+        fields.disbursedBy = req.user?.id || null;
+      }
       fields.disbursementDate = new Date();
 
       const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
@@ -589,7 +630,9 @@ const updateLoanStatus = async (req, res) => {
         await t.rollback();
         return res.status(400).json({ error: "Outstanding > 0, override required" });
       }
-      if ("closedBy" in Loan.rawAttributes) fields.closedBy = req.user?.id || null;
+      if ("closedBy" in Loan.rawAttributes && (await loanUserFkIsCompatible("closedBy"))) {
+        fields.closedBy = req.user?.id || null;
+      }
       fields.closedDate = new Date();
       if (override) fields.closeReason = "override";
     }
