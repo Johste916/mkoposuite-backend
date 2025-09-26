@@ -140,8 +140,7 @@ async function buildUserIncludesIfPossible() {
     if (!fkAttrName) continue;
 
     // Map to actual DB field on loans
-    const fkDbField =
-      Loan.rawAttributes?.[fkAttrName]?.field || fkAttrName;
+    const fkDbField = Loan.rawAttributes?.[fkAttrName]?.field || fkAttrName;
 
     // Get FK DB column type
     const fkType = normalizePgType(loansTableDesc?.[fkDbField]?.type || "unknown");
@@ -185,7 +184,7 @@ const createLoan = async (req, res) => {
       body.termMonths = Number(body.durationMonths);
     }
     if (body.releaseDate && !body.startDate) {
-      body.startDate = body.releaseDate;
+      body.startDate = body.releaseDate; // expect YYYY-MM-DD (DATEONLY)
     }
 
     // Coerce numerics
@@ -193,6 +192,12 @@ const createLoan = async (req, res) => {
     if (body.termMonths != null) body.termMonths = Number(body.termMonths);
     if (body.interestRate != null && body.interestRate !== "") {
       body.interestRate = Number(body.interestRate);
+    }
+
+    // If startDate is still missing, default to today (prevents NOT NULL violation)
+    if (!body.startDate) {
+      const today = new Date();
+      body.startDate = today.toISOString().slice(0, 10);
     }
 
     // Basic requireds
