@@ -1,11 +1,14 @@
 // src/models/loanpayment.js
 module.exports = (sequelize, DataTypes) => {
+  const isPg = sequelize.getDialect && sequelize.getDialect() === "postgres";
+  const JSON_TYPE = isPg ? DataTypes.JSONB : DataTypes.JSON;
+
   const LoanPayment = sequelize.define(
     "LoanPayment",
     {
       loanId: { type: DataTypes.INTEGER, allowNull: false, field: "loanId" },
 
-      // NOTE: keep this type in sync with your Users table (UUID or INTEGER)
+      // NOTE: logs show Users.id is UUID; this matches. (We also ship a migration below to enforce it.)
       userId: { type: DataTypes.UUID, allowNull: true, field: "userId" },
 
       // amounts/dates
@@ -22,7 +25,7 @@ module.exports = (sequelize, DataTypes) => {
       notes: { type: DataTypes.TEXT, allowNull: true, field: "notes" },
 
       // Workflow + external/gateway
-      // Use STRING(16) + validate to align with migration that added VARCHAR column
+      // DB may be an ENUM (PG); using STRING with validation is safe across dialects.
       status: {
         type: DataTypes.STRING(16),
         allowNull: false,
@@ -38,12 +41,18 @@ module.exports = (sequelize, DataTypes) => {
       gateway: { type: DataTypes.STRING, allowNull: true, field: "gateway" }, // 'mpesa','tigo','bank-xyz', etc
       gatewayRef: { type: DataTypes.STRING, allowNull: true, field: "gatewayRef" }, // provider txn id
 
-      allocation: { type: DataTypes.JSONB, allowNull: true, field: "allocation" }, // allocation lines
+      allocation: { type: JSON_TYPE, allowNull: true, field: "allocation" }, // allocation lines
       voidReason: { type: DataTypes.TEXT, allowNull: true, field: "voidReason" },
     },
     {
       tableName: "loan_payments",
       timestamps: true,
+      defaultScope: {
+        order: [
+          ["paymentDate", "DESC"],
+          ["createdAt", "DESC"],
+        ],
+      },
       indexes: [
         { fields: ["loanId"] },
         { fields: ["userId"] },

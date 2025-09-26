@@ -17,10 +17,10 @@ const {
 
 const BORROWER_ATTRS = ["id", "name", "nationalId", "phone"];
 
-// NOTE: DB enum usually does NOT contain "active". We treat "active" as derived (disbursed & not closed).
+// Persisted status values only
 const DB_ENUM_STATUSES = new Set(["pending", "approved", "rejected", "disbursed", "closed"]);
 
-// Allowed transitions for the persisted enum only
+// Allowed transitions
 const ALLOWED = {
   pending: ["approved", "rejected"],
   approved: ["disbursed"],
@@ -94,14 +94,12 @@ async function getLoanColumns() {
       return LOAN_COLUMNS_CACHE;
     }
   } catch {}
-  // Fallback: infer from model (may still include non-existent columns)
   LOAN_COLUMNS_CACHE = new Set(
     Object.values(Loan.rawAttributes || {}).map((a) => a.field || a.fieldName || a)
   );
   return LOAN_COLUMNS_CACHE;
 }
 
-/** Return list of model attribute names whose mapped DB field actually exists */
 async function getSafeLoanAttributeNames() {
   const cols = await getLoanColumns();
   const attrs = Loan.rawAttributes || {};
@@ -120,10 +118,8 @@ async function buildUserIncludesIfPossible() {
   const userTableDesc = await describeTableCached(getUsersTableName());
   const loansTableDesc = await describeTableCached(getLoansTableName());
 
-  // Figure out Users PK type (assume "id")
   const usersPkType = normalizePgType(userTableDesc?.id?.type || "unknown");
 
-  // Gather all Loan -> User associations
   const assocEntries = Object.entries(Loan.associations || {}).filter(
     ([, a]) => a?.target === User
   );
@@ -165,12 +161,10 @@ async function buildUserIncludesIfPossible() {
    Date helper
 =========================== */
 function addMonthsDateOnly(dateStr, months) {
-  // dateStr is "YYYY-MM-DD"
   const [y, m, d] = String(dateStr).split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
   const targetMonthIndex = dt.getUTCMonth() + Number(months);
   const target = new Date(Date.UTC(dt.getUTCFullYear(), targetMonthIndex, dt.getUTCDate()));
-  // Handle end-of-month rollover
   if (target.getUTCMonth() !== ((m - 1 + Number(months)) % 12 + 12) % 12) {
     target.setUTCDate(0);
   }
@@ -182,11 +176,9 @@ function addMonthsDateOnly(dateStr, months) {
 =========================== */
 const createLoan = async (req, res) => {
   try {
-    // Support JSON or multipart { payload: "<json>" }
     const raw = typeof req.body?.payload === "string" ? req.body.payload : null;
     let body = raw ? JSON.parse(raw) : { ...req.body };
 
-    // Name normalization
     if (body.durationMonths != null && body.termMonths == null) {
       body.termMonths = Number(body.durationMonths);
     }
@@ -194,14 +186,12 @@ const createLoan = async (req, res) => {
       body.startDate = body.releaseDate; // "YYYY-MM-DD"
     }
 
-    // Coerce numerics
     if (body.amount != null) body.amount = Number(body.amount);
     if (body.termMonths != null) body.termMonths = Number(body.termMonths);
     if (body.interestRate != null && body.interestRate !== "") {
       body.interestRate = Number(body.interestRate);
     }
 
-    // Defaults
     if (!body.startDate) {
       const today = new Date();
       body.startDate = today.toISOString().slice(0, 10);
@@ -210,21 +200,13 @@ const createLoan = async (req, res) => {
     if (!body.repaymentFrequency) body.repaymentFrequency = "monthly";
     if (!body.interestMethod) body.interestMethod = "flat";
 
-    // Requireds
-    if (!body.borrowerId) {
-      return res.status(400).json({ error: "borrowerId is required" });
-    }
-    if (!body.productId) {
-      return res.status(400).json({ error: "productId is required" });
-    }
-    if (!Number.isFinite(body.amount) || body.amount <= 0) {
+    if (!body.borrowerId) return res.status(400).json({ error: "borrowerId is required" });
+    if (!body.productId) return res.status(400).json({ error: "productId is required" });
+    if (!Number.isFinite(body.amount) || body.amount <= 0)
       return res.status(400).json({ error: "amount must be a positive number" });
-    }
-    if (!Number.isFinite(body.termMonths) || body.termMonths <= 0) {
+    if (!Number.isFinite(body.termMonths) || body.termMonths <= 0)
       return res.status(400).json({ error: "termMonths must be a positive number" });
-    }
 
-    // Product validations + defaults
     const p = await LoanProduct.findByPk(body.productId);
     if (!p) return res.status(400).json({ error: "Invalid loan product selected" });
 
@@ -245,15 +227,12 @@ const createLoan = async (req, res) => {
       body.interestRate = Number(p.interestRate || 0);
     }
 
-    // Ensures DB NOT NULL on endDate
     if (!body.endDate) {
       body.endDate = addMonthsDateOnly(body.startDate, Number(body.termMonths));
     }
 
-    // Persisted status starts as pending
     body.status = "pending";
 
-    // initiatedBy only if present in model
     if ("initiatedBy" in (Loan.rawAttributes || {})) {
       body.initiatedBy = req.user?.id || null;
     }
@@ -361,18 +340,23 @@ const getLoanById = async (req, res) => {
     if (includeRepayments === "true") {
       repayments = await LoanRepayment.findAll({
         where: { loanId: loan.id },
-        order: [["date", "DESC"], ["createdAt", "DESC"]],
+        // 🔧 Fix: use paymentDate (your table has no "date" column)
+        order: [["paymentDate", "DESC"], ["createdAt", "DESC"]],
       });
 
       for (const r of repayments) {
         const alloc = r.allocation || [];
-        for (const a of alloc) {
-          totals.principal += Number(a.principal || 0);
-          totals.interest += Number(a.interest || 0);
-          totals.fees += Number(a.fees || 0);
-          totals.penalties += Number(a.penalties || 0);
+        if (Array.isArray(alloc) && alloc.length) {
+          for (const a of alloc) {
+            totals.principal += Number(a.principal || 0);
+            totals.interest += Number(a.interest || 0);
+            totals.fees += Number(a.fees || 0);
+            totals.penalties += Number(a.penalties || 0);
+          }
+          totals.totalPaid += Number(r.amount || r.total || r.amountPaid || 0);
+        } else {
+          totals.totalPaid += Number(r.amount || r.total || r.amountPaid || 0);
         }
-        totals.totalPaid += Number(r.amount || r.total || 0);
       }
 
       totals.outstanding = Math.max(
@@ -435,7 +419,6 @@ const updateLoan = async (req, res) => {
         body.interestRate = loan.interestRate || Number(p.interestRate || 0);
     }
 
-    // If termMonths or startDate change and endDate not explicitly provided, recompute
     const willChangeTerm = body.termMonths != null && Number(body.termMonths) !== Number(loan.termMonths);
     const willChangeStart = body.startDate && String(body.startDate) !== String(loan.startDate);
     if (!body.endDate && (willChangeTerm || willChangeStart)) {
@@ -462,62 +445,6 @@ const updateLoan = async (req, res) => {
 };
 
 /* ===========================
-   DELETE LOAN
-=========================== */
-const deleteLoan = async (req, res) => {
-  try {
-    const loan = await Loan.findByPk(req.params.id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
-
-    const before = loan.toJSON();
-    await loan.destroy();
-
-    await writeAudit({
-      entityId: loan.id,
-      action: "delete",
-      before,
-      after: null,
-      req,
-    });
-
-    res.json({ message: "Loan deleted" });
-  } catch (err) {
-    console.error("Delete loan error:", err);
-    res.status(500).json({ error: "Error deleting loan" });
-  }
-};
-
-/* ===========================
-   GENERATE SCHEDULE (Preview)
-=========================== */
-const getLoanSchedule = async (req, res) => {
-  try {
-    const loan = await Loan.findByPk(req.params.loanId || req.params.id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
-
-    const input = {
-      amount: Number(loan.amount || 0),
-      interestRate: Number(loan.interestRate || 0),
-      term: loan.termMonths,
-      issueDate: loan.startDate,
-    };
-
-    const schedule =
-      loan.interestMethod === "flat"
-        ? generateFlatRateSchedule(input)
-        : loan.interestMethod === "reducing"
-        ? generateReducingBalanceSchedule(input)
-        : [];
-
-    if (!schedule.length) return res.status(400).json({ error: "Invalid interest method" });
-    res.json(schedule);
-  } catch (err) {
-    console.error("Get schedule error:", err);
-    res.status(500).json({ error: "Failed to generate schedule" });
-  }
-};
-
-/* ===========================
    STATUS UPDATE
 =========================== */
 const updateLoanStatus = async (req, res) => {
@@ -540,13 +467,26 @@ const updateLoanStatus = async (req, res) => {
     const before = loan.toJSON();
     const fields = { status: next };
 
+    // Safely decide whether to set approvedBy/disbursedBy
+    const loansDesc = await describeTableCached(getLoansTableName());
+    const usersDesc = await describeTableCached(getUsersTableName());
+    const usersPkType = normalizePgType(usersDesc?.id?.type || "unknown");
+    const approvedByType = normalizePgType(loansDesc?.approvedBy?.type || loansDesc?.approvedby?.type || "unknown");
+    const disbursedByType = normalizePgType(loansDesc?.disbursedBy?.type || loansDesc?.disbursedby?.type || "unknown");
+    const canSetApprovedBy = approvedByType === usersPkType && (approvedByType === "uuid" || approvedByType === "int");
+    const canSetDisbursedBy = disbursedByType === usersPkType && (disbursedByType === "uuid" || disbursedByType === "int");
+
     if (next === "approved") {
-      if ("approvedBy" in Loan.rawAttributes) fields.approvedBy = req.user?.id || null;
+      if (canSetApprovedBy && "approvedBy" in Loan.rawAttributes) {
+        fields.approvedBy = req.user?.id || null;
+      }
       fields.approvalDate = new Date();
     }
 
     if (next === "disbursed") {
-      if ("disbursedBy" in Loan.rawAttributes) fields.disbursedBy = req.user?.id || null;
+      if (canSetDisbursedBy && "disbursedBy" in Loan.rawAttributes) {
+        fields.disbursedBy = req.user?.id || null;
+      }
       fields.disbursementDate = new Date();
 
       const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
