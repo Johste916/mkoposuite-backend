@@ -69,7 +69,7 @@ function normalizePgType(t = "") {
   if (s.includes("int")) return "int"; // covers int2/4/8
   if (s.includes("char") || s.includes("text") || s.includes("varying")) return "text";
   if (s.includes("timestamp") || s.includes("date")) return "date";
-  return s || "unknown";
+  return s || "unknown"; // includes enums ("user-defined") etc.
 }
 
 async function describeTableCached(tableName) {
@@ -138,6 +138,20 @@ async function getSafeLoanAttributeNames() {
   });
 }
 
+/** Return type + allowNull meta for loans.<attr> */
+async function getLoanColumnMeta(attr) {
+  const loansDesc = await describeTableCached(getLoansTableName());
+  const dbField = Loan?.rawAttributes?.[attr]?.field || attr;
+  const col = loansDesc?.[dbField] || null;
+  if (!col) return null;
+  return {
+    type: normalizePgType(col.type || "unknown"),
+    allowNull: !!col.allowNull,
+    raw: col,
+    dbField,
+  };
+}
+
 /**
  * Build includes for the User associations on Loan, but only if the FK type
  * matches Users PK type (prevents integer vs uuid join errors).
@@ -188,22 +202,16 @@ async function buildUserIncludesIfPossible() {
   return includes;
 }
 
-/** Get normalized type for a loans.<attr> column (uuid/int/text/date/unknown) */
-async function getLoanColumnType(attr) {
-  const loansDesc = await describeTableCached(getLoansTableName());
-  const dbField = Loan?.rawAttributes?.[attr]?.field || attr;
-  return normalizePgType(loansDesc?.[dbField]?.type || "unknown");
-}
-
 /** Safely set a User FK into fields, coercing to int/validating uuid as needed */
 async function setUserFkIfSafe(fields, attr, userId) {
   if (!(await loanColumnExists(attr))) return;
-  const colType = await getLoanColumnType(attr);
-  if (colType === "int") {
+  const meta = await getLoanColumnMeta(attr);
+  if (!meta) return;
+  if (meta.type === "int") {
     const asInt = Number.parseInt(userId, 10);
     if (Number.isFinite(asInt)) fields[attr] = asInt;
     else console.warn(`[loans] Skip ${attr}: userId not numeric for int FK`);
-  } else if (colType === "uuid") {
+  } else if (meta.type === "uuid") {
     const s = String(userId || "");
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) {
       fields[attr] = s;
@@ -211,19 +219,91 @@ async function setUserFkIfSafe(fields, attr, userId) {
       console.warn(`[loans] Skip ${attr}: userId not a UUID for uuid FK`);
     }
   } else {
-    console.warn(`[loans] Skip ${attr}: unsupported FK column type ${colType}`);
+    // unknown or text → do nothing; we don't know safe casting
+    console.warn(`[loans] Skip ${attr}: unsupported FK column type ${meta.type}`);
   }
 }
 
 /** Safely set a date/timestamp column */
 async function setDateCol(fields, attr, dateVal = new Date()) {
   if (!(await loanColumnExists(attr))) return;
-  const colType = await getLoanColumnType(attr);
-  if (colType === "date") {
+  const meta = await getLoanColumnMeta(attr);
+  if (!meta) return;
+  if (meta.type === "date") {
     fields[attr] = new Date(dateVal).toISOString().slice(0, 10); // YYYY-MM-DD
   } else {
     fields[attr] = dateVal; // Sequelize handles timestamp
   }
+}
+
+/** Preflight: ensure we *can* set required columns for a transition */
+async function preflightTransition(next, userId) {
+  // 1) status column cannot be INT
+  const statusMeta = await getLoanColumnMeta("status");
+  if (statusMeta && statusMeta.type === "int") {
+    return `Cannot set string status "${next}" because loans.status is numeric (int).`;
+  }
+
+  // helper to check a FK requirement
+  const needUserFk = async (attrName, label) => {
+    const meta = await getLoanColumnMeta(attrName);
+    if (!meta) return null; // column absent → nothing to validate
+    if (meta.allowNull) return null; // nullable → not strictly required
+    // Non-nullable: must be coercible
+    if (meta.type === "int") {
+      const asInt = Number.parseInt(userId, 10);
+      if (!Number.isFinite(asInt)) {
+        return `Cannot ${label}: ${attrName} is INT NOT NULL but current user id is not numeric.`;
+      }
+    } else if (meta.type === "uuid") {
+      const s = String(userId || "");
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) {
+        return `Cannot ${label}: ${attrName} is UUID NOT NULL but current user id is not a UUID.`;
+      }
+    } else {
+      return null; // unknown types — we won't block, DB will validate
+    }
+    return null;
+  };
+
+  // helper to check a required date column
+  const needDateCol = async (attrName, _label) => {
+    const meta = await getLoanColumnMeta(attrName);
+    if (!meta) return null;
+    if (meta.allowNull) return null; // nullable → fine
+    // not null → we will always set a value, so no block here
+    return null;
+  };
+
+  if (next === "approved") {
+    return (
+      (await needUserFk("approvedBy", "approve")) ||
+      (await needDateCol("approvalDate", "approve")) ||
+      null
+    );
+  }
+  if (next === "rejected") {
+    return (
+      (await needUserFk("rejectedBy", "reject")) ||
+      (await needDateCol("rejectedDate", "reject")) ||
+      null
+    );
+  }
+  if (next === "disbursed") {
+    return (
+      (await needUserFk("disbursedBy", "disburse")) ||
+      (await needDateCol("disbursementDate", "disburse")) ||
+      null
+    );
+  }
+  if (next === "closed") {
+    return (
+      (await needUserFk("closedBy", "close")) ||
+      (await needDateCol("closedDate", "close")) ||
+      null
+    );
+  }
+  return null;
 }
 
 /* ===========================
@@ -628,148 +708,159 @@ const getLoanSchedule = async (req, res) => {
    STATUS UPDATE
 =========================== */
 const updateLoanStatus = async (req, res) => {
-  const t = await sequelize.transaction();
   try {
     const { status, override } = req.body;
     const next = String(status || "").toLowerCase();
 
-    const loan = await Loan.findByPk(req.params.id, { transaction: t });
+    // Load without a transaction for validation first
+    const loan = await Loan.findByPk(req.params.id);
     if (!loan) {
-      await t.rollback();
       return res.status(404).json({ error: "Loan not found" });
     }
 
     if (!ALLOWED[loan.status]?.includes(next)) {
-      await t.rollback();
       return res.status(400).json({ error: `Cannot change ${loan.status} → ${next}` });
     }
 
-    // Build fields only for columns that actually exist
-    const fields = {};
-
-    if (await loanColumnExists("status")) {
-      fields.status = next;
-    } else {
-      await t.rollback();
-      return res.status(500).json({ error: "loans.status column missing" });
+    // Preflight: block transitions that will definitely fail (avoids 25P02)
+    const preflightMsg = await preflightTransition(next, req.user?.id || null);
+    if (preflightMsg) {
+      return res.status(400).json({ error: preflightMsg });
     }
 
-    if (next === "approved") {
-      await setUserFkIfSafe(fields, "approvedBy", req.user?.id || null);
-      await setDateCol(fields, "approvalDate", new Date());
-    }
-
-    if (next === "rejected") {
-      await setUserFkIfSafe(fields, "rejectedBy", req.user?.id || null);
-      await setDateCol(fields, "rejectedDate", new Date());
-    }
-
-    if (next === "disbursed") {
-      await setUserFkIfSafe(fields, "disbursedBy", req.user?.id || null);
-      await setDateCol(fields, "disbursementDate", new Date());
-
-      // Only touch schedule if model + table exist
-      if (LoanSchedule && typeof LoanSchedule.count === "function" && (await tableExists("loan_schedules"))) {
-        const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
-        if (count === 0) {
-          const input = {
-            amount: Number(loan.amount || 0),
-            interestRate: Number(loan.interestRate || 0),
-            term: loan.termMonths,
-            issueDate: loan.startDate,
-          };
-          const gen =
-            loan.interestMethod === "flat"
-              ? generateFlatRateSchedule(input)
-              : loan.interestMethod === "reducing"
-              ? generateReducingBalanceSchedule(input)
-              : [];
-
-          const rows = gen.map((s, i) => ({
-            loanId: loan.id,
-            period: i + 1,
-            dueDate: s.dueDate,
-            principal: Number(s.principal || 0),
-            interest: Number(s.interest || 0),
-            fees: Number(s.fees || 0),
-            penalties: 0,
-            total: Number(
-              s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)
-            ),
-          }));
-
-          if (rows.length) {
-            await LoanSchedule.bulkCreate(rows, { transaction: t });
-          }
-        }
-      } else {
-        console.warn("[loans] Skipping schedule generation (model/table missing)");
-      }
-    }
-
+    // Additional business check for closing
     if (next === "closed") {
       const outstanding = Number(loan.outstanding ?? 0);
       if (!override && outstanding > 0) {
-        await t.rollback();
         return res.status(400).json({ error: "Outstanding > 0, override required" });
       }
-      await setUserFkIfSafe(fields, "closedBy", req.user?.id || null);
-      await setDateCol(fields, "closedDate", new Date());
-      if (override && (await loanColumnExists("closeReason"))) {
-        fields.closeReason = "override";
-      }
     }
 
-    // Attempt the update
+    // Start txn only after validation
+    const t = await sequelize.transaction();
     try {
-      await loan.update(fields, { transaction: t });
-    } catch (e) {
-      // This is the first failing statement; Log the real cause before we roll back
-      console.error(
-        "[loans] loan.update failed with fields=",
-        Object.keys(fields).map(k => `${k}→${toDbField(k)}`).join(", "),
-        "code:", e?.parent?.code, "detail:", e?.parent?.detail, "message:", e?.parent?.message || e?.message
-      );
-      throw e;
-    }
+      // Build fields only for columns that actually exist
+      const fields = {};
+      if (await loanColumnExists("status")) {
+        fields.status = next;
+      } else {
+        await t.rollback();
+        return res.status(500).json({ error: "loans.status column missing" });
+      }
 
-    await t.commit();
+      if (next === "approved") {
+        await setUserFkIfSafe(fields, "approvedBy", req.user?.id || null);
+        await setDateCol(fields, "approvalDate", new Date());
+      }
 
-    // audit OUTSIDE the loan txn (don't poison main txn)
-    writeAudit({
-      entityId: loan.id,
-      action: `status:${next}`,
-      before: null, // optional
-      after: loan.toJSON(),
-      req,
-    }).catch(() => {});
+      if (next === "rejected") {
+        await setUserFkIfSafe(fields, "rejectedBy", req.user?.id || null);
+        await setDateCol(fields, "rejectedDate", new Date());
+      }
 
-    const attributes = await getSafeLoanAttributeNames();
-    const userIncludes = await buildUserIncludesIfPossible();
+      if (next === "disbursed") {
+        await setUserFkIfSafe(fields, "disbursedBy", req.user?.id || null);
+        await setDateCol(fields, "disbursementDate", new Date());
 
-    const updatedLoan = await Loan.findByPk(req.params.id, {
-      attributes,
-      include: [
-        { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
-        { model: LoanProduct },
-        ...userIncludes,
-      ],
-    });
+        // Only touch schedule if model + table exist
+        if (LoanSchedule && typeof LoanSchedule.count === "function" && (await tableExists("loan_schedules"))) {
+          const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
+          if (count === 0) {
+            const input = {
+              amount: Number(loan.amount || 0),
+              interestRate: Number(loan.interestRate || 0),
+              term: loan.termMonths,
+              issueDate: loan.startDate,
+            };
+            const gen =
+              loan.interestMethod === "flat"
+                ? generateFlatRateSchedule(input)
+                : loan.interestMethod === "reducing"
+                ? generateReducingBalanceSchedule(input)
+                : [];
 
-    res.json({
-      message: `Loan ${next} successfully`,
-      loan: updatedLoan,
-    });
-  } catch (err) {
-    try { await t.rollback(); } catch {}
-    // If we see 25P02, an earlier statement in this txn already failed.
-    if (err?.parent?.code === "25P02") {
-      return res.status(500).json({
-        error: "Update aborted by a prior error in this transaction. Check FK types for *By columns and date column types.",
+            const rows = gen.map((s, i) => ({
+              loanId: loan.id,
+              period: i + 1,
+              dueDate: s.dueDate,
+              principal: Number(s.principal || 0),
+              interest: Number(s.interest || 0),
+              fees: Number(s.fees || 0),
+              penalties: 0,
+              total: Number(
+                s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)
+              ),
+            }));
+
+            if (rows.length) {
+              await LoanSchedule.bulkCreate(rows, { transaction: t });
+            }
+          }
+        } else {
+          console.warn("[loans] Skipping schedule generation (model/table missing)");
+        }
+      }
+
+      if (next === "closed") {
+        await setUserFkIfSafe(fields, "closedBy", req.user?.id || null);
+        await setDateCol(fields, "closedDate", new Date());
+        if (override && (await loanColumnExists("closeReason"))) {
+          fields.closeReason = "override";
+        }
+      }
+
+      // Attempt the single update
+      try {
+        await loan.update(fields, { transaction: t });
+      } catch (e) {
+        console.error(
+          "[loans] loan.update failed with fields=",
+          Object.keys(fields).map(k => `${k}→${toDbField(k)}`).join(", "),
+          "code:", e?.parent?.code, "detail:", e?.parent?.detail, "message:", e?.parent?.message || e?.message
+        );
+        throw e;
+      }
+
+      await t.commit();
+
+      // audit OUTSIDE the loan txn (don't poison main txn)
+      writeAudit({
+        entityId: loan.id,
+        action: `status:${next}`,
+        before: null,
+        after: loan.toJSON(),
+        req,
+      }).catch(() => {});
+
+      const attributes = await getSafeLoanAttributeNames();
+      const userIncludes = await buildUserIncludesIfPossible();
+
+      const updatedLoan = await Loan.findByPk(req.params.id, {
+        attributes,
+        include: [
+          { model: Borrower, attributes: BORROWER_ATTRS },
+          { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
+          { model: LoanProduct },
+          ...userIncludes,
+        ],
       });
+
+      res.json({
+        message: `Loan ${next} successfully`,
+        loan: updatedLoan,
+      });
+    } catch (e) {
+      try { await t.rollback(); } catch {}
+      if (e?.parent?.code === "25P02") {
+        return res.status(500).json({
+          error: "Update aborted by a prior error in this transaction. Likely FK/date constraint. See server logs for the first error.",
+        });
+      }
+      console.error("Update loan status error:", e);
+      res.status(500).json({ error: "Failed to update loan status" });
     }
-    console.error("Update loan status error:", err);
+  } catch (err) {
+    console.error("Update loan status (outer) error:", err);
     res.status(500).json({ error: "Failed to update loan status" });
   }
 };

@@ -1,46 +1,72 @@
-// src/routes/loanRoutes.js
-const express = require("express");
+'use strict';
+
+const express = require('express');
 const router = express.Router();
-const multer = require("multer");
-const upload = multer(); // memory storage; only used to parse multipart bodies
+const multer = require('multer');
+const upload = multer(); // memory storage for multipart bodies
 
-const { authenticateUser } = require("../middleware/authMiddleware");
-const ctrl = require("../controllers/loanController");
+// Auth
+const { authenticateUser } = require('../middleware/authMiddleware');
 
-// Loan CRUD
-router.get("/", authenticateUser, ctrl.getAllLoans);
+// Keep controller as an object (no destructuring to avoid undefineds)
+const ctrl = require('../controllers/loanController');
 
-// Accept both JSON and multipart:
-// - JSON: express.json() handles it upstream
-// - multipart: multer parses fields/files into req.body / req.files
-router.post("/", authenticateUser, upload.any(), ctrl.createLoan);
+/** Safe wrapper: always pass a function to Express */
+const h = (name) => (req, res, next) => {
+  if (ctrl && typeof ctrl[name] === 'function') return ctrl[name](req, res, next);
+  return res.status(501).json({ error: `Controller method ${name} is not implemented` });
+};
 
-router.get("/:id", authenticateUser, ctrl.getLoanById);
-router.put("/:id", authenticateUser, ctrl.updateLoan);
-router.delete("/:id", authenticateUser, ctrl.deleteLoan);
+/** Map simple status endpoints to updateLoanStatus */
+const setStatus = (status) => (req, res, next) => {
+  req.body = req.body || {};
+  req.body.status = status; // controller lowercases/validates
+  return h('updateLoanStatus')(req, res, next);
+};
 
-// Status-specific actions (to match frontend)
-router.patch("/:id/approve", authenticateUser, (req, res) => {
-  req.body.status = "approved";
-  ctrl.updateLoanStatus(req, res);
+/* ------------------------------- CRUD -------------------------------- */
+
+// List
+router.get('/', authenticateUser, h('getAllLoans'));
+
+// Create — accept JSON or multipart
+router.post('/', authenticateUser, upload.any(), h('createLoan'));
+
+// Read
+router.get('/:id', authenticateUser, h('getLoanById'));
+
+// Update — accept JSON or multipart
+router.put('/:id', authenticateUser, upload.any(), h('updateLoan'));
+
+// Delete — IMPORTANT: do NOT reference a bare `deleteLoan`
+router.delete('/:id', authenticateUser, h('deleteLoan'));
+
+/* -------------------------- Status transitions ----------------------- */
+
+router.patch('/:id/approve',  authenticateUser, upload.none(), setStatus('approved'));
+router.patch('/:id/reject',   authenticateUser, upload.none(), setStatus('rejected'));
+router.patch('/:id/disburse', authenticateUser, upload.none(), setStatus('disbursed'));
+router.patch('/:id/close',    authenticateUser, upload.none(), setStatus('closed'));
+
+// Generic (status in body)
+router.patch('/:id/status', authenticateUser, upload.any(), h('updateLoanStatus'));
+
+// Generic (status in path param)
+router.patch('/:id/status/:status', authenticateUser, upload.none(), (req, res, next) => {
+  req.body = req.body || {};
+  req.body.status = req.params.status;
+  return h('updateLoanStatus')(req, res, next);
 });
-router.patch("/:id/reject", authenticateUser, (req, res) => {
-  req.body.status = "rejected";
-  ctrl.updateLoanStatus(req, res);
-});
-router.patch("/:id/disburse", authenticateUser, (req, res) => {
-  req.body.status = "disbursed";
-  ctrl.updateLoanStatus(req, res);
-});
-router.patch("/:id/close", authenticateUser, (req, res) => {
-  req.body.status = "closed";
-  ctrl.updateLoanStatus(req, res);
+
+/* ------------------------------ Schedule ----------------------------- */
+// Controller supports :loanId or :id
+router.get('/:loanId/schedule', authenticateUser, h('getLoanSchedule'));
+router.get('/:id/schedule',     authenticateUser, (req, res, next) => {
+  req.params.loanId = req.params.id;
+  return h('getLoanSchedule')(req, res, next);
 });
 
-// Generic status update
-router.patch("/:id/status", authenticateUser, ctrl.updateLoanStatus);
-
-// Loan schedule
-router.get("/:loanId/schedule", authenticateUser, ctrl.getLoanSchedule);
-
+/* ------------------------------- Export ------------------------------ */
 module.exports = router;
+module.exports.default = router; // some loaders expect .default
+module.exports.router = router;  // others expect .router
