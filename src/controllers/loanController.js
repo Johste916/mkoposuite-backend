@@ -398,7 +398,7 @@ const createLoan = async (req, res) => {
     // Persisted status starts as pending
     body.status = "pending";
 
-    // initiatedBy only if present in model AND types match AND column exists
+    // initiatedBy only if present in model AND column exists
     if (
       "initiatedBy" in (Loan.rawAttributes || {}) &&
       (await loanColumnExists("initiatedBy"))
@@ -705,30 +705,25 @@ const getLoanSchedule = async (req, res) => {
 };
 
 /* ===========================
-   STATUS UPDATE
+   STATUS UPDATE (no long txn)
 =========================== */
 const updateLoanStatus = async (req, res) => {
   try {
-    const { status, override } = req.body;
-    const next = String(status || "").toLowerCase();
+    const next = String(req.body?.status || "").toLowerCase();
+    const override = !!req.body?.override;
 
-    // Load without a transaction for validation first
+    // Load (no txn) and validate transition
     const loan = await Loan.findByPk(req.params.id);
-    if (!loan) {
-      return res.status(404).json({ error: "Loan not found" });
-    }
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     if (!ALLOWED[loan.status]?.includes(next)) {
       return res.status(400).json({ error: `Cannot change ${loan.status} → ${next}` });
     }
 
-    // Preflight: block transitions that will definitely fail (avoids 25P02)
-    const preflightMsg = await preflightTransition(next, req.user?.id || null);
-    if (preflightMsg) {
-      return res.status(400).json({ error: preflightMsg });
-    }
+    // Preflight to avoid hidden FK/type errors
+    const preMsg = await preflightTransition(next, req.user?.id || null);
+    if (preMsg) return res.status(400).json({ error: preMsg });
 
-    // Additional business check for closing
     if (next === "closed") {
       const outstanding = Number(loan.outstanding ?? 0);
       if (!override && outstanding > 0) {
@@ -736,51 +731,75 @@ const updateLoanStatus = async (req, res) => {
       }
     }
 
-    // Start txn only after validation
-    const t = await sequelize.transaction();
+    // Build update fields (only existing columns)
+    const fields = {};
+    if (await loanColumnExists("status")) fields.status = next;
+    else return res.status(500).json({ error: "loans.status column missing" });
+
+    if (next === "approved") {
+      await setUserFkIfSafe(fields, "approvedBy", req.user?.id || null);
+      await setDateCol(fields, "approvalDate", new Date());
+    }
+
+    if (next === "rejected") {
+      await setUserFkIfSafe(fields, "rejectedBy", req.user?.id || null);
+      await setDateCol(fields, "rejectedDate", new Date());
+    }
+
+    if (next === "disbursed") {
+      await setUserFkIfSafe(fields, "disbursedBy", req.user?.id || null);
+      await setDateCol(fields, "disbursementDate", new Date());
+    }
+
+    if (next === "closed") {
+      await setUserFkIfSafe(fields, "closedBy", req.user?.id || null);
+      await setDateCol(fields, "closedDate", new Date());
+      if (override && (await loanColumnExists("closeReason"))) {
+        fields.closeReason = "override";
+      }
+    }
+
+    // Single UPDATE (no wrapping txn) → surfaces real PG error codes
+    let updated;
     try {
-      // Build fields only for columns that actually exist
-      const fields = {};
-      if (await loanColumnExists("status")) {
-        fields.status = next;
-      } else {
-        await t.rollback();
-        return res.status(500).json({ error: "loans.status column missing" });
-      }
+      await loan.update(fields);
+      updated = await Loan.findByPk(loan.id);
+    } catch (e) {
+      const code = e?.parent?.code || e?.original?.code;
+      const msg  = e?.parent?.message || e?.message;
+      console.error(
+        "[loans] status update failed:",
+        { fields, code, detail: e?.parent?.detail, msg }
+      );
+      return res.status(400).json({
+        error: "Status update failed",
+        code,
+        detail: e?.parent?.detail || null,
+        message: msg,
+      });
+    }
 
-      if (next === "approved") {
-        await setUserFkIfSafe(fields, "approvedBy", req.user?.id || null);
-        await setDateCol(fields, "approvalDate", new Date());
-      }
+    // Post-step: schedule generation for disbursed (best-effort, separate from status)
+    if (next === "disbursed" && LoanSchedule && (await tableExists("loan_schedules"))) {
+      try {
+        const existing = await LoanSchedule.count({ where: { loanId: loan.id } });
+        if (existing === 0) {
+          const input = {
+            amount: Number(updated.amount || 0),
+            interestRate: Number(updated.interestRate || 0),
+            term: updated.termMonths,
+            issueDate: updated.startDate,
+          };
+          const gen =
+            updated.interestMethod === "flat"
+              ? generateFlatRateSchedule(input)
+              : updated.interestMethod === "reducing"
+              ? generateReducingBalanceSchedule(input)
+              : [];
 
-      if (next === "rejected") {
-        await setUserFkIfSafe(fields, "rejectedBy", req.user?.id || null);
-        await setDateCol(fields, "rejectedDate", new Date());
-      }
-
-      if (next === "disbursed") {
-        await setUserFkIfSafe(fields, "disbursedBy", req.user?.id || null);
-        await setDateCol(fields, "disbursementDate", new Date());
-
-        // Only touch schedule if model + table exist
-        if (LoanSchedule && typeof LoanSchedule.count === "function" && (await tableExists("loan_schedules"))) {
-          const count = await LoanSchedule.count({ where: { loanId: loan.id }, transaction: t });
-          if (count === 0) {
-            const input = {
-              amount: Number(loan.amount || 0),
-              interestRate: Number(loan.interestRate || 0),
-              term: loan.termMonths,
-              issueDate: loan.startDate,
-            };
-            const gen =
-              loan.interestMethod === "flat"
-                ? generateFlatRateSchedule(input)
-                : loan.interestMethod === "reducing"
-                ? generateReducingBalanceSchedule(input)
-                : [];
-
+          if (gen.length) {
             const rows = gen.map((s, i) => ({
-              loanId: loan.id,
+              loanId: updated.id,
               period: i + 1,
               dueDate: s.dueDate,
               principal: Number(s.principal || 0),
@@ -791,74 +810,37 @@ const updateLoanStatus = async (req, res) => {
                 s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)
               ),
             }));
-
-            if (rows.length) {
-              await LoanSchedule.bulkCreate(rows, { transaction: t });
-            }
+            await LoanSchedule.bulkCreate(rows);
           }
-        } else {
-          console.warn("[loans] Skipping schedule generation (model/table missing)");
         }
-      }
-
-      if (next === "closed") {
-        await setUserFkIfSafe(fields, "closedBy", req.user?.id || null);
-        await setDateCol(fields, "closedDate", new Date());
-        if (override && (await loanColumnExists("closeReason"))) {
-          fields.closeReason = "override";
-        }
-      }
-
-      // Attempt the single update
-      try {
-        await loan.update(fields, { transaction: t });
       } catch (e) {
-        console.error(
-          "[loans] loan.update failed with fields=",
-          Object.keys(fields).map(k => `${k}→${toDbField(k)}`).join(", "),
-          "code:", e?.parent?.code, "detail:", e?.parent?.detail, "message:", e?.parent?.message || e?.message
-        );
-        throw e;
+        console.warn("[loans] schedule generation failed (non-fatal):", e?.parent?.message || e?.message);
       }
-
-      await t.commit();
-
-      // audit OUTSIDE the loan txn (don't poison main txn)
-      writeAudit({
-        entityId: loan.id,
-        action: `status:${next}`,
-        before: null,
-        after: loan.toJSON(),
-        req,
-      }).catch(() => {});
-
-      const attributes = await getSafeLoanAttributeNames();
-      const userIncludes = await buildUserIncludesIfPossible();
-
-      const updatedLoan = await Loan.findByPk(req.params.id, {
-        attributes,
-        include: [
-          { model: Borrower, attributes: BORROWER_ATTRS },
-          { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
-          { model: LoanProduct },
-          ...userIncludes,
-        ],
-      });
-
-      res.json({
-        message: `Loan ${next} successfully`,
-        loan: updatedLoan,
-      });
-    } catch (e) {
-      try { await t.rollback(); } catch {}
-      if (e?.parent?.code === "25P02") {
-        return res.status(500).json({
-          error: "Update aborted by a prior error in this transaction. Likely FK/date constraint. See server logs for the first error.",
-        });
-      }
-      console.error("Update loan status error:", e);
-      res.status(500).json({ error: "Failed to update loan status" });
     }
+
+    // Audit (non-blocking)
+    writeAudit({
+      entityId: loan.id,
+      action: `status:${next}`,
+      before: null,
+      after: updated?.toJSON?.() || null,
+      req,
+    }).catch(() => {});
+
+    // Return hydrated record with associations
+    const attributes = await getSafeLoanAttributeNames();
+    const userIncludes = await buildUserIncludesIfPossible();
+    const updatedLoan = await Loan.findByPk(loan.id, {
+      attributes,
+      include: [
+        { model: Borrower, attributes: BORROWER_ATTRS },
+        { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
+        { model: LoanProduct },
+        ...userIncludes,
+      ],
+    });
+
+    res.json({ message: `Loan ${next} successfully`, loan: updatedLoan });
   } catch (err) {
     console.error("Update loan status (outer) error:", err);
     res.status(500).json({ error: "Failed to update loan status" });
