@@ -43,16 +43,25 @@ router.delete('/:id', authenticateUser, h('deleteLoan'));
 
 /* -------------------------- Status transitions ----------------------- */
 
-router.patch('/:id/approve',  authenticateUser, upload.none(), setStatus('approved'));
-router.patch('/:id/reject',   authenticateUser, upload.none(), setStatus('rejected'));
-router.patch('/:id/disburse', authenticateUser, upload.none(), setStatus('disbursed'));
-router.patch('/:id/close',    authenticateUser, upload.none(), setStatus('closed'));
+// Support both PATCH and POST (some frontends POST action buttons)
+['patch', 'post'].forEach((verb) => {
+  router[verb]('/:id/approve',  authenticateUser, upload.none(), setStatus('approved'));
+  router[verb]('/:id/reject',   authenticateUser, upload.none(), setStatus('rejected'));
+  router[verb]('/:id/disburse', authenticateUser, upload.none(), setStatus('disbursed'));
+  router[verb]('/:id/close',    authenticateUser, upload.none(), setStatus('closed'));
+});
 
 // Generic (status in body)
 router.patch('/:id/status', authenticateUser, upload.any(), h('updateLoanStatus'));
+router.post('/:id/status',  authenticateUser, upload.any(), h('updateLoanStatus'));
 
 // Generic (status in path param)
 router.patch('/:id/status/:status', authenticateUser, upload.none(), (req, res, next) => {
+  req.body = req.body || {};
+  req.body.status = req.params.status;
+  return h('updateLoanStatus')(req, res, next);
+});
+router.post('/:id/status/:status', authenticateUser, upload.none(), (req, res, next) => {
   req.body = req.body || {};
   req.body.status = req.params.status;
   return h('updateLoanStatus')(req, res, next);

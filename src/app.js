@@ -923,6 +923,9 @@ const smsRoutes           = safeLoadRoutes('./routes/smsRoutes', makeSmsFallback
 const billingPhoneRoutes  = safeLoadRoutes('./routes/billingPhoneRoutes', makeBillingByPhoneFallbackRouter());
 const enrichmentRoutes    = safeLoadRoutes('./routes/enrichmentRoutes', makeEnrichmentFallbackRouter());
 
+/* 🆕 Comments router (new) */
+const commentRoutes       = safeLoadRoutes('./routes/commentRoutes', makeDummyRouter([]));
+
 /* -------------------- Import guards safely (no hard crash) ----------------- */
 let authenticateUser, ensureTenantActive, requireEntitlement;
 try { ({ authenticateUser } = require('./middleware/authMiddleware')); } catch {}
@@ -1083,6 +1086,9 @@ app.use('/api/disbursements',  ...auth, ...active, ...ent('loans'),       disbur
 app.use('/api/repayments',     ...auth, ...active, ...ent('loans'),       repaymentRoutes);
 app.use('/api/reports',        ...auth, ...active, reportRoutes);
 app.use('/api/settings',       ...auth, ...active, settingRoutes);
+
+/* ✅ NEW: Comments (loan notes) */
+app.use('/api/comments',       ...auth, ...active, commentRoutes);
 
 /* Admin/ACL */
 app.use('/api/admin/staff',     ...auth, ...active, adminStaffRoutes);
