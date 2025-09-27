@@ -8,8 +8,8 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
       },
       userId: {
-        type: DataTypes.UUID,        // 👈 was INTEGER; must match Users.id (UUID)
-        allowNull: true,             // allow null if you sometimes record system imports
+        type: DataTypes.UUID,        // must match Users.id (UUID) in most setups
+        allowNull: true,             // allow null for imports/system jobs
       },
       amountPaid: {
         type: DataTypes.DECIMAL(14, 2),
@@ -20,7 +20,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATEONLY,
         allowNull: false,
       },
-      // optional metadata
       method: {
         type: DataTypes.STRING,
         allowNull: true,
@@ -31,9 +30,10 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'loan_payments',     // 👈 set if this is your real table name; otherwise remove
+      // ⚠ If your physical table is *exactly* loan_payments, keep this.
+      // If your DB uses "LoanPayments" (Sequelize default), remove tableName.
+      tableName: 'loan_payments',
       timestamps: true,
-      // underscored: true,           // enable only if physical table uses snake_case timestamps
       indexes: [
         { fields: ['loanId'] },
         { fields: ['userId'] },

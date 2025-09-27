@@ -15,6 +15,13 @@ router.get("/reports/timeseries", authenticateUser, repaymentController.getRepay
 router.get("/export/csv", authenticateUser, repaymentController.exportRepaymentsCsv);
 
 // =========================
+// 🔍 PREVIEW ALLOCATION (fixes 404 seen in console)
+// - Support both GET (query) and POST (body)
+// =========================
+router.get("/preview-allocation", authenticateUser, repaymentController.previewAllocationQuery);
+router.post("/preview-allocation", authenticateUser, repaymentController.previewAllocation);
+
+// =========================
 // ✅ APPROVALS
 // =========================
 router.get("/approvals/pending", authenticateUser, repaymentController.listPendingApprovals);
@@ -37,12 +44,16 @@ router.post(
 
 // =========================
 // 💰 CREATION
+// - Keep legacy /manual
+// - Add POST "/" alias to match UIs calling /api/repayments (fixes 404)
+// - Keep /bulk
 // =========================
 router.post("/manual", authenticateUser, repaymentController.createRepayment);
+router.post("/", authenticateUser, repaymentController.createRepayment); // ← new alias
 router.post("/bulk", authenticateUser, repaymentController.createBulkRepayments);
 
 // =========================
-// 📥 LISTING & SEARCH
+/** 📥 LISTING & SEARCH */
 // =========================
 router.get("/", authenticateUser, repaymentController.getAllRepayments);
 router.get("/borrower/:borrowerId", authenticateUser, repaymentController.getRepaymentsByBorrower);

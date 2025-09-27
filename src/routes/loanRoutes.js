@@ -75,6 +75,30 @@ router.get('/:id/schedule',     authenticateUser, (req, res, next) => {
   return h('getLoanSchedule')(req, res, next);
 });
 
+// Alias for compatibility (some UIs might call /:id/installments)
+router.get('/:id/installments', authenticateUser, (req, res, next) => {
+  req.params.loanId = req.params.id;
+  return h('getLoanSchedule')(req, res, next);
+});
+
+/* --------------------------- Schedule Export -------------------------- */
+/** 
+ * Non-breaking: these routes only respond if the controller implements
+ * exportLoanScheduleCsv / exportLoanSchedulePdf. Otherwise they return 501
+ * (via the safe wrapper), which won’t affect existing flows.
+ */
+router.get('/:loanId/schedule/export.csv', authenticateUser, h('exportLoanScheduleCsv'));
+router.get('/:id/schedule/export.csv',     authenticateUser, (req, res, next) => {
+  req.params.loanId = req.params.id;
+  return h('exportLoanScheduleCsv')(req, res, next);
+});
+
+router.get('/:loanId/schedule/export.pdf', authenticateUser, h('exportLoanSchedulePdf'));
+router.get('/:id/schedule/export.pdf',     authenticateUser, (req, res, next) => {
+  req.params.loanId = req.params.id;
+  return h('exportLoanSchedulePdf')(req, res, next);
+});
+
 /* ------------------------------- Export ------------------------------ */
 module.exports = router;
 module.exports.default = router; // some loaders expect .default

@@ -1,4 +1,3 @@
-// controllers/repaymentController.js
 const fs = require("fs");
 const { Op, fn, col, literal } = require("sequelize");
 const {
@@ -26,8 +25,13 @@ async function getLoanTableColumns() {
   if (_loanTableColumns) return _loanTableColumns;
   try {
     const qi = sequelize.getQueryInterface();
-    const desc = await qi.describeTable("loans"); // { colName: {...}, ... }
-    _loanTableColumns = Object.fromEntries(Object.keys(desc).map((k) => [k, true]));
+    // Try both common casings to be tolerant across installs
+    let desc = null;
+    try { desc = await qi.describeTable("loans"); } catch {}
+    if (!desc) { try { desc = await qi.describeTable("Loans"); } catch {} }
+    _loanTableColumns = desc
+      ? Object.fromEntries(Object.keys(desc).map((k) => [k, true]))
+      : {};
   } catch {
     _loanTableColumns = {};
   }
@@ -35,7 +39,7 @@ async function getLoanTableColumns() {
 }
 
 function mapAttrToField(attrName) {
-  const ra = Loan.rawAttributes || {};
+  const ra = Loan?.rawAttributes || {};
   const def = ra[attrName];
   if (!def) return null;
   return def.field || attrName;
@@ -49,7 +53,7 @@ async function pickExistingLoanAttributes(attrNames = []) {
     if (!field) continue;
     if (cols[field]) selected.push(name);
   }
-  if (!selected.includes("id") && cols["id"]) selected.push("id");
+  if (selected.length && !selected.includes("id") && cols["id"]) selected.push("id");
   return selected.length ? selected : undefined;
 }
 
@@ -58,7 +62,7 @@ const BORROWER_ATTRS = ["id", "name", "phone", "email"];
 // Default minimal attributes safe across schema variations
 const LOAN_BASE_ATTRS = ["id", "borrowerId", "currency", "reference"];
 // When we need to compute balances
-const LOAN_AMOUNT_ATTRS = [...LOAN_BASE_ATTRS, "amount", "totalInterest", "outstanding", "totalPaid"];
+const LOAN_AMOUNT_ATTRS = [...LOAN_BASE_ATTRS, "amount", "totalInterest", "outstanding", "totalPaid", "status"];
 
 async function loanInclude({ where = {}, borrowerWhere, needAmounts = false } = {}) {
   const attrsWanted = needAmounts ? LOAN_AMOUNT_ATTRS : LOAN_BASE_ATTRS;
@@ -112,29 +116,47 @@ function getRepaymentAmountValue(r) {
   return Number(r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0);
 }
 
-/* ===== Safely update loan totals (avoid touching non-existent columns) ===== */
+/* ===== Safely update loan totals & status (auto-active / auto-closed) ===== */
 async function updateLoanFinancials(loan, deltaPaid, t) {
   // deltaPaid: +amount when approving/applying; -amount when voiding/reversing
   const cols = await getLoanTableColumns();
   const updates = {};
 
+  const totalPaidPrev = Number(loan.totalPaid || 0);
   const totalPaidField = mapAttrToField("totalPaid");
   if (totalPaidField && cols[totalPaidField]) {
-    updates.totalPaid = Math.max(0, Number(loan.totalPaid || 0) + Number(deltaPaid || 0));
+    updates.totalPaid = Math.max(0, totalPaidPrev + Number(deltaPaid || 0));
   }
 
   const outstandingField = mapAttrToField("outstanding");
+  let newOutstanding = loan.outstanding != null ? Number(loan.outstanding) : null;
+
   if (outstandingField && cols[outstandingField]) {
-    // Prefer adjusting from current outstanding if present
-    if (loan.outstanding != null) {
-      updates.outstanding = Math.max(0, Number(loan.outstanding || 0) - Number(deltaPaid || 0));
+    if (newOutstanding != null) {
+      newOutstanding = Math.max(0, newOutstanding - Number(deltaPaid || 0));
+      updates.outstanding = newOutstanding;
     } else {
-      // Fallback derive if amount + totalInterest are available
       const principal = Number(loan.amount || 0);
       const totalInterest = Number(loan.totalInterest || 0);
       const newTotalPaid =
-        updates.totalPaid != null ? updates.totalPaid : Math.max(0, Number(loan.totalPaid || 0) + Number(deltaPaid || 0));
-      updates.outstanding = Math.max(0, principal + totalInterest - newTotalPaid);
+        updates.totalPaid != null ? updates.totalPaid : Math.max(0, totalPaidPrev + Number(deltaPaid || 0));
+      newOutstanding = Math.max(0, principal + totalInterest - newTotalPaid);
+      updates.outstanding = newOutstanding;
+    }
+  }
+
+  // Auto status transitions if column exists:
+  const statusField = mapAttrToField("status");
+  if (statusField && cols[statusField]) {
+    const curr = String(loan.status || "").toLowerCase();
+    // Close when fully paid
+    if (newOutstanding === 0 && curr !== "closed") {
+      updates.status = "closed";
+    } else if (deltaPaid > 0 && totalPaidPrev === 0) {
+      // First payment -> mark active if not already active/closed/rejected
+      if (!["active", "closed", "rejected"].includes(curr)) {
+        updates.status = "active";
+      }
     }
   }
 
@@ -322,7 +344,7 @@ const getAllRepayments = async (req, res) => {
       borrowerId,
       dateFrom,
       dateTo,
-      status, // NEW: allow filtering by status e.g., "pending"
+      status, // allow filtering by status
       page = 1,
       pageSize = 20,
     } = req.query;
@@ -339,7 +361,6 @@ const getAllRepayments = async (req, res) => {
       where[dateAttr] = and;
     }
 
-    // optional status filter if model supports it
     if (status && (Repayment.rawAttributes || {}).status) {
       where.status = status;
     }
@@ -495,6 +516,68 @@ const previewAllocation = async (req, res) => {
   }
 };
 
+// GET variant to support /repayments/preview-allocation?q...
+const previewAllocationQuery = async (req, res) => {
+  try {
+    const loanId = req.query.loanId;
+    const amount = Number(req.query.amount || 0);
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const strategy = req.query.strategy;
+    const customOrder = req.query.customOrder;
+    const waivePenalties = String(req.query.waivePenalties || "").toLowerCase() === "true";
+
+    req.body = { loanId, amount, date, strategy, customOrder, waivePenalties };
+    return previewAllocation(req, res);
+  } catch (err) {
+    console.error("previewAllocation(GET) error:", err);
+    res.status(500).json({ error: "Preview allocation failed" });
+  }
+};
+
+/* ==========================
+   helpers: safe Savings write
+========================== */
+async function createSavingsDepositSafely({ borrowerId, amount, date, reference, narrative }) {
+  if (!hasSavings) return;
+  try {
+    const attrs = SavingsTransaction.rawAttributes || {};
+    const payload = {};
+
+    // Only include fields that exist in the actual table
+    if (attrs.borrowerId) payload.borrowerId = borrowerId;
+    if (attrs.amount) payload.amount = Number(amount);
+    if (attrs.type) payload.type = "deposit";
+    if (attrs.date) payload.date = date;
+    if (attrs.reference) payload.reference = reference;
+    if (attrs.narrative) payload.narrative = narrative;
+    if (attrs.status) payload.status = "posted";
+    if (attrs.reversed) payload.reversed = false;
+
+    await SavingsTransaction.create(payload);
+  } catch (e) {
+    // If unique reference collision, retry once with a new reference
+    const code = e?.parent?.code || e?.original?.code;
+    if (code === "23505") {
+      try {
+        await SavingsTransaction.create({
+          borrowerId,
+          amount: Number(amount),
+          type: "deposit",
+          date,
+          reference: `${reference}-${Date.now()}`,
+          narrative,
+          status: "posted",
+          reversed: false,
+        });
+        return;
+      } catch (ee) {
+        console.warn("Savings deposit retry failed:", ee?.message || ee);
+      }
+    }
+    console.warn("Savings deposit skipped:", e?.message || e);
+  }
+}
+
 /* ==========================
    💰 CREATE (manual, immediate post)
 ========================== */
@@ -573,24 +656,20 @@ const createRepayment = async (req, res) => {
     await applyAllocationToSchedule({ loanId, allocations, asOfDate: date, t, sign: +1 });
     await updateLoanFinancials(loan, +Number(amount), t);
 
-    // Optional: credit borrower savings (auto-deposit)
-    if (hasSavings) {
-      await SavingsTransaction.create(
-        {
-          borrowerId: loan.borrowerId,
-          amount: Number(amount),
-          type: "deposit",
-          narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
-          reference: payload.reference || `RCPT-${repayment.id}`,
-          date: date,
-        },
-        { transaction: t }
-      );
-    }
-
     await t.commit();
 
-    // Notify borrower
+    // Savings deposit moved *after* commit so a uniqueness/NOT NULL on savings
+    // doesn't abort the repayment transaction (fixes 25P02 cascade)
+    const refForSavings = repayment.reference || reference || `RCPT-${repayment.id}`;
+    await createSavingsDepositSafely({
+      borrowerId: loan.borrowerId,
+      amount: Number(amount),
+      date,
+      reference: refForSavings,
+      narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
+    });
+
+    // Notify borrower (best effort)
     await Notifier.notifyBorrowerRepayment({
       borrower: loan.Borrower,
       amount: Number(amount),
@@ -606,8 +685,13 @@ const createRepayment = async (req, res) => {
       totals,
     });
   } catch (err) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     console.error("Create repayment error:", err);
+    // Try to surface the original PG code when possible
+    const code = err?.parent?.code || err?.original?.code;
+    if (code === "23503") return res.status(422).json({ error: "Foreign key constraint failed" });
+    if (code === "23502") return res.status(422).json({ error: "Missing required field" });
+    if (code === "23505") return res.status(409).json({ error: "Duplicate value" });
     res.status(500).json({ error: "Error saving repayment" });
   }
 };
@@ -690,7 +774,7 @@ const createBulkRepayments = async (req, res) => {
     await t.commit();
     res.status(201).json({ message: "Bulk repayments queued for approval", ids: created });
   } catch (err) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     console.error("Bulk create error:", err);
     res.status(500).json({ error: err.message || "Bulk creation failed" });
   }
@@ -769,7 +853,7 @@ const uploadRepaymentsCsv = async (req, res) => {
       .status(201)
       .json({ message: "CSV uploaded, repayments queued for approval", ids: created });
   } catch (err) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     console.error("CSV upload error:", err);
     res.status(500).json({ error: err.message || "CSV upload failed" });
   }
@@ -827,22 +911,17 @@ const approveRepayment = async (req, res) => {
 
     await repayment.update({ status: "approved", applied: true, allocation: allocations }, { transaction: t });
 
-    // Optional savings deposit
-    if (hasSavings) {
-      await SavingsTransaction.create(
-        {
-          borrowerId: loan.borrowerId,
-          amount: Number(paidThis),
-          type: "deposit",
-          narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
-          reference: repayment.reference || `RCPT-${repayment.id}`,
-          date: date,
-        },
-        { transaction: t }
-      );
-    }
-
     await t.commit();
+
+    // Savings deposit after commit (avoid aborting approval tx)
+    const refForSavings = repayment.reference || `RCPT-${repayment.id}`;
+    await createSavingsDepositSafely({
+      borrowerId: loan.borrowerId,
+      amount: Number(paidThis),
+      date,
+      reference: refForSavings,
+      narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
+    });
 
     await Notifier.notifyBorrowerRepayment({
       borrower: loan.Borrower,
@@ -853,7 +932,7 @@ const approveRepayment = async (req, res) => {
 
     res.json({ message: "Repayment approved" });
   } catch (err) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     console.error("approveRepayment error:", err);
     res.status(500).json({ error: "Approve failed" });
   }
@@ -919,7 +998,7 @@ const voidRepayment = async (req, res) => {
     await t.commit();
     res.json({ message: "Repayment voided" });
   } catch (err) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     console.error("Void repayment error:", err);
     res.status(500).json({ error: "Error voiding repayment" });
   }
@@ -1155,21 +1234,16 @@ const webhookMobileMoney = async (req, res) => {
     await applyAllocationToSchedule({ loanId: loan.id, allocations, asOfDate: n.paidAt, t, sign: +1 });
     await updateLoanFinancials(loan, +Number(n.amount), t);
 
-    if (hasSavings) {
-      await SavingsTransaction.create(
-        {
-          borrowerId: loan.borrowerId,
-          amount: Number(n.amount),
-          type: "deposit",
-          narrative: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`,
-          reference: repayment.reference,
-          date: n.paidAt?.slice(0, 10),
-        },
-        { transaction: t }
-      );
-    }
-
     await t.commit();
+
+    // Savings after commit
+    await createSavingsDepositSafely({
+      borrowerId: loan.borrowerId,
+      amount: Number(n.amount),
+      date: n.paidAt?.slice(0, 10),
+      reference: repayment.reference,
+      narrative: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`,
+    });
 
     await Notifier.notifyBorrowerRepayment({
       borrower: loan.Borrower,
@@ -1180,7 +1254,7 @@ const webhookMobileMoney = async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     console.error("Mobile webhook error:", err);
     res.status(500).json({ error: "Webhook failed" });
   }
@@ -1243,21 +1317,15 @@ const webhookBank = async (req, res) => {
     await applyAllocationToSchedule({ loanId: loan.id, allocations, asOfDate: n.paidAt, t, sign: +1 });
     await updateLoanFinancials(loan, +Number(n.amount), t);
 
-    if (hasSavings) {
-      await SavingsTransaction.create(
-        {
-          borrowerId: loan.borrowerId,
-          amount: Number(n.amount),
-          type: "deposit",
-          narrative: `Loan repayment deposit (bank) for ${loan.reference || loan.id}`,
-          reference: repayment.reference,
-          date: n.paidAt?.slice(0, 10),
-        },
-        { transaction: t }
-      );
-    }
-
     await t.commit();
+
+    await createSavingsDepositSafely({
+      borrowerId: loan.borrowerId,
+      amount: Number(n.amount),
+      date: n.paidAt?.slice(0, 10),
+      reference: repayment.reference,
+      narrative: `Loan repayment deposit (bank) for ${loan.reference || loan.id}`,
+    });
 
     await Notifier.notifyBorrowerRepayment({
       borrower: loan.Borrower,
@@ -1268,7 +1336,7 @@ const webhookBank = async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     console.error("Bank webhook error:", err);
     res.status(500).json({ error: "Webhook failed" });
   }
@@ -1310,6 +1378,7 @@ module.exports = {
   getRepaymentsByLoan,
   getRepaymentById,
   previewAllocation,
+  previewAllocationQuery,
   createRepayment,
   updateRepayment,
   deleteRepayment,
