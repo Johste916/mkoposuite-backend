@@ -626,6 +626,75 @@ function makeEnrichmentFallbackRouter() {
   return r;
 }
 
+/* -------------------- Compat: Comments & Repayments (in-memory) ------------ */
+/* These keep the UI working even if DB routes are missing/broken. */
+const COMMENTS_MEM = [];
+let COMMENTS_NEXT_ID = 1;
+function makeCommentsCompatRouter() {
+  const r = express.Router();
+
+  // List comments for a loan
+  r.get('/loan/:loanId', (req, res) => {
+    const items = COMMENTS_MEM.filter(c => String(c.loanId) === String(req.params.loanId));
+    res.setHeader('X-Total-Count', String(items.length));
+    res.json(items);
+  });
+
+  // Create comment
+  r.post('/', (req, res) => {
+    const { loanId, content } = req.body || {};
+    if (!loanId || !content) {
+      return res.status(400).json({ error: 'loanId and content are required' });
+    }
+    const c = {
+      id: String(COMMENTS_NEXT_ID++),
+      loanId: String(loanId),
+      content: String(content),
+      createdAt: new Date().toISOString(),
+      author: { name: req.user?.name || 'System' },
+    };
+    COMMENTS_MEM.unshift(c);
+    res.status(201).json(c);
+  });
+
+  return r;
+}
+
+const REPAYMENTS_MEM = [];
+let REPAYMENTS_NEXT_ID = 1;
+function makeRepaymentsCompatRouter() {
+  const r = express.Router();
+
+  // List repayments for a loan
+  r.get('/loan/:loanId', (req, res) => {
+    const items = REPAYMENTS_MEM.filter(p => String(p.loanId) === String(req.params.loanId));
+    res.setHeader('X-Total-Count', String(items.length));
+    res.json(items);
+  });
+
+  // Create repayment
+  r.post('/', (req, res) => {
+    const { loanId, amount, date, method, notes } = req.body || {};
+    const amt = Number(amount);
+    if (!loanId || !amt || amt <= 0) {
+      return res.status(400).json({ error: 'loanId and a positive amount are required' });
+    }
+    const pay = {
+      id: String(REPAYMENTS_NEXT_ID++),
+      loanId: String(loanId),
+      amount: amt,
+      date: date || new Date().toISOString().slice(0, 10),
+      method: method || 'cash',
+      notes: notes || '',
+      createdAt: new Date().toISOString(),
+    };
+    REPAYMENTS_MEM.unshift(pay);
+    res.status(201).json(pay);
+  });
+
+  return r;
+}
+
 /* -------- Tenant-scoped bridges: tickets, sms, billing phone, enrichment --- */
 function makeTenantFeatureBridgeRouter() {
   const r = express.Router({ mergeParams: true });
@@ -1075,6 +1144,12 @@ app.use('/api/admin/tenants', tenantsCompatRoutes);
 
 /* ✅ NEW: Banks (use initialized router to avoid double require) */
 app.use('/api/banks', ...auth, ...active, bankRoutes);
+
+/* ✅ Compat for Comments & Repayments (mounted BEFORE real routers) */
+const commentsCompatRoutes   = makeCommentsCompatRouter();
+const repaymentsCompatRoutes = makeRepaymentsCompatRouter();
+app.use('/api/comments',   ...auth, ...active, commentsCompatRoutes);
+app.use('/api/repayments', ...auth, ...active, ...ent('loans'), repaymentsCompatRoutes);
 
 /* Feature modules with guards (no-op if guards missing) */
 app.use('/api/borrowers',      ...auth, ...active, borrowerRoutes);
