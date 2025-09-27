@@ -5,8 +5,8 @@ const {
   Branch,
   User,
   LoanProduct,
-  LoanRepayment, // keep existing import to avoid breaking other parts
-  LoanPayment,   // explicit to avoid undefined
+  LoanRepayment,   // keep existing import to avoid breaking other parts
+  LoanPayment,     // explicit to avoid undefined
   LoanSchedule,
   AuditLog,
   sequelize,
@@ -188,21 +188,41 @@ async function buildUserIncludesIfPossible() {
   return includes;
 }
 
-/** Check if loans.<fkAttr> type is compatible with Users.id type */
-async function loanUserFkIsCompatible(fkAttr /* e.g., 'approvedBy' or 'disbursedBy' */) {
-  try {
-    const usersDesc = await describeTableCached(getUsersTableName());
-    const loansDesc = await describeTableCached(getLoansTableName());
-    const usersPkType = normalizePgType(usersDesc?.id?.type || "unknown");
-    const fkDbField = Loan.rawAttributes?.[fkAttr]?.field || fkAttr;
-    const loanFkType = normalizePgType(loansDesc?.[fkDbField]?.type || "unknown");
-    return (
-      (usersPkType === "uuid" && loanFkType === "uuid") ||
-      (usersPkType === "int" && loanFkType === "int")
-    );
-  } catch {
-    // Be conservative: if we can't tell, don't write FK
-    return false;
+/** Get normalized type for a loans.<attr> column (uuid/int/text/date/unknown) */
+async function getLoanColumnType(attr) {
+  const loansDesc = await describeTableCached(getLoansTableName());
+  const dbField = Loan?.rawAttributes?.[attr]?.field || attr;
+  return normalizePgType(loansDesc?.[dbField]?.type || "unknown");
+}
+
+/** Safely set a User FK into fields, coercing to int/validating uuid as needed */
+async function setUserFkIfSafe(fields, attr, userId) {
+  if (!(await loanColumnExists(attr))) return;
+  const colType = await getLoanColumnType(attr);
+  if (colType === "int") {
+    const asInt = Number.parseInt(userId, 10);
+    if (Number.isFinite(asInt)) fields[attr] = asInt;
+    else console.warn(`[loans] Skip ${attr}: userId not numeric for int FK`);
+  } else if (colType === "uuid") {
+    const s = String(userId || "");
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) {
+      fields[attr] = s;
+    } else {
+      console.warn(`[loans] Skip ${attr}: userId not a UUID for uuid FK`);
+    }
+  } else {
+    console.warn(`[loans] Skip ${attr}: unsupported FK column type ${colType}`);
+  }
+}
+
+/** Safely set a date/timestamp column */
+async function setDateCol(fields, attr, dateVal = new Date()) {
+  if (!(await loanColumnExists(attr))) return;
+  const colType = await getLoanColumnType(attr);
+  if (colType === "date") {
+    fields[attr] = new Date(dateVal).toISOString().slice(0, 10); // YYYY-MM-DD
+  } else {
+    fields[attr] = dateVal; // Sequelize handles timestamp
   }
 }
 
@@ -301,21 +321,21 @@ const createLoan = async (req, res) => {
     // initiatedBy only if present in model AND types match AND column exists
     if (
       "initiatedBy" in (Loan.rawAttributes || {}) &&
-      (await loanUserFkIsCompatible("initiatedBy")) &&
       (await loanColumnExists("initiatedBy"))
     ) {
-      body.initiatedBy = req.user?.id || null;
+      await setUserFkIfSafe(body, "initiatedBy", req.user?.id || null);
     }
 
     const loan = await Loan.create(body);
 
-    await writeAudit({
+    // audit out of critical path
+    writeAudit({
       entityId: loan.id,
       action: "create",
       before: null,
       after: loan.toJSON(),
       req,
-    });
+    }).catch(() => {});
 
     res.status(201).json(loan);
   } catch (err) {
@@ -531,13 +551,14 @@ const updateLoan = async (req, res) => {
 
     await loan.update(body);
 
-    await writeAudit({
+    // audit out of critical path
+    writeAudit({
       entityId: loan.id,
       action: "update",
       before,
       after: loan.toJSON(),
       req,
-    });
+    }).catch(() => {});
 
     res.json(loan);
   } catch (err) {
@@ -557,13 +578,14 @@ const deleteLoan = async (req, res) => {
     const before = loan.toJSON();
     await loan.destroy();
 
-    await writeAudit({
+    // audit out of critical path
+    writeAudit({
       entityId: loan.id,
       action: "delete",
       before,
       after: null,
       req,
-    });
+    }).catch(() => {});
 
     res.json({ message: "Loan deleted" });
   } catch (err) {
@@ -611,7 +633,7 @@ const updateLoanStatus = async (req, res) => {
     const { status, override } = req.body;
     const next = String(status || "").toLowerCase();
 
-    const loan = await Loan.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+    const loan = await Loan.findByPk(req.params.id, { transaction: t });
     if (!loan) {
       await t.rollback();
       return res.status(404).json({ error: "Loan not found" });
@@ -633,31 +655,18 @@ const updateLoanStatus = async (req, res) => {
     }
 
     if (next === "approved") {
-      // Only set approvedBy if loans.approvedBy exists and FK types match
-      if ((await loanColumnExists("approvedBy")) && (await loanUserFkIsCompatible("approvedBy"))) {
-        fields.approvedBy = req.user?.id || null;
-      }
-      if (await loanColumnExists("approvalDate")) {
-        fields.approvalDate = new Date();
-      }
+      await setUserFkIfSafe(fields, "approvedBy", req.user?.id || null);
+      await setDateCol(fields, "approvalDate", new Date());
     }
 
     if (next === "rejected") {
-      if ((await loanColumnExists("rejectedBy")) && (await loanUserFkIsCompatible("rejectedBy"))) {
-        fields.rejectedBy = req.user?.id || null;
-      }
-      if (await loanColumnExists("rejectedDate")) {
-        fields.rejectedDate = new Date();
-      }
+      await setUserFkIfSafe(fields, "rejectedBy", req.user?.id || null);
+      await setDateCol(fields, "rejectedDate", new Date());
     }
 
     if (next === "disbursed") {
-      if ((await loanColumnExists("disbursedBy")) && (await loanUserFkIsCompatible("disbursedBy"))) {
-        fields.disbursedBy = req.user?.id || null;
-      }
-      if (await loanColumnExists("disbursementDate")) {
-        fields.disbursementDate = new Date();
-      }
+      await setUserFkIfSafe(fields, "disbursedBy", req.user?.id || null);
+      await setDateCol(fields, "disbursementDate", new Date());
 
       // Only touch schedule if model + table exist
       if (LoanSchedule && typeof LoanSchedule.count === "function" && (await tableExists("loan_schedules"))) {
@@ -704,38 +713,36 @@ const updateLoanStatus = async (req, res) => {
         await t.rollback();
         return res.status(400).json({ error: "Outstanding > 0, override required" });
       }
-      if ((await loanColumnExists("closedBy")) && (await loanUserFkIsCompatible("closedBy"))) {
-        fields.closedBy = req.user?.id || null;
-      }
-      if (await loanColumnExists("closedDate")) {
-        fields.closedDate = new Date();
-      }
+      await setUserFkIfSafe(fields, "closedBy", req.user?.id || null);
+      await setDateCol(fields, "closedDate", new Date());
       if (override && (await loanColumnExists("closeReason"))) {
         fields.closeReason = "override";
       }
     }
 
-    // Log what we are about to SET (helps pinpoint missing columns locally)
+    // Attempt the update
     try {
       await loan.update(fields, { transaction: t });
     } catch (e) {
+      // This is the first failing statement; Log the real cause before we roll back
       console.error(
         "[loans] loan.update failed with fields=",
         Object.keys(fields).map(k => `${k}→${toDbField(k)}`).join(", "),
-        "error:", e?.parent?.code || e?.name, e?.parent?.message || e?.message
+        "code:", e?.parent?.code, "detail:", e?.parent?.detail, "message:", e?.parent?.message || e?.message
       );
       throw e;
     }
 
-    await writeAudit({
+    await t.commit();
+
+    // audit OUTSIDE the loan txn (don't poison main txn)
+    writeAudit({
       entityId: loan.id,
       action: `status:${next}`,
-      before: loan.toJSON(),
+      before: null, // optional
       after: loan.toJSON(),
       req,
-    });
-
-    await t.commit();
+    }).catch(() => {});
 
     const attributes = await getSafeLoanAttributeNames();
     const userIncludes = await buildUserIncludesIfPossible();
@@ -755,7 +762,13 @@ const updateLoanStatus = async (req, res) => {
       loan: updatedLoan,
     });
   } catch (err) {
-    try { await sequelize.transaction(t => t.rollback?.()); } catch {}
+    try { await t.rollback(); } catch {}
+    // If we see 25P02, an earlier statement in this txn already failed.
+    if (err?.parent?.code === "25P02") {
+      return res.status(500).json({
+        error: "Update aborted by a prior error in this transaction. Check FK types for *By columns and date column types.",
+      });
+    }
     console.error("Update loan status error:", err);
     res.status(500).json({ error: "Failed to update loan status" });
   }
