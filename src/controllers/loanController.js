@@ -55,7 +55,7 @@ let USERS_TABLE_DESC_CACHE = null;
 let LOAN_PAYMENTS_DESC_CACHE = null;
 let LOAN_SCHEDULES_DESC_CACHE = null;
 
-// 🆕 enum cache
+// enum cache
 const ENUM_CACHE = Object.create(null);
 
 const getTableNameFromModel = (Model, fallback) => {
@@ -73,7 +73,7 @@ function normalizePgType(t = "") {
   if (s.includes("char") || s.includes("text") || s.includes("varying")) return "text";
   if (s.includes("timestamp") || s.includes("date")) return "date";
   if (s.includes("enum") || s.includes("user-defined")) return "enum";
-  return s || "unknown"; // includes enums ("user-defined") etc.
+  return s || "unknown";
 }
 
 async function describeTableCached(tableName) {
@@ -156,23 +156,48 @@ async function getLoanColumnMeta(attr) {
   };
 }
 
-/** 🆕 Read enum labels for a given column (case-insensitive table matching) */
+/** Prefer model-defined enum values; otherwise pull them robustly from the DB */
 async function getEnumLabelsForColumn(tableName, columnName) {
   try {
+    // 1) Model-defined enum (most reliable)
+    if (Loan && columnName === "status") {
+      const ra = Loan.rawAttributes?.status;
+      const modelVals =
+        (ra && (ra.values || ra.type?.values)) ? (ra.values || ra.type.values) : null;
+      if (Array.isArray(modelVals) && modelVals.length) return modelVals;
+    }
+
+    // 2) Cached?
     const key = `${String(tableName).toLowerCase()}.${String(columnName).toLowerCase()}`;
     if (ENUM_CACHE[key]) return ENUM_CACHE[key];
-    const [rows] = await sequelize.query(
+
+    // 3) Two-step DB lookup: first get udt_name, then fetch pg_enum labels
+    const [[udtRow]] = await sequelize.query(
       `
-      SELECT e.enumlabel
+      SELECT c.udt_name
       FROM information_schema.columns c
-      JOIN pg_type t ON t.typname = c.udt_name
-      JOIN pg_enum e ON e.enumtypid = t.oid
       WHERE lower(c.table_schema) = lower(current_schema())
         AND lower(c.table_name) = lower(:tableName)
         AND lower(c.column_name) = lower(:columnName)
-      ORDER BY e.enumsortorder
       `,
       { replacements: { tableName, columnName } }
+    );
+
+    const udt = udtRow?.udt_name;
+    if (!udt) {
+      ENUM_CACHE[key] = [];
+      return [];
+    }
+
+    const [rows] = await sequelize.query(
+      `
+      SELECT e.enumlabel
+      FROM pg_type t
+      JOIN pg_enum e ON e.enumtypid = t.oid
+      WHERE t.typname = :udt
+      ORDER BY e.enumsortorder
+      `,
+      { replacements: { udt } }
     );
     const labels = Array.isArray(rows) ? rows.map(r => r.enumlabel) : [];
     ENUM_CACHE[key] = labels;
@@ -183,11 +208,11 @@ async function getEnumLabelsForColumn(tableName, columnName) {
   }
 }
 
-/** 🆕 Map a friendly status ('approved') to the exact DB enum label (e.g., 'Approved') */
+/** Map a friendly status ('approved') to the exact DB enum label (e.g., 'Approved') */
 async function mapStatusToDbEnumLabel(next) {
   const table = getLoansTableName();
   const labels = await getEnumLabelsForColumn(table, "status");
-  if (!labels.length) return next; // column not enum (string/text) → just pass through
+  if (!labels.length) return next; // column not enum (or unknown) → pass through
   const hit = labels.find(l => String(l).toLowerCase() === String(next).toLowerCase());
   return hit || null;
 }
@@ -309,44 +334,43 @@ async function preflightTransition(next, userId) {
         return `Cannot ${label}: ${attrName} is UUID NOT NULL but current user id is not a UUID.`;
       }
     } else {
-      return null; // unknown types — we won't block, DB will validate
+      return null;
     }
     return null;
   };
 
-  // helper to check a required date column
-  const needDateCol = async (attrName, _label) => {
+  const needDateCol = async (attrName) => {
     const meta = await getLoanColumnMeta(attrName);
     if (!meta) return null;
-    if (meta.allowNull) return null; // nullable → fine
+    if (meta.allowNull) return null;
     return null; // we will set a value
   };
 
   if (next === "approved") {
     return (
       (await needUserFk("approvedBy", "approve")) ||
-      (await needDateCol("approvalDate", "approve")) ||
+      (await needDateCol("approvalDate")) ||
       null
     );
   }
   if (next === "rejected") {
     return (
       (await needUserFk("rejectedBy", "reject")) ||
-      (await needDateCol("rejectedDate", "reject")) ||
+      (await needDateCol("rejectedDate")) ||
       null
     );
   }
   if (next === "disbursed") {
     return (
       (await needUserFk("disbursedBy", "disburse")) ||
-      (await needDateCol("disbursementDate", "disburse")) ||
+      (await needDateCol("disbursementDate")) ||
       null
     );
   }
   if (next === "closed") {
     return (
       (await needUserFk("closedBy", "close")) ||
-      (await needDateCol("closedDate", "close")) ||
+      (await needDateCol("closedDate")) ||
       null
     );
   }
@@ -374,7 +398,6 @@ function addMonthsDateOnly(dateStr, months) {
 =========================== */
 const createLoan = async (req, res) => {
   try {
-    // Support JSON or multipart { payload: "<json>" }
     const raw = typeof req.body?.payload === "string" ? req.body.payload : null;
     let body = raw ? JSON.parse(raw) : { ...req.body };
 
@@ -383,7 +406,7 @@ const createLoan = async (req, res) => {
       body.termMonths = Number(body.durationMonths);
     }
     if (body.releaseDate && !body.startDate) {
-      body.startDate = body.releaseDate; // "YYYY-MM-DD"
+      body.startDate = body.releaseDate;
     }
 
     // Coerce numerics
@@ -446,14 +469,13 @@ const createLoan = async (req, res) => {
     const pendingLabel = await mapStatusToDbEnumLabel("pending");
     body.status = pendingLabel || "pending";
 
-    // initiatedBy only if present in model AND column exists
+    // initiatedBy only if present and column exists
     if ("initiatedBy" in (Loan.rawAttributes || {}) && (await loanColumnExists("initiatedBy"))) {
       await setUserFkIfSafe(body, "initiatedBy", req.user?.id || null);
     }
 
     const loan = await Loan.create(body);
 
-    // audit out of critical path
     writeAudit({
       entityId: loan.id,
       action: "create",
@@ -476,7 +498,6 @@ const getAllLoans = async (req, res) => {
   try {
     const where = {};
 
-    // Map requested status to DB enum label if necessary
     const rawStatus = String(req.query.status || "").toLowerCase();
     const scope = String(req.query.scope || "").toLowerCase();
 
@@ -677,7 +698,6 @@ const updateLoan = async (req, res) => {
 
     await loan.update(body);
 
-    // audit out of critical path
     writeAudit({
       entityId: loan.id,
       action: "update",
@@ -704,7 +724,6 @@ const deleteLoan = async (req, res) => {
     const before = loan.toJSON();
     await loan.destroy();
 
-    // audit out of critical path
     writeAudit({
       entityId: loan.id,
       action: "delete",
@@ -751,7 +770,7 @@ const getLoanSchedule = async (req, res) => {
 };
 
 /* ===========================
-   STATUS UPDATE (no long txn)
+   STATUS UPDATE (single UPDATE)
 =========================== */
 const updateLoanStatus = async (req, res) => {
   try {
@@ -815,7 +834,7 @@ const updateLoanStatus = async (req, res) => {
       }
     }
 
-    // Single UPDATE (no wrapping txn) → surfaces real PG error codes
+    // Single UPDATE → clearer PG errors & no poisoned txn
     let updated;
     try {
       await loan.update(fields);
@@ -823,10 +842,12 @@ const updateLoanStatus = async (req, res) => {
     } catch (e) {
       const code = e?.parent?.code || e?.original?.code;
       const msg  = e?.parent?.message || e?.message;
-      console.error(
-        "[loans] status update failed:",
-        { fields, code, detail: e?.parent?.detail, msg }
-      );
+      console.error("[loans] status update failed:", {
+        fields,
+        code,
+        detail: e?.parent?.detail,
+        msg,
+      });
       return res.status(400).json({
         error: "Status update failed",
         code,
@@ -835,7 +856,7 @@ const updateLoanStatus = async (req, res) => {
       });
     }
 
-    // Post-step: schedule generation for disbursed (best-effort, separate from status)
+    // Post-step: schedule generation for disbursed
     if (next === "disbursed" && LoanSchedule && (await tableExists("loan_schedules"))) {
       try {
         const existing = await LoanSchedule.count({ where: { loanId: loan.id } });
@@ -852,7 +873,6 @@ const updateLoanStatus = async (req, res) => {
               : updated.interestMethod === "reducing"
               ? generateReducingBalanceSchedule(input)
               : [];
-
           if (gen.length) {
             const rows = gen.map((s, i) => ({
               loanId: updated.id,
@@ -862,9 +882,8 @@ const updateLoanStatus = async (req, res) => {
               interest: Number(s.interest || 0),
               fees: Number(s.fees || 0),
               penalties: 0,
-              total: Number(
-                s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)
-              ),
+              total:
+                Number(s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)),
             }));
             await LoanSchedule.bulkCreate(rows);
           }
