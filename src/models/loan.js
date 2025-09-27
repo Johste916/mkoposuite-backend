@@ -33,7 +33,7 @@ module.exports = (sequelize, DataTypes) => {
         field: 'interestMethod',
       },
 
-      // keep as string; PG column is enum and will validate labels
+      // Keep STRING so Sequelize doesn’t try to manage the enum — PostgreSQL column is enum.
       status: {
         type: DataTypes.STRING,
         allowNull: false,
@@ -44,20 +44,20 @@ module.exports = (sequelize, DataTypes) => {
       totalInterest: { type: DataTypes.DECIMAL(14, 2), field: 'total_interest' },
       outstanding:   { type: DataTypes.DECIMAL(14, 2), field: 'outstanding' },
 
-      // UUID FKs (you showed Users.id is uuid)
+      // Your Users.id is UUID; map FKs accordingly, map to exact DB column names you showed
       initiatedBy:  { type: DataTypes.UUID, field: 'initiated_by' },
       approvedBy:   { type: DataTypes.UUID, field: 'approved_by' },
       rejectedBy:   { type: DataTypes.UUID, field: 'rejected_by' },
       disbursedBy:  { type: DataTypes.UUID, field: 'disbursed_by' },
 
-      approvalDate:     { type: DataTypes.DATE, field: 'approvalDate' },
-      rejectedDate:     { type: DataTypes.DATE, field: 'rejectionDate' }, // <-- maps correctly
-      disbursementDate: { type: DataTypes.DATE, field: 'disbursementDate' },
+      approvalDate:       { type: DataTypes.DATE, field: 'approvalDate' },
+      rejectedDate:       { type: DataTypes.DATE, field: 'rejectionDate' },   // << correct DB name
+      disbursementDate:   { type: DataTypes.DATE, field: 'disbursementDate' },
       disbursementMethod: { type: DataTypes.STRING, field: 'disbursementMethod' },
 
-      closedBy:     { type: DataTypes.UUID, field: 'closed_by' },
-      closedDate:   { type: DataTypes.DATE,  field: 'closed_date' },
-      closeReason:  { type: DataTypes.STRING, field: 'closeReason' },     // <-- camel in DB
+      closedBy:    { type: DataTypes.UUID, field: 'closed_by' },
+      closedDate:  { type: DataTypes.DATE,  field: 'closed_date' },
+      closeReason: { type: DataTypes.STRING, field: 'closeReason' },           // << camelCase in DB
 
       rescheduledFromId: { type: DataTypes.UUID, field: 'rescheduledFromId' },
       topUpOfId:         { type: DataTypes.UUID, field: 'topUpOfId' },
