@@ -55,6 +55,9 @@ let USERS_TABLE_DESC_CACHE = null;
 let LOAN_PAYMENTS_DESC_CACHE = null;
 let LOAN_SCHEDULES_DESC_CACHE = null;
 
+// 🆕 enum cache
+const ENUM_CACHE = Object.create(null);
+
 const getTableNameFromModel = (Model, fallback) => {
   const t = Model?.getTableName ? Model.getTableName() : fallback;
   return typeof t === "string" ? t : t?.tableName || fallback;
@@ -69,6 +72,7 @@ function normalizePgType(t = "") {
   if (s.includes("int")) return "int"; // covers int2/4/8
   if (s.includes("char") || s.includes("text") || s.includes("varying")) return "text";
   if (s.includes("timestamp") || s.includes("date")) return "date";
+  if (s.includes("enum") || s.includes("user-defined")) return "enum";
   return s || "unknown"; // includes enums ("user-defined") etc.
 }
 
@@ -150,6 +154,42 @@ async function getLoanColumnMeta(attr) {
     raw: col,
     dbField,
   };
+}
+
+/** 🆕 Read enum labels for a given column (case-insensitive table matching) */
+async function getEnumLabelsForColumn(tableName, columnName) {
+  try {
+    const key = `${String(tableName).toLowerCase()}.${String(columnName).toLowerCase()}`;
+    if (ENUM_CACHE[key]) return ENUM_CACHE[key];
+    const [rows] = await sequelize.query(
+      `
+      SELECT e.enumlabel
+      FROM information_schema.columns c
+      JOIN pg_type t ON t.typname = c.udt_name
+      JOIN pg_enum e ON e.enumtypid = t.oid
+      WHERE lower(c.table_schema) = lower(current_schema())
+        AND lower(c.table_name) = lower(:tableName)
+        AND lower(c.column_name) = lower(:columnName)
+      ORDER BY e.enumsortorder
+      `,
+      { replacements: { tableName, columnName } }
+    );
+    const labels = Array.isArray(rows) ? rows.map(r => r.enumlabel) : [];
+    ENUM_CACHE[key] = labels;
+    return labels;
+  } catch (e) {
+    console.warn("[loans] enum introspection failed:", e.message);
+    return [];
+  }
+}
+
+/** 🆕 Map a friendly status ('approved') to the exact DB enum label (e.g., 'Approved') */
+async function mapStatusToDbEnumLabel(next) {
+  const table = getLoansTableName();
+  const labels = await getEnumLabelsForColumn(table, "status");
+  if (!labels.length) return next; // column not enum (string/text) → just pass through
+  const hit = labels.find(l => String(l).toLowerCase() === String(next).toLowerCase());
+  return hit || null;
 }
 
 /**
@@ -243,6 +283,14 @@ async function preflightTransition(next, userId) {
   if (statusMeta && statusMeta.type === "int") {
     return `Cannot set string status "${next}" because loans.status is numeric (int).`;
   }
+  // 1b) if enum, make sure value exists
+  if (statusMeta && statusMeta.type === "enum") {
+    const mapped = await mapStatusToDbEnumLabel(next);
+    if (!mapped) {
+      const labels = await getEnumLabelsForColumn(getLoansTableName(), "status");
+      return `Status "${next}" not supported by DB enum. Allowed: ${labels.join(", ")}`;
+    }
+  }
 
   // helper to check a FK requirement
   const needUserFk = async (attrName, label) => {
@@ -271,8 +319,7 @@ async function preflightTransition(next, userId) {
     const meta = await getLoanColumnMeta(attrName);
     if (!meta) return null;
     if (meta.allowNull) return null; // nullable → fine
-    // not null → we will always set a value, so no block here
-    return null;
+    return null; // we will set a value
   };
 
   if (next === "approved") {
@@ -395,14 +442,12 @@ const createLoan = async (req, res) => {
       body.endDate = addMonthsDateOnly(body.startDate, Number(body.termMonths));
     }
 
-    // Persisted status starts as pending
-    body.status = "pending";
+    // Persisted status starts as pending → map to DB enum label if needed
+    const pendingLabel = await mapStatusToDbEnumLabel("pending");
+    body.status = pendingLabel || "pending";
 
     // initiatedBy only if present in model AND column exists
-    if (
-      "initiatedBy" in (Loan.rawAttributes || {}) &&
-      (await loanColumnExists("initiatedBy"))
-    ) {
+    if ("initiatedBy" in (Loan.rawAttributes || {}) && (await loanColumnExists("initiatedBy"))) {
       await setUserFkIfSafe(body, "initiatedBy", req.user?.id || null);
     }
 
@@ -431,11 +476,13 @@ const getAllLoans = async (req, res) => {
   try {
     const where = {};
 
+    // Map requested status to DB enum label if necessary
     const rawStatus = String(req.query.status || "").toLowerCase();
     const scope = String(req.query.scope || "").toLowerCase();
 
     if (rawStatus && rawStatus !== "all" && DB_ENUM_STATUSES.has(rawStatus)) {
-      where.status = rawStatus;
+      const mapped = await mapStatusToDbEnumLabel(rawStatus);
+      where.status = mapped || rawStatus;
     }
 
     const attributes = await getSafeLoanAttributeNames();
@@ -508,7 +555,6 @@ const getLoanById = async (req, res) => {
     };
 
     if (includeRepayments === "true") {
-      // Prefer explicit imports (guaranteed), then registry fallbacks
       const RepaymentModel =
         LoanPayment ||
         LoanRepayment ||
@@ -731,9 +777,19 @@ const updateLoanStatus = async (req, res) => {
       }
     }
 
+    // Map to exact DB enum label if needed
+    const mappedStatus = await mapStatusToDbEnumLabel(next);
+    if (!mappedStatus) {
+      const labels = await getEnumLabelsForColumn(getLoansTableName(), "status");
+      return res.status(400).json({
+        error: `Status "${next}" not supported by DB enum.`,
+        allowed: labels,
+      });
+    }
+
     // Build update fields (only existing columns)
     const fields = {};
-    if (await loanColumnExists("status")) fields.status = next;
+    if (await loanColumnExists("status")) fields.status = mappedStatus;
     else return res.status(500).json({ error: "loans.status column missing" });
 
     if (next === "approved") {
