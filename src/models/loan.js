@@ -3,7 +3,8 @@ module.exports = (sequelize, DataTypes) => {
   const Loan = sequelize.define(
     'Loan',
     {
-      id: { type: DataTypes.UUID, primaryKey: true, defaultValue: DataTypes.UUIDV4 },
+      // Your DB shows integer PKs for loans (logs had WHERE "id" = '19')
+      id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
       borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' },
       branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId' },
@@ -33,7 +34,7 @@ module.exports = (sequelize, DataTypes) => {
         field: 'interestMethod',
       },
 
-      // Keep STRING so Sequelize doesn’t try to manage the enum — PostgreSQL column is enum.
+      // Keep STRING in the model; DB column is a Postgres enum.
       status: {
         type: DataTypes.STRING,
         allowNull: false,
@@ -44,23 +45,23 @@ module.exports = (sequelize, DataTypes) => {
       totalInterest: { type: DataTypes.DECIMAL(14, 2), field: 'total_interest' },
       outstanding:   { type: DataTypes.DECIMAL(14, 2), field: 'outstanding' },
 
-      // Your Users.id is UUID; map FKs accordingly, map to exact DB column names you showed
-      initiatedBy:  { type: DataTypes.UUID, field: 'initiated_by' },
-      approvedBy:   { type: DataTypes.UUID, field: 'approved_by' },
-      rejectedBy:   { type: DataTypes.UUID, field: 'rejected_by' },
-      disbursedBy:  { type: DataTypes.UUID, field: 'disbursed_by' },
+      // User FKs (Users.id is UUID in your DB)
+      initiatedBy: { type: DataTypes.UUID, field: 'initiated_by' },
+      approvedBy:  { type: DataTypes.UUID, field: 'approved_by' },
+      rejectedBy:  { type: DataTypes.UUID, field: 'rejected_by' },
+      disbursedBy: { type: DataTypes.UUID, field: 'disbursed_by' },
 
       approvalDate:       { type: DataTypes.DATE, field: 'approvalDate' },
-      rejectedDate:       { type: DataTypes.DATE, field: 'rejectionDate' },   // << correct DB name
+      rejectedDate:       { type: DataTypes.DATE, field: 'rejectionDate' },     // DB column is rejectionDate
       disbursementDate:   { type: DataTypes.DATE, field: 'disbursementDate' },
       disbursementMethod: { type: DataTypes.STRING, field: 'disbursementMethod' },
 
       closedBy:    { type: DataTypes.UUID, field: 'closed_by' },
       closedDate:  { type: DataTypes.DATE,  field: 'closed_date' },
-      closeReason: { type: DataTypes.STRING, field: 'closeReason' },           // << camelCase in DB
+      closeReason: { type: DataTypes.STRING, field: 'closeReason' },            // DB uses camelCase
 
-      rescheduledFromId: { type: DataTypes.UUID, field: 'rescheduledFromId' },
-      topUpOfId:         { type: DataTypes.UUID, field: 'topUpOfId' },
+      rescheduledFromId: { type: DataTypes.INTEGER, field: 'rescheduledFromId' },
+      topUpOfId:         { type: DataTypes.INTEGER, field: 'topUpOfId' },
     },
     {
       tableName: 'loans',
