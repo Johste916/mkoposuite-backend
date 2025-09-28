@@ -1,3 +1,5 @@
+// controllers/loans.js
+
 const {
   Loan,
   Borrower,
@@ -10,6 +12,8 @@ const {
   AuditLog,
   sequelize,
 } = require("../models");
+
+const { Op, where, col } = require("sequelize");
 
 const {
   generateFlatRateSchedule,
@@ -385,7 +389,6 @@ function addMonthsDateOnly(dateStr, months) {
   // dateStr is "YYYY-MM-DD"
   const [y, m, d] = String(dateStr).split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
-  theMonth = dt.getUTCMonth(); // avoid TS complaints (not relevant in JS)
   const targetMonthIndex = dt.getUTCMonth() + Number(months);
   const target = new Date(Date.UTC(dt.getUTCFullYear(), targetMonthIndex, dt.getUTCDate()));
   // Handle end-of-month rollover
@@ -445,6 +448,16 @@ async function shapeScheduleRowForDb(base) {
       return cols.has(field);
     })
   );
+}
+
+/** Build a safe WHERE for loan schedules across snake/camel column names */
+function scheduleLoanIdWhere(val) {
+  // If the model defines the attribute, prefer that (Sequelize will map to DB field).
+  if (LoanSchedule?.rawAttributes?.loanId) {
+    return { loanId: val };
+  }
+  // Fallback to a SQL-level where on snake_case column (avoids "LoanSchedule.loan_id does not exist")
+  return where(col("loan_schedules.loan_id"), val);
 }
 
 /** DRY: safely fetch a loan by PK without selecting missing columns */
@@ -541,7 +554,7 @@ async function performStatusTransition(loan, next, { override = false, req }) {
   // For first disbursement, auto-create schedule if table exists and none present
   if (next === "disbursed" && LoanSchedule && (await tableExists("loan_schedules"))) {
     try {
-      const existing = await LoanSchedule.count({ where: { loanId: loan.id } });
+      const existing = await LoanSchedule.count({ where: scheduleLoanIdWhere(loan.id) });
       if (existing === 0) {
         const input = {
           amount: Number(loan.amount || 0),
@@ -693,21 +706,21 @@ const createLoan = async (req, res) => {
 =========================== */
 const getAllLoans = async (req, res) => {
   try {
-    const where = {};
+    const whereObj = {};
 
     const rawStatus = String(req.query.status || "").toLowerCase();
     const scope = String(req.query.scope || "").toLowerCase();
 
     if (rawStatus && rawStatus !== "all" && DB_ENUM_STATUSES.has(rawStatus)) {
       const mapped = await mapStatusToDbEnumLabel(rawStatus);
-      where.status = mapped || rawStatus;
+      whereObj.status = mapped || rawStatus;
     }
 
     const attributes = await getSafeLoanAttributeNames();
     const userIncludes = await buildUserIncludesIfPossible();
 
     const loans = await Loan.findAll({
-      where,
+      where: whereObj,
       attributes,
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
@@ -815,7 +828,7 @@ const getLoanById = async (req, res) => {
         try {
           const scheduleAttrs = await getSafeScheduleAttributeNames();
           schedule = await LoanSchedule.findAll({
-            where: { loanId: loan.id },
+            where: scheduleLoanIdWhere(loan.id),
             attributes: scheduleAttrs,
             order: [["period", "ASC"]],
           });
@@ -1023,13 +1036,13 @@ const rebuildLoanSchedule = async (req, res) => {
     if (preservePaid) {
       const scheduleAttrs = await getSafeScheduleAttributeNames();
       existing = await LoanSchedule.findAll({
-        where: { loanId: loan.id },
+        where: scheduleLoanIdWhere(loan.id),
         attributes: scheduleAttrs,
         order: [["period", "ASC"]],
       });
     }
 
-    await LoanSchedule.destroy({ where: { loanId: loan.id } });
+    await LoanSchedule.destroy({ where: scheduleLoanIdWhere(loan.id) });
 
     const rows = [];
     for (let i = 0; i < schedule.length; i++) {
@@ -1085,6 +1098,41 @@ const rebuildLoanSchedule = async (req, res) => {
 };
 
 /* ===========================
+   UI alias: /loans/:id/reschedule  → rebuildLoanSchedule
+=========================== */
+const rescheduleLoan = async (req, res) => {
+  try {
+    const {
+      newTermMonths,
+      newStartDate,
+      previewOnly,
+      termMonths,
+      startDate,
+      amount,
+      interestRate,
+      interestMethod,
+      preservePaid,
+      preview,
+    } = req.body || {};
+
+    req.body = {
+      mode: (previewOnly || preview) ? "preview" : "replace",
+      termMonths: newTermMonths ?? termMonths,
+      startDate: newStartDate || startDate,
+      amount,
+      interestRate,
+      interestMethod,
+      preservePaid: typeof preservePaid === "boolean" ? preservePaid : true,
+    };
+
+    return rebuildLoanSchedule(req, res);
+  } catch (err) {
+    console.error("rescheduleLoan error:", err);
+    return res.status(500).json({ error: "Failed to reschedule loan" });
+  }
+};
+
+/* ===========================
    CSV EXPORT of schedule
 =========================== */
 const exportLoanScheduleCsv = async (req, res) => {
@@ -1097,7 +1145,7 @@ const exportLoanScheduleCsv = async (req, res) => {
     if (LoanSchedule && (await tableExists("loan_schedules"))) {
       const scheduleAttrs = await getSafeScheduleAttributeNames();
       rows = await LoanSchedule.findAll({
-        where: { loanId: loan.id },
+        where: scheduleLoanIdWhere(loan.id),
         attributes: scheduleAttrs,
         order: [["period", "ASC"]],
       });
@@ -1286,7 +1334,7 @@ const reissueLoan = async (req, res) => {
 
     // Regenerate schedule from new dates
     if (regenerateSchedule && (await tableExists("loan_schedules"))) {
-      await LoanSchedule.destroy({ where: { loanId: loan.id } });
+      await LoanSchedule.destroy({ where: scheduleLoanIdWhere(loan.id) });
 
       const input = {
         amount: Number(loan.amount || 0),
@@ -1353,4 +1401,7 @@ module.exports = {
   rebuildLoanSchedule,     // POST /loans/:id/schedule
   exportLoanScheduleCsv,   // GET  /loans/:id/schedule/export.csv
   reissueLoan,             // POST /loans/:id/reissue
+
+  // UI alias expected by the frontend
+  rescheduleLoan,          // POST /loans/:id/reschedule
 };
