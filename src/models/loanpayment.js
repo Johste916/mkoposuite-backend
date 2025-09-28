@@ -1,4 +1,3 @@
-// src/models/loanpayment.js
 module.exports = (sequelize, DataTypes) => {
   const isPg = sequelize.getDialect && sequelize.getDialect() === "postgres";
   const JSON_TYPE = isPg ? DataTypes.JSONB : DataTypes.JSON;

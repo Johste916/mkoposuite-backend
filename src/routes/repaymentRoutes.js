@@ -70,8 +70,9 @@ router.post("/:id(\\d+)/void", authenticateUser, repaymentController.voidRepayme
 router.get("/:id(\\d+)", authenticateUser, repaymentController.getRepaymentById);
 
 // =========================
-// 🔔 WEBHOOKS (no auth; protect via signatures)
+/* 🔔 WEBHOOKS (no auth; protect via signatures) */
 // =========================
+router.post("/subscribers/mobile-money", repaymentController.webhookMobileMoney); // (alias-safe)
 router.post("/webhooks/mobile-money", repaymentController.webhookMobileMoney);
 router.post("/webhooks/bank", repaymentController.webhookBank);
 

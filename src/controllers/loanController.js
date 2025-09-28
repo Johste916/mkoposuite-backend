@@ -1,4 +1,3 @@
-// src/controllers/loanController.js
 const {
   Loan,
   Borrower,

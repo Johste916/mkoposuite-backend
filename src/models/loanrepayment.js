@@ -1,4 +1,3 @@
-// models/loanpayment.js
 module.exports = (sequelize, DataTypes) => {
   const LoanPayment = sequelize.define(
     'LoanPayment',

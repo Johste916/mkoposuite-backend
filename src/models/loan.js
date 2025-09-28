@@ -12,10 +12,10 @@ module.exports = (sequelize, DataTypes) => {
 
       reference:  { type: DataTypes.STRING, unique: true },
 
-      amount:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
-      currency:     { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS' },
-      interestRate: { type: DataTypes.DECIMAL(10, 4), field: 'interestRate' },
-      termMonths:   { type: DataTypes.INTEGER, allowNull: false, field: 'term_months' },
+      amount:         { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
+      currency:       { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS' },
+      interestRate:   { type: DataTypes.DECIMAL(10, 4), field: 'interestRate' },
+      termMonths:     { type: DataTypes.INTEGER, allowNull: false, field: 'term_months' },
 
       startDate: { type: DataTypes.DATEONLY, allowNull: false, field: 'startDate' },
       endDate:   { type: DataTypes.DATEONLY, allowNull: false, field: 'endDate' },
@@ -34,7 +34,7 @@ module.exports = (sequelize, DataTypes) => {
         field: 'interestMethod',
       },
 
-      // Keep STRING in the model; DB column is a Postgres enum.
+      // Keep STRING in the model; DB column may be a Postgres enum.
       status: {
         type: DataTypes.STRING,
         allowNull: false,
@@ -43,6 +43,7 @@ module.exports = (sequelize, DataTypes) => {
       },
 
       totalInterest: { type: DataTypes.DECIMAL(14, 2), field: 'total_interest' },
+      totalPaid:     { type: DataTypes.DECIMAL(14, 2), field: 'total_paid' }, // ← added for alignment
       outstanding:   { type: DataTypes.DECIMAL(14, 2), field: 'outstanding' },
 
       // User FKs (Users.id is UUID in your DB)
