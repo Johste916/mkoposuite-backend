@@ -460,6 +460,13 @@ function scheduleLoanIdWhere(val) {
   return where(col("loan_schedules.loan_id"), val);
 }
 
+/** Bulk insert only provided fields (prevents Sequelize from adding model-default columns) */
+async function bulkCreateLoanSchedulesSafe(rows) {
+  if (!rows?.length) return;
+  const fields = Array.from(new Set(rows.flatMap((r) => Object.keys(r))));
+  await LoanSchedule.bulkCreate(rows, { fields, validate: false });
+}
+
 /** DRY: safely fetch a loan by PK without selecting missing columns */
 async function fetchLoanByPkSafe(id) {
   const attributes = await getSafeLoanAttributeNames();
@@ -588,7 +595,7 @@ async function performStatusTransition(loan, next, { override = false, req }) {
             };
             rows.push(await shapeScheduleRowForDb(base));
           }
-          await LoanSchedule.bulkCreate(rows);
+          await bulkCreateLoanSchedulesSafe(rows);
         }
       }
     } catch (e) {
@@ -1072,7 +1079,7 @@ const rebuildLoanSchedule = async (req, res) => {
       rows.push(await shapeScheduleRowForDb(base));
     }
 
-    await LoanSchedule.bulkCreate(rows);
+    await bulkCreateLoanSchedulesSafe(rows);
 
     // Optionally align loan.startDate/endDate if caller changed them
     const updates = {};
@@ -1368,7 +1375,7 @@ const reissueLoan = async (req, res) => {
         };
         rows.push(await shapeScheduleRowForDb(base));
       }
-      if (rows.length) await LoanSchedule.bulkCreate(rows);
+      if (rows.length) await bulkCreateLoanSchedulesSafe(rows);
     }
 
     writeAudit({
