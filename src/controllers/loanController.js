@@ -22,9 +22,11 @@ const BORROWER_ATTRS = ["id", "name", "nationalId", "phone"];
 const DB_ENUM_STATUSES = new Set(["pending", "approved", "rejected", "disbursed", "closed"]);
 
 // Allowed transitions for the persisted enum only
+// NOTE: expanded to allow resubmission after rejection (rejected -> pending)
 const ALLOWED = {
-  pending: ["approved", "rejected"],
-  approved: ["disbursed"],
+  pending:   ["approved", "rejected"],
+  approved:  ["disbursed", "rejected"], // allow explicit reversal to rejected if needed
+  rejected:  ["pending"],
   disbursed: ["closed"],
 };
 
@@ -390,6 +392,172 @@ function addMonthsDateOnly(dateStr, months) {
     target.setUTCDate(0);
   }
   return target.toISOString().slice(0, 10);
+}
+
+/* ===========================
+   Small helpers
+=========================== */
+const csvEscape = (v) => {
+  const s = String(v ?? "");
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+};
+
+async function hasAnyRepayments(loanId) {
+  const RepaymentModel =
+    LoanPayment ||
+    LoanRepayment ||
+    (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment));
+
+  if (!RepaymentModel || typeof RepaymentModel.count !== "function") return false;
+  try {
+    const n = await RepaymentModel.count({ where: { loanId } });
+    return n > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function getScheduleTableColumns() {
+  const desc = await describeTableCached("loan_schedules");
+  return desc ? new Set(Object.keys(desc)) : new Set();
+}
+
+/* ====================================================================
+   CORE: Transition executor usable by multiple endpoints (DRY)
+==================================================================== */
+async function performStatusTransition(loan, next, { override = false, req }) {
+  if (!ALLOWED[loan.status]?.includes(next)) {
+    const err = new Error(`Cannot change ${loan.status} → ${next}`);
+    err.http = 400;
+    throw err;
+  }
+
+  // Preflight avoid FK/type errors
+  const preMsg = await preflightTransition(next, req?.user?.id || null);
+  if (preMsg) {
+    const err = new Error(preMsg);
+    err.http = 400;
+    throw err;
+  }
+
+  if (next === "closed") {
+    const outstanding = Number(loan.outstanding ?? 0);
+    if (!override && outstanding > 0) {
+      const err = new Error("Outstanding > 0, override required");
+      err.http = 400;
+      throw err;
+    }
+  }
+
+  const mappedStatus = await mapStatusToDbEnumLabel(next);
+  if (!mappedStatus) {
+    const labels = await getEnumLabelsForColumn(getLoansTableName(), "status");
+    const err = new Error(`Status "${next}" not supported by DB enum. Allowed: ${labels.join(", ")}`);
+    err.http = 400;
+    throw err;
+  }
+
+  const fields = {};
+  if (await loanColumnExists("status")) fields.status = mappedStatus;
+  else {
+    const err = new Error("loans.status column missing");
+    err.http = 500;
+    throw err;
+  }
+
+  if (next === "approved") {
+    await setUserFkIfSafe(fields, "approvedBy", req?.user?.id || null);
+    await setDateCol(fields, "approvalDate", new Date());
+  }
+  if (next === "rejected") {
+    await setUserFkIfSafe(fields, "rejectedBy", req?.user?.id || null);
+    await setDateCol(fields, "rejectedDate", new Date());
+  }
+  if (next === "disbursed") {
+    await setUserFkIfSafe(fields, "disbursedBy", req?.user?.id || null);
+    await setDateCol(fields, "disbursementDate", new Date());
+  }
+  if (next === "closed") {
+    await setUserFkIfSafe(fields, "closedBy", req?.user?.id || null);
+    await setDateCol(fields, "closedDate", new Date());
+    if (override && (await loanColumnExists("closeReason"))) {
+      fields.closeReason = "override";
+    }
+  }
+
+  try {
+    await loan.update(fields);
+  } catch (e) {
+    const err = new Error(e?.parent?.message || e?.message || "Status update failed");
+    err.http = 400;
+    err.meta = {
+      fields,
+      code: e?.parent?.code || e?.original?.code,
+      detail: e?.parent?.detail || null,
+    };
+    throw err;
+  }
+
+  // For first disbursement, auto-create schedule if table exists and none present
+  if (next === "disbursed" && LoanSchedule && (await tableExists("loan_schedules"))) {
+    try {
+      const existing = await LoanSchedule.count({ where: { loanId: loan.id } });
+      if (existing === 0) {
+        const input = {
+          amount: Number(loan.amount || 0),
+          interestRate: Number(loan.interestRate || 0),
+          term: loan.termMonths,
+          issueDate: loan.startDate,
+        };
+        const gen =
+          loan.interestMethod === "flat"
+            ? generateFlatRateSchedule(input)
+            : loan.interestMethod === "reducing"
+            ? generateReducingBalanceSchedule(input)
+            : [];
+        if (gen.length) {
+          const cols = await getScheduleTableColumns();
+          const rows = gen.map((s, i) => {
+            const base = {
+              loanId: loan.id,
+              period: i + 1,
+              dueDate: s.dueDate,
+              principal: Number(s.principal || 0),
+              interest: Number(s.interest || 0),
+              fees: Number(s.fees || 0),
+              penalties: Number(s.penalties || 0),
+              total:
+                Number(
+                  s.total ??
+                    Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0)
+                ),
+            };
+            // only keep existing columns
+            return Object.fromEntries(Object.entries(base).filter(([k]) => cols.has(k)));
+          });
+          await LoanSchedule.bulkCreate(rows);
+        }
+      }
+    } catch (e) {
+      console.warn("[loans] schedule generation failed (non-fatal):", e?.parent?.message || e?.message);
+    }
+  }
+
+  // Return hydrated record with associations
+  const attributes = await getSafeLoanAttributeNames();
+  const userIncludes = await buildUserIncludesIfPossible();
+  const updatedLoan = await Loan.findByPk(loan.id, {
+    attributes,
+    include: [
+      { model: Borrower, attributes: BORROWER_ATTRS },
+      { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
+      { model: LoanProduct },
+      ...userIncludes,
+    ],
+  });
+
+  return updatedLoan;
 }
 
 /* ===========================
@@ -769,6 +937,222 @@ const getLoanSchedule = async (req, res) => {
 };
 
 /* ===========================
+   RESCHEDULE (replace or preview)
+   - POST /loans/:id/schedule (suggested route)
+   Body: { mode: "preview"|"replace", startDate?, termMonths?, amount?, interestRate?, interestMethod?, preservePaid? }
+=========================== */
+const rebuildLoanSchedule = async (req, res) => {
+  try {
+    const id = req.params.loanId || req.params.id;
+    const loan = await Loan.findByPk(id);
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+    const {
+      mode = "preview",
+      startDate,
+      termMonths,
+      amount,
+      interestRate,
+      interestMethod,
+      preservePaid = true,
+    } = req.body || {};
+
+    const effective = {
+      startDate: startDate || loan.startDate,
+      termMonths: Number.isFinite(Number(termMonths)) ? Number(termMonths) : loan.termMonths,
+      amount: Number.isFinite(Number(amount)) ? Number(amount) : Number(loan.amount || 0),
+      interestRate:
+        Number.isFinite(Number(interestRate)) ? Number(interestRate) : Number(loan.interestRate || 0),
+      interestMethod: interestMethod || loan.interestMethod || "flat",
+    };
+
+    // Generate schedule with proposed/updated values
+    const schedule =
+      effective.interestMethod === "flat"
+        ? generateFlatRateSchedule({
+            amount: effective.amount,
+            interestRate: effective.interestRate,
+            term: effective.termMonths,
+            issueDate: effective.startDate,
+          })
+        : effective.interestMethod === "reducing"
+        ? generateReducingBalanceSchedule({
+            amount: effective.amount,
+            interestRate: effective.interestRate,
+            term: effective.termMonths,
+            issueDate: effective.startDate,
+          })
+        : [];
+
+    if (!schedule.length) {
+      return res.status(400).json({ error: "Invalid interest method" });
+    }
+
+    if (mode === "preview") {
+      return res.json({ mode, schedule });
+    }
+
+    // mode === "replace": persist by replacing existing rows
+    if (!(await tableExists("loan_schedules"))) {
+      return res.status(400).json({ error: "loan_schedules table not found" });
+    }
+
+    const cols = await getScheduleTableColumns();
+
+    // Fetch existing rows if preserving paid/settled flags
+    let existing = [];
+    if (preservePaid) {
+      existing = await LoanSchedule.findAll({
+        where: { loanId: loan.id },
+        order: [["period", "ASC"]],
+      });
+    }
+
+    await LoanSchedule.destroy({ where: { loanId: loan.id } });
+
+    const rows = schedule.map((s, i) => {
+      const base = {
+        loanId: loan.id,
+        period: i + 1,
+        dueDate: s.dueDate,
+        principal: Number(s.principal || 0),
+        interest: Number(s.interest || 0),
+        fees: Number(s.fees || 0),
+        penalties: Number(s.penalties || 0),
+        total:
+          Number(
+            s.total ??
+              Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0)
+          ),
+      };
+
+      // carry over 'paid/settled' flags by index if requested and present
+      if (preservePaid && existing[i]) {
+        if ("paid" in existing[i]) base.paid = existing[i].paid;
+        if ("settled" in existing[i]) base.settled = existing[i].settled;
+        if ("balance" in existing[i] && !Number.isFinite(base.balance)) base.balance = existing[i].balance;
+      }
+
+      return Object.fromEntries(Object.entries(base).filter(([k]) => cols.has(k)));
+    });
+
+    await LoanSchedule.bulkCreate(rows);
+
+    // Optionally align loan.startDate/endDate if caller changed them
+    const updates = {};
+    if (startDate && (await loanColumnExists("startDate"))) updates.startDate = effective.startDate;
+    if ((termMonths || startDate) && (await loanColumnExists("endDate"))) {
+      updates.endDate = addMonthsDateOnly(effective.startDate, effective.termMonths);
+    }
+    if (Object.keys(updates).length) await loan.update(updates);
+
+    writeAudit({
+      entityId: loan.id,
+      action: "schedule:rebuild",
+      before: null,
+      after: { startDate: loan.startDate, endDate: loan.endDate, rows: rows.length },
+      req,
+    }).catch(() => {});
+
+    return res.json({ mode: "replace", count: rows.length });
+  } catch (err) {
+    console.error("Reschedule error:", err);
+    res.status(500).json({ error: "Failed to rebuild schedule" });
+  }
+};
+
+/* ===========================
+   CSV EXPORT of schedule
+   - GET /loans/:id/schedule/export.csv
+=========================== */
+const exportLoanScheduleCsv = async (req, res) => {
+  try {
+    const id = req.params.loanId || req.params.id;
+    const loan = await Loan.findByPk(id);
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+    let rows = [];
+    if (LoanSchedule && (await tableExists("loan_schedules"))) {
+      rows = await LoanSchedule.findAll({
+        where: { loanId: loan.id },
+        order: [["period", "ASC"]],
+      });
+    }
+
+    // Fallback: generate preview rows if table empty
+    if (!rows.length) {
+      const preview = await getLoanSchedule({ params: { id } }, { json: (j) => j });
+      // In Express path, we won't hit this fallback; just regenerate directly:
+      const input = {
+        amount: Number(loan.amount || 0),
+        interestRate: Number(loan.interestRate || 0),
+        term: loan.termMonths,
+        issueDate: loan.startDate,
+      };
+      const gen =
+        loan.interestMethod === "flat"
+          ? generateFlatRateSchedule(input)
+          : loan.interestMethod === "reducing"
+          ? generateReducingBalanceSchedule(input)
+          : [];
+      rows = gen.map((s, i) => ({
+        period: i + 1,
+        dueDate: s.dueDate,
+        principal: s.principal,
+        interest: s.interest,
+        penalties: s.penalties || 0,
+        fees: s.fees || 0,
+        total:
+          s.total ??
+          Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0),
+        balance: s.balance ?? "",
+        settled: s.settled ?? false,
+      }));
+    }
+
+    const header = [
+      "Period",
+      "Due Date",
+      "Principal",
+      "Interest",
+      "Penalties",
+      "Fees",
+      "Total",
+      "Balance",
+      "Status",
+    ];
+
+    const lines = [header.map(csvEscape).join(",")];
+    for (const r of rows) {
+      const settled = r.settled || r.paid ? "Settled" : "Pending";
+      lines.push(
+        [
+          r.period,
+          r.dueDate,
+          r.principal ?? 0,
+          r.interest ?? 0,
+          r.penalties ?? r.penalty ?? 0,
+          r.fees ?? r.fee ?? 0,
+          r.total ??
+            Number(r.principal || 0) + Number(r.interest || 0) + Number(r.fees || 0) + Number(r.penalties || 0),
+          r.balance ?? "",
+          settled,
+        ]
+          .map(csvEscape)
+          .join(",")
+      );
+    }
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="loan-${loan.id}-schedule.csv"`);
+    res.status(200).send(lines.join("\n"));
+  } catch (err) {
+    console.error("Export CSV error:", err);
+    res.status(500).json({ error: "Failed to export schedule CSV" });
+  }
+};
+
+/* ===========================
    STATUS UPDATE (single UPDATE)
 =========================== */
 const updateLoanStatus = async (req, res) => {
@@ -776,135 +1160,164 @@ const updateLoanStatus = async (req, res) => {
     const next = String(req.body?.status || "").toLowerCase();
     const override = !!req.body?.override;
 
-    // Load (no txn) and validate transition
     const loan = await Loan.findByPk(req.params.id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
-    if (!ALLOWED[loan.status]?.includes(next)) {
-      return res.status(400).json({ error: `Cannot change ${loan.status} → ${next}` });
-    }
+    const updatedLoan = await performStatusTransition(loan, next, { override, req });
 
-    // Preflight to avoid hidden FK/type errors
-    const preMsg = await preflightTransition(next, req.user?.id || null);
-    if (preMsg) return res.status(400).json({ error: preMsg });
-
-    if (next === "closed") {
-      const outstanding = Number(loan.outstanding ?? 0);
-      if (!override && outstanding > 0) {
-        return res.status(400).json({ error: "Outstanding > 0, override required" });
-      }
-    }
-
-    // Map to exact DB enum label if needed
-    const mappedStatus = await mapStatusToDbEnumLabel(next);
-    if (!mappedStatus) {
-      const labels = await getEnumLabelsForColumn(getLoansTableName(), "status");
-      return res.status(400).json({
-        error: `Status "${next}" not supported by DB enum.`,
-        allowed: labels,
-      });
-    }
-
-    // Build update fields (only existing columns)
-    const fields = {};
-    if (await loanColumnExists("status")) fields.status = mappedStatus;
-    else return res.status(500).json({ error: "loans.status column missing" });
-
-    if (next === "approved") {
-      await setUserFkIfSafe(fields, "approvedBy", req.user?.id || null);
-      await setDateCol(fields, "approvalDate", new Date());
-    }
-
-    if (next === "rejected") {
-      await setUserFkIfSafe(fields, "rejectedBy", req.user?.id || null);
-      await setDateCol(fields, "rejectedDate", new Date());
-    }
-
-    if (next === "disbursed") {
-      await setUserFkIfSafe(fields, "disbursedBy", req.user?.id || null);
-      await setDateCol(fields, "disbursementDate", new Date());
-    }
-
-    if (next === "closed") {
-      await setUserFkIfSafe(fields, "closedBy", req.user?.id || null);
-      await setDateCol(fields, "closedDate", new Date());
-      if (override && (await loanColumnExists("closeReason"))) {
-        fields.closeReason = "override";
-      }
-    }
-
-    // Single UPDATE → clearer PG errors & no poisoned txn
-    let updated;
-    try {
-      await loan.update(fields);
-      updated = await Loan.findByPk(loan.id);
-    } catch (e) {
-      const code = e?.parent?.code || e?.original?.code;
-      const msg  = e?.parent?.message || e?.message;
-      console.error("[loans] status update failed:", {
-        fields,
-        code,
-        detail: e?.parent?.detail,
-        msg,
-      });
-      return res.status(400).json({
-        error: "Status update failed",
-        code,
-        detail: e?.parent?.detail || null,
-        message: msg,
-      });
-    }
-
-    // Post-step: schedule generation for disbursed
-    if (next === "disbursed" && LoanSchedule && (await tableExists("loan_schedules"))) {
-      try {
-        const existing = await LoanSchedule.count({ where: { loanId: loan.id } });
-        if (existing === 0) {
-          const input = {
-            amount: Number(updated.amount || 0),
-            interestRate: Number(updated.interestRate || 0),
-            term: updated.termMonths,
-            issueDate: updated.startDate,
-          };
-          const gen =
-            updated.interestMethod === "flat"
-              ? generateFlatRateSchedule(input)
-              : updated.interestMethod === "reducing"
-              ? generateReducingBalanceSchedule(input)
-              : [];
-          if (gen.length) {
-            const rows = gen.map((s, i) => ({
-              loanId: updated.id,
-              period: i + 1,
-              dueDate: s.dueDate,
-              principal: Number(s.principal || 0),
-              interest: Number(s.interest || 0),
-              fees: Number(s.fees || 0),
-              penalties: 0,
-              total:
-                Number(s.total ?? Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0)),
-            }));
-            await LoanSchedule.bulkCreate(rows);
-          }
-        }
-      } catch (e) {
-        console.warn("[loans] schedule generation failed (non-fatal):", e?.parent?.message || e?.message);
-      }
-    }
-
-    // Audit (non-blocking)
     writeAudit({
       entityId: loan.id,
       action: `status:${next}`,
       before: null,
-      after: updated?.toJSON?.() || null,
+      after: updatedLoan?.toJSON?.() || null,
       req,
     }).catch(() => {});
 
-    // Return hydrated record with associations
+    res.json({ message: `Loan ${next} successfully`, loan: updatedLoan });
+  } catch (err) {
+    const code = err.http || 500;
+    const payload = { error: err.message };
+    if (err.meta) Object.assign(payload, err.meta);
+    res.status(code).json(payload);
+  }
+};
+
+/* ===========================
+   WORKFLOW ACTION (optional nice-to-have)
+   - POST /loans/:id/workflow
+   Body: { action, suggestedAmount?, comment? }
+   Supports: bm_approve, compliance_approve, reject, request_changes, resubmit
+=========================== */
+const workflowAction = async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { action, suggestedAmount } = req.body || {};
+    const loan = await Loan.findByPk(id);
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+    // If approver provided a suggestion, update amount first (non-blocking if identical)
+    if (suggestedAmount != null && Number(suggestedAmount) > 0) {
+      await loan.update({ amount: Number(suggestedAmount) });
+    }
+
+    if (action === "bm_approve" || action === "compliance_approve") {
+      const updated = await performStatusTransition(loan, "approved", { req });
+      return res.json({ message: "Approved", loan: updated });
+    }
+
+    if (action === "reject") {
+      const updated = await performStatusTransition(loan, "rejected", { req });
+      return res.json({ message: "Rejected", loan: updated });
+    }
+
+    if (action === "resubmit") {
+      // Allow resubmitting a rejected app back to pending
+      if (!ALLOWED[loan.status]?.includes("pending")) {
+        return res.status(400).json({ error: `Cannot change ${loan.status} → pending` });
+      }
+      const updated = await performStatusTransition(loan, "pending", { req });
+      return res.json({ message: "Resubmitted", loan: updated });
+    }
+
+    if (action === "request_changes") {
+      // No status change here; comments endpoint handles the note.
+      return res.json({ message: "Change request recorded" });
+    }
+
+    return res.status(400).json({ error: "Unknown workflow action" });
+  } catch (err) {
+    console.error("Workflow action error:", err);
+    res.status(500).json({ error: "Failed to apply workflow action" });
+  }
+};
+
+/* ===========================
+   RE-ISSUE DISBURSEMENT (optional)
+   - POST /loans/:id/reissue
+   Body: { disbursementDate?, startDate?, regenerateSchedule? (default true) }
+   Guards: will refuse if repayments already exist.
+=========================== */
+const reissueLoan = async (req, res) => {
+  try {
+    const id = req.params.id;
+    const loan = await Loan.findByPk(id);
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+    if (await hasAnyRepayments(loan.id)) {
+      return res.status(400).json({ error: "Cannot re-issue: repayments already recorded" });
+    }
+
+    const {
+      disbursementDate = new Date().toISOString(),
+      startDate = disbursementDate.slice(0, 10),
+      regenerateSchedule = true,
+    } = req.body || {};
+
+    // Update date fields if present in DB
+    const updates = {};
+    if (await loanColumnExists("disbursementDate")) updates.disbursementDate = disbursementDate;
+    if (await loanColumnExists("startDate")) updates.startDate = startDate;
+    if (await loanColumnExists("endDate")) {
+      updates.endDate = addMonthsDateOnly(startDate, loan.termMonths);
+    }
+
+    // Keep status as 'disbursed' (or transition from approved → disbursed if needed)
+    if (loan.status === "approved") {
+      await performStatusTransition(loan, "disbursed", { req });
+    }
+
+    await loan.update(updates);
+
+    // Regenerate schedule from new dates
+    if (regenerateSchedule && (await tableExists("loan_schedules"))) {
+      await LoanSchedule.destroy({ where: { loanId: loan.id } });
+
+      const input = {
+        amount: Number(loan.amount || 0),
+        interestRate: Number(loan.interestRate || 0),
+        term: loan.termMonths,
+        issueDate: startDate,
+      };
+      const gen =
+        loan.interestMethod === "flat"
+          ? generateFlatRateSchedule(input)
+          : loan.interestMethod === "reducing"
+          ? generateReducingBalanceSchedule(input)
+          : [];
+
+      const cols = await getScheduleTableColumns();
+      const rows = gen.map((s, i) =>
+        Object.fromEntries(
+          Object.entries({
+            loanId: loan.id,
+            period: i + 1,
+            dueDate: s.dueDate,
+            principal: Number(s.principal || 0),
+            interest: Number(s.interest || 0),
+            fees: Number(s.fees || 0),
+            penalties: Number(s.penalties || 0),
+            total:
+              Number(
+                s.total ??
+                  Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0)
+              ),
+          }).filter(([k]) => cols.has(k))
+        )
+      );
+      if (rows.length) await LoanSchedule.bulkCreate(rows);
+    }
+
+    writeAudit({
+      entityId: loan.id,
+      action: "reissue",
+      before: null,
+      after: { ...updates },
+      req,
+    }).catch(() => {});
+
     const attributes = await getSafeLoanAttributeNames();
     const userIncludes = await buildUserIncludesIfPossible();
-    const updatedLoan = await Loan.findByPk(loan.id, {
+    const reloaded = await Loan.findByPk(loan.id, {
       attributes,
       include: [
         { model: Borrower, attributes: BORROWER_ATTRS },
@@ -914,10 +1327,10 @@ const updateLoanStatus = async (req, res) => {
       ],
     });
 
-    res.json({ message: `Loan ${next} successfully`, loan: updatedLoan });
+    res.json({ message: "Loan re-issued", loan: reloaded });
   } catch (err) {
-    console.error("Update loan status (outer) error:", err);
-    res.status(500).json({ error: "Failed to update loan status" });
+    console.error("Re-issue error:", err);
+    res.status(500).json({ error: "Failed to re-issue loan" });
   }
 };
 
@@ -929,4 +1342,10 @@ module.exports = {
   deleteLoan,
   updateLoanStatus,
   getLoanSchedule,
+
+  // NEW/optional, wire routes if you want these features:
+  workflowAction,          // POST /loans/:id/workflow
+  rebuildLoanSchedule,     // POST /loans/:id/schedule
+  exportLoanScheduleCsv,   // GET  /loans/:id/schedule/export.csv
+  reissueLoan,             // POST /loans/:id/reissue
 };

@@ -35,8 +35,9 @@ router.post('/', authenticateUser, upload.any(), h('createLoan'));
 // Read
 router.get('/:id', authenticateUser, h('getLoanById'));
 
-// Update — accept JSON or multipart
+// Update — accept JSON or multipart (support PATCH as well)
 router.put('/:id', authenticateUser, upload.any(), h('updateLoan'));
+router.patch('/:id', authenticateUser, upload.any(), h('updateLoan'));
 
 // Delete — IMPORTANT: do NOT reference a bare `deleteLoan`
 router.delete('/:id', authenticateUser, h('deleteLoan'));
@@ -82,7 +83,7 @@ router.get('/:id/installments', authenticateUser, (req, res, next) => {
 });
 
 /* --------------------------- Schedule Export -------------------------- */
-/** 
+/**
  * Non-breaking: these routes only respond if the controller implements
  * exportLoanScheduleCsv / exportLoanSchedulePdf. Otherwise they return 501
  * (via the safe wrapper), which won’t affect existing flows.
@@ -98,6 +99,17 @@ router.get('/:id/schedule/export.pdf',     authenticateUser, (req, res, next) =>
   req.params.loanId = req.params.id;
   return h('exportLoanSchedulePdf')(req, res, next);
 });
+
+/* ---------------------- Reissue / Reschedule ------------------------- */
+
+// Reschedule: generate & (unless previewOnly) persist a fresh schedule
+router.post('/:id/reschedule', authenticateUser, upload.any(), h('rescheduleLoan'));
+
+// Spelling alias to be kind to clients that call /resissue
+router.post('/:id/resissue', authenticateUser, upload.any(), h('rescheduleLoan')); // alias if they meant reschedule
+
+// Reissue: clone this loan to a new pending loan
+router.post('/:id/reissue', authenticateUser, upload.any(), h('reissueLoan'));
 
 /* ------------------------------- Export ------------------------------ */
 module.exports = router;
