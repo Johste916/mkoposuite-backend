@@ -423,6 +423,32 @@ async function getScheduleTableColumns() {
   return desc ? new Set(Object.keys(desc)) : new Set();
 }
 
+/** Safe schedule attribute names (model attr whose DB field exists) */
+async function getSafeScheduleAttributeNames() {
+  const desc = await describeTableCached("loan_schedules");
+  const cols = new Set(desc ? Object.keys(desc) : []);
+  const attrs = LoanSchedule?.rawAttributes || {};
+  return Object.keys(attrs).filter((name) => {
+    const field = attrs[name]?.field || name;
+    return cols.has(field);
+  });
+}
+
+/** DRY: safely fetch a loan by PK without selecting missing columns */
+async function fetchLoanByPkSafe(id) {
+  const attributes = await getSafeLoanAttributeNames();
+  const userIncludes = await buildUserIncludesIfPossible();
+  return Loan.findByPk(id, {
+    attributes,
+    include: [
+      { model: Borrower, attributes: BORROWER_ATTRS },
+      { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
+      { model: LoanProduct },
+      ...userIncludes,
+    ],
+  });
+}
+
 /* ====================================================================
    CORE: Transition executor usable by multiple endpoints (DRY)
 ==================================================================== */
@@ -544,19 +570,8 @@ async function performStatusTransition(loan, next, { override = false, req }) {
     }
   }
 
-  // Return hydrated record with associations
-  const attributes = await getSafeLoanAttributeNames();
-  const userIncludes = await buildUserIncludesIfPossible();
-  const updatedLoan = await Loan.findByPk(loan.id, {
-    attributes,
-    include: [
-      { model: Borrower, attributes: BORROWER_ATTRS },
-      { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
-      { model: LoanProduct },
-      ...userIncludes,
-    ],
-  });
-
+  // Return hydrated record with associations (safe attrs)
+  const updatedLoan = await fetchLoanByPkSafe(loan.id);
   return updatedLoan;
 }
 
@@ -651,7 +666,9 @@ const createLoan = async (req, res) => {
       req,
     }).catch(() => {});
 
-    res.status(201).json(loan);
+    // Reload with safe attributes to avoid selecting missing columns
+    const reloaded = await fetchLoanByPkSafe(loan.id);
+    res.status(201).json(reloaded || loan);
   } catch (err) {
     console.error("Create loan error:", err);
     res.status(500).json({ error: "Failed to create loan" });
@@ -717,19 +734,7 @@ const getLoanById = async (req, res) => {
     const { id } = req.params;
     const { includeRepayments = "true", includeSchedule = "true" } = req.query;
 
-    const attributes = await getSafeLoanAttributeNames();
-    const userIncludes = await buildUserIncludesIfPossible();
-
-    const loan = await Loan.findByPk(id, {
-      attributes,
-      include: [
-        { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
-        { model: LoanProduct },
-        ...userIncludes,
-      ],
-    });
-
+    const loan = await fetchLoanByPkSafe(id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     let repayments = [];
@@ -795,8 +800,10 @@ const getLoanById = async (req, res) => {
     if (includeSchedule === "true" && LoanSchedule && typeof LoanSchedule.findAll === "function") {
       if (await tableExists("loan_schedules")) {
         try {
+          const scheduleAttrs = await getSafeScheduleAttributeNames();
           schedule = await LoanSchedule.findAll({
             where: { loanId: loan.id },
+            attributes: scheduleAttrs,
             order: [["period", "ASC"]],
           });
         } catch (e) {
@@ -825,7 +832,7 @@ const getLoanById = async (req, res) => {
 =========================== */
 const updateLoan = async (req, res) => {
   try {
-    const loan = await Loan.findByPk(req.params.id);
+    const loan = await fetchLoanByPkSafe(req.params.id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     const before = loan.toJSON();
@@ -873,7 +880,9 @@ const updateLoan = async (req, res) => {
       req,
     }).catch(() => {});
 
-    res.json(loan);
+    // Reload with safe attributes
+    const reloaded = await fetchLoanByPkSafe(loan.id);
+    res.json(reloaded || loan);
   } catch (err) {
     console.error("Update loan error:", err);
     res.status(500).json({ error: "Error updating loan" });
@@ -885,7 +894,7 @@ const updateLoan = async (req, res) => {
 =========================== */
 const deleteLoan = async (req, res) => {
   try {
-    const loan = await Loan.findByPk(req.params.id);
+    const loan = await fetchLoanByPkSafe(req.params.id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     const before = loan.toJSON();
@@ -911,7 +920,8 @@ const deleteLoan = async (req, res) => {
 =========================== */
 const getLoanSchedule = async (req, res) => {
   try {
-    const loan = await Loan.findByPk(req.params.loanId || req.params.id);
+    const loanId = req.params.loanId || req.params.id;
+    const loan = await fetchLoanByPkSafe(loanId);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     const input = {
@@ -938,13 +948,11 @@ const getLoanSchedule = async (req, res) => {
 
 /* ===========================
    RESCHEDULE (replace or preview)
-   - POST /loans/:id/schedule (suggested route)
-   Body: { mode: "preview"|"replace", startDate?, termMonths?, amount?, interestRate?, interestMethod?, preservePaid? }
 =========================== */
 const rebuildLoanSchedule = async (req, res) => {
   try {
     const id = req.params.loanId || req.params.id;
-    const loan = await Loan.findByPk(id);
+    const loan = await fetchLoanByPkSafe(id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     const {
@@ -1002,8 +1010,10 @@ const rebuildLoanSchedule = async (req, res) => {
     // Fetch existing rows if preserving paid/settled flags
     let existing = [];
     if (preservePaid) {
+      const scheduleAttrs = await getSafeScheduleAttributeNames();
       existing = await LoanSchedule.findAll({
         where: { loanId: loan.id },
+        attributes: scheduleAttrs,
         order: [["period", "ASC"]],
       });
     }
@@ -1063,26 +1073,25 @@ const rebuildLoanSchedule = async (req, res) => {
 
 /* ===========================
    CSV EXPORT of schedule
-   - GET /loans/:id/schedule/export.csv
 =========================== */
 const exportLoanScheduleCsv = async (req, res) => {
   try {
     const id = req.params.loanId || req.params.id;
-    const loan = await Loan.findByPk(id);
+    const loan = await fetchLoanByPkSafe(id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     let rows = [];
     if (LoanSchedule && (await tableExists("loan_schedules"))) {
+      const scheduleAttrs = await getSafeScheduleAttributeNames();
       rows = await LoanSchedule.findAll({
         where: { loanId: loan.id },
+        attributes: scheduleAttrs,
         order: [["period", "ASC"]],
       });
     }
 
     // Fallback: generate preview rows if table empty
     if (!rows.length) {
-      const preview = await getLoanSchedule({ params: { id } }, { json: (j) => j });
-      // In Express path, we won't hit this fallback; just regenerate directly:
       const input = {
         amount: Number(loan.amount || 0),
         interestRate: Number(loan.interestRate || 0),
@@ -1160,7 +1169,7 @@ const updateLoanStatus = async (req, res) => {
     const next = String(req.body?.status || "").toLowerCase();
     const override = !!req.body?.override;
 
-    const loan = await Loan.findByPk(req.params.id);
+    const loan = await fetchLoanByPkSafe(req.params.id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     const updatedLoan = await performStatusTransition(loan, next, { override, req });
@@ -1183,16 +1192,13 @@ const updateLoanStatus = async (req, res) => {
 };
 
 /* ===========================
-   WORKFLOW ACTION (optional nice-to-have)
-   - POST /loans/:id/workflow
-   Body: { action, suggestedAmount?, comment? }
-   Supports: bm_approve, compliance_approve, reject, request_changes, resubmit
+   WORKFLOW ACTION (optional)
 =========================== */
 const workflowAction = async (req, res) => {
   try {
     const id = req.params.id;
     const { action, suggestedAmount } = req.body || {};
-    const loan = await Loan.findByPk(id);
+    const loan = await fetchLoanByPkSafe(id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     // If approver provided a suggestion, update amount first (non-blocking if identical)
@@ -1233,14 +1239,11 @@ const workflowAction = async (req, res) => {
 
 /* ===========================
    RE-ISSUE DISBURSEMENT (optional)
-   - POST /loans/:id/reissue
-   Body: { disbursementDate?, startDate?, regenerateSchedule? (default true) }
-   Guards: will refuse if repayments already exist.
 =========================== */
 const reissueLoan = async (req, res) => {
   try {
     const id = req.params.id;
-    const loan = await Loan.findByPk(id);
+    const loan = await fetchLoanByPkSafe(id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     if (await hasAnyRepayments(loan.id)) {
@@ -1315,19 +1318,8 @@ const reissueLoan = async (req, res) => {
       req,
     }).catch(() => {});
 
-    const attributes = await getSafeLoanAttributeNames();
-    const userIncludes = await buildUserIncludesIfPossible();
-    const reloaded = await Loan.findByPk(loan.id, {
-      attributes,
-      include: [
-        { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
-        { model: LoanProduct },
-        ...userIncludes,
-      ],
-    });
-
-    res.json({ message: "Loan re-issued", loan: reloaded });
+    const reloaded = await fetchLoanByPkSafe(loan.id);
+    res.json({ message: "Loan re-issued", loan: reloaded || loan });
   } catch (err) {
     console.error("Re-issue error:", err);
     res.status(500).json({ error: "Failed to re-issue loan" });

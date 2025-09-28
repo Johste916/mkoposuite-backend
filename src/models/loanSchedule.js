@@ -1,36 +1,38 @@
+// src/models/loanSchedule.js
 module.exports = (sequelize, DataTypes) => {
   const LoanSchedule = sequelize.define('LoanSchedule', {
     id:              { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-    loanId:          { type: DataTypes.INTEGER, allowNull: false },
+    loanId:          { type: DataTypes.INTEGER, allowNull: false, field: 'loan_id' },   // map if your FK is snake_case
 
-    period:          { type: DataTypes.INTEGER, allowNull: false }, // 1..N
-    dueDate:         { type: DataTypes.DATEONLY, allowNull: false },
+    period:          { type: DataTypes.INTEGER, allowNull: false, field: 'period' },
+    dueDate:         { type: DataTypes.DATEONLY, allowNull: false, field: 'due_date' }, // ← important
 
-    principal:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
-    interest:        { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
-    fees:            { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
-    penalties:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
+    principal:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'principal' },
+    interest:        { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'interest' },
+    fees:            { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'fees' },
+    penalties:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'penalties' },
 
-    total:           { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
+    total:           { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'total' },
 
-    // 👇 Added to keep other features working (controllers update these)
-    principalPaid:   { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
-    interestPaid:    { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
-    feesPaid:        { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
-    penaltiesPaid:   { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
+    // If these exist in DB, map them; if not, leaving them mapped is harmless because
+    // the controller now selects only existing columns.
+    principalPaid:   { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'principal_paid' },
+    interestPaid:    { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'interest_paid' },
+    feesPaid:        { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'fees_paid' },
+    penaltiesPaid:   { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'penalties_paid' },
 
-    paid:            { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
+    paid:            { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'paid' },
 
-    status:          { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'upcoming' }, // 'upcoming'|'overdue'|'paid'
+    status:          { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'upcoming', field: 'status' },
   }, {
     tableName: 'loan_schedules',
     schema: 'public',
     timestamps: true,
-    underscored: false,
+    underscored: true,
     indexes: [
-      { fields: ['loanId'] },
+      { fields: ['loan_id'] },
       { fields: ['period'] },
-      { fields: ['dueDate'] },
+      { fields: ['due_date'] },
       { fields: ['status'] },
     ],
   });
