@@ -452,15 +452,15 @@ async function shapeScheduleRowForDb(base) {
 
 /** Build a safe WHERE for loan schedules across snake/camel column names */
 function scheduleLoanIdWhere(val) {
-  // If the model defines the attribute, prefer that (Sequelize will map to DB field).
   if (LoanSchedule?.rawAttributes?.loanId) {
+    // Sequelize will map loanId -> loan_id if needed
     return { loanId: val };
   }
-  // Fallback to a SQL-level where on snake_case column (avoids "LoanSchedule.loan_id does not exist")
-  return where(col("loan_schedules.loan_id"), val);
+  // Fallback to raw SQL column with explicit operator
+  return where(col("loan_schedules.loan_id"), Op.eq, val);
 }
 
-/** Bulk insert only provided fields (prevents Sequelize from adding model-default columns) */
+/** Bulk insert only provided fields (prevents Sequelize from trying to write non-existent columns) */
 async function bulkCreateLoanSchedulesSafe(rows) {
   if (!rows?.length) return;
   const fields = Array.from(new Set(rows.flatMap((r) => Object.keys(r))));
@@ -561,7 +561,7 @@ async function performStatusTransition(loan, next, { override = false, req }) {
   // For first disbursement, auto-create schedule if table exists and none present
   if (next === "disbursed" && LoanSchedule && (await tableExists("loan_schedules"))) {
     try {
-      const existing = await LoanSchedule.count({ where: scheduleLoanIdWhere(loan.id) });
+      const existing = await LoanSchedule.count({ where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] } });
       if (existing === 0) {
         const input = {
           amount: Number(loan.amount || 0),
@@ -835,7 +835,7 @@ const getLoanById = async (req, res) => {
         try {
           const scheduleAttrs = await getSafeScheduleAttributeNames();
           schedule = await LoanSchedule.findAll({
-            where: scheduleLoanIdWhere(loan.id),
+            where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
             attributes: scheduleAttrs,
             order: [["period", "ASC"]],
           });
@@ -1043,13 +1043,13 @@ const rebuildLoanSchedule = async (req, res) => {
     if (preservePaid) {
       const scheduleAttrs = await getSafeScheduleAttributeNames();
       existing = await LoanSchedule.findAll({
-        where: scheduleLoanIdWhere(loan.id),
+        where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
         attributes: scheduleAttrs,
         order: [["period", "ASC"]],
       });
     }
 
-    await LoanSchedule.destroy({ where: scheduleLoanIdWhere(loan.id) });
+    await LoanSchedule.destroy({ where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] } });
 
     const rows = [];
     for (let i = 0; i < schedule.length; i++) {
@@ -1100,7 +1100,13 @@ const rebuildLoanSchedule = async (req, res) => {
     return res.json({ mode: "replace", count: rows.length });
   } catch (err) {
     console.error("Reschedule error:", err);
-    res.status(500).json({ error: "Failed to rebuild schedule" });
+    // expose helpful details to the client for debugging
+    return res.status(500).json({
+      error: "Failed to rebuild schedule",
+      detail: err?.parent?.message || err?.message || null,
+      code: err?.parent?.code || err?.code || null,
+      sql: err?.sql || null,
+    });
   }
 };
 
@@ -1152,7 +1158,7 @@ const exportLoanScheduleCsv = async (req, res) => {
     if (LoanSchedule && (await tableExists("loan_schedules"))) {
       const scheduleAttrs = await getSafeScheduleAttributeNames();
       rows = await LoanSchedule.findAll({
-        where: scheduleLoanIdWhere(loan.id),
+        where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
         attributes: scheduleAttrs,
         order: [["period", "ASC"]],
       });
@@ -1341,7 +1347,7 @@ const reissueLoan = async (req, res) => {
 
     // Regenerate schedule from new dates
     if (regenerateSchedule && (await tableExists("loan_schedules"))) {
-      await LoanSchedule.destroy({ where: scheduleLoanIdWhere(loan.id) });
+      await LoanSchedule.destroy({ where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] } });
 
       const input = {
         amount: Number(loan.amount || 0),
