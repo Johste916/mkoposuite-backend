@@ -385,6 +385,7 @@ function addMonthsDateOnly(dateStr, months) {
   // dateStr is "YYYY-MM-DD"
   const [y, m, d] = String(dateStr).split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
+  theMonth = dt.getUTCMonth(); // avoid TS complaints (not relevant in JS)
   const targetMonthIndex = dt.getUTCMonth() + Number(months);
   const target = new Date(Date.UTC(dt.getUTCFullYear(), targetMonthIndex, dt.getUTCDate()));
   // Handle end-of-month rollover
@@ -432,6 +433,18 @@ async function getSafeScheduleAttributeNames() {
     const field = attrs[name]?.field || name;
     return cols.has(field);
   });
+}
+
+/** DRY: shape a schedule row so only existing DB fields are sent (handles field mapping) */
+async function shapeScheduleRowForDb(base) {
+  const cols = await getScheduleTableColumns(); // DB columns (field names)
+  const attrs = LoanSchedule?.rawAttributes || {};
+  return Object.fromEntries(
+    Object.entries(base).filter(([attrKey]) => {
+      const field = attrs[attrKey]?.field || attrKey; // map attr -> field
+      return cols.has(field);
+    })
+  );
 }
 
 /** DRY: safely fetch a loan by PK without selecting missing columns */
@@ -543,8 +556,9 @@ async function performStatusTransition(loan, next, { override = false, req }) {
             ? generateReducingBalanceSchedule(input)
             : [];
         if (gen.length) {
-          const cols = await getScheduleTableColumns();
-          const rows = gen.map((s, i) => {
+          const rows = [];
+          for (let i = 0; i < gen.length; i++) {
+            const s = gen[i];
             const base = {
               loanId: loan.id,
               period: i + 1,
@@ -559,9 +573,8 @@ async function performStatusTransition(loan, next, { override = false, req }) {
                     Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0)
                 ),
             };
-            // only keep existing columns
-            return Object.fromEntries(Object.entries(base).filter(([k]) => cols.has(k)));
-          });
+            rows.push(await shapeScheduleRowForDb(base));
+          }
           await LoanSchedule.bulkCreate(rows);
         }
       }
@@ -1005,8 +1018,6 @@ const rebuildLoanSchedule = async (req, res) => {
       return res.status(400).json({ error: "loan_schedules table not found" });
     }
 
-    const cols = await getScheduleTableColumns();
-
     // Fetch existing rows if preserving paid/settled flags
     let existing = [];
     if (preservePaid) {
@@ -1020,7 +1031,9 @@ const rebuildLoanSchedule = async (req, res) => {
 
     await LoanSchedule.destroy({ where: { loanId: loan.id } });
 
-    const rows = schedule.map((s, i) => {
+    const rows = [];
+    for (let i = 0; i < schedule.length; i++) {
+      const s = schedule[i];
       const base = {
         loanId: loan.id,
         period: i + 1,
@@ -1043,8 +1056,8 @@ const rebuildLoanSchedule = async (req, res) => {
         if ("balance" in existing[i] && !Number.isFinite(base.balance)) base.balance = existing[i].balance;
       }
 
-      return Object.fromEntries(Object.entries(base).filter(([k]) => cols.has(k)));
-    });
+      rows.push(await shapeScheduleRowForDb(base));
+    }
 
     await LoanSchedule.bulkCreate(rows);
 
@@ -1288,25 +1301,25 @@ const reissueLoan = async (req, res) => {
           ? generateReducingBalanceSchedule(input)
           : [];
 
-      const cols = await getScheduleTableColumns();
-      const rows = gen.map((s, i) =>
-        Object.fromEntries(
-          Object.entries({
-            loanId: loan.id,
-            period: i + 1,
-            dueDate: s.dueDate,
-            principal: Number(s.principal || 0),
-            interest: Number(s.interest || 0),
-            fees: Number(s.fees || 0),
-            penalties: Number(s.penalties || 0),
-            total:
-              Number(
-                s.total ??
-                  Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0)
-              ),
-          }).filter(([k]) => cols.has(k))
-        )
-      );
+      const rows = [];
+      for (let i = 0; i < gen.length; i++) {
+        const s = gen[i];
+        const base = {
+          loanId: loan.id,
+          period: i + 1,
+          dueDate: s.dueDate,
+          principal: Number(s.principal || 0),
+          interest: Number(s.interest || 0),
+          fees: Number(s.fees || 0),
+          penalties: Number(s.penalties || 0),
+          total:
+            Number(
+              s.total ??
+                Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0)
+            ),
+        };
+        rows.push(await shapeScheduleRowForDb(base));
+      }
       if (rows.length) await LoanSchedule.bulkCreate(rows);
     }
 
