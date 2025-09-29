@@ -19,9 +19,8 @@ const KYCDocument        = models.KYCDocument || null;
 const sequelize = models.sequelize || null;
 const _qi = sequelize?.getQueryInterface?.();
 const _colCache = new Map();
-/**
- * Return the actual columns that exist in DB for Model (cached).
- */
+
+/** Return the actual columns that exist in DB for Model (cached). */
 const getExistingColumns = async (Model) => {
   const table = Model?.getTableName?.();
   if (!Model || !table || !_qi) {
@@ -41,10 +40,8 @@ const getExistingColumns = async (Model) => {
     return cols;
   }
 };
-/**
- * Build a safe attributes list limited to columns that exist in DB.
- * If `candidates` is omitted, use all model attributes (then filter by DB).
- */
+
+/** Build a safe attributes list limited to columns that exist in DB. */
 const safeAttributes = async (Model, candidates) => {
   const cols = await getExistingColumns(Model);
   const base = candidates || Object.keys(Model?.rawAttributes || {});
@@ -149,18 +146,18 @@ exports.createBorrower = async (req, res) => {
       if (incomingBranchId) payload.branchId = incomingBranchId;
     }
 
-    // Optional extras — only assign if such columns exist in your schema
-    if (existingCols.includes("gender"))        payload.gender = b.gender || null;
-    if (existingCols.includes("birthDate"))     payload.birthDate = b.birthDate || null;
-    if (existingCols.includes("employmentStatus")) payload.employmentStatus = b.employmentStatus || null;
-    if (existingCols.includes("idType"))        payload.idType = b.idType || null;
-    if (existingCols.includes("idIssuedDate"))  payload.idIssuedDate = b.idIssuedDate || null;
-    if (existingCols.includes("idExpiryDate"))  payload.idExpiryDate = b.idExpiryDate || null;
-    if (existingCols.includes("nextKinName"))   payload.nextKinName = b.nextKinName || null;
-    if (existingCols.includes("nextKinPhone"))  payload.nextKinPhone = b.nextKinPhone || null;
-    if (existingCols.includes("regDate"))       payload.regDate = b.regDate || null;
-    if (existingCols.includes("loanOfficerId")) payload.loanOfficerId = b.loanOfficerId || null;
-    if (existingCols.includes("groupId"))       payload.groupId = b.loanType === "group" ? (b.groupId || null) : null;
+    // Optional extras
+    if (existingCols.includes("gender"))            payload.gender = b.gender || null;
+    if (existingCols.includes("birthDate"))         payload.birthDate = b.birthDate || null;
+    if (existingCols.includes("employmentStatus"))  payload.employmentStatus = b.employmentStatus || null;
+    if (existingCols.includes("idType"))            payload.idType = b.idType || null;
+    if (existingCols.includes("idIssuedDate"))      payload.idIssuedDate = b.idIssuedDate || null;
+    if (existingCols.includes("idExpiryDate"))      payload.idExpiryDate = b.idExpiryDate || null;
+    if (existingCols.includes("nextKinName"))       payload.nextKinName = b.nextKinName || null;
+    if (existingCols.includes("nextKinPhone"))      payload.nextKinPhone = b.nextKinPhone || null;
+    if (existingCols.includes("regDate"))           payload.regDate = b.regDate || null;
+    if (existingCols.includes("loanOfficerId"))     payload.loanOfficerId = b.loanOfficerId || null;
+    if (existingCols.includes("groupId"))           payload.groupId = b.loanType === "group" ? (b.groupId || null) : null;
 
     const created = await Borrower.create(payload);
 
@@ -228,6 +225,19 @@ exports.updateBorrower = async (req, res) => {
   } catch (error) {
     console.error("updateBorrower error:", error);
     res.status(500).json({ error: "Failed to update borrower" });
+  }
+};
+
+exports.disableBorrower = async (req, res) => {
+  try {
+    if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
+    const b = await Borrower.findByPk(req.params.id);
+    if (!b) return res.status(404).json({ error: "Borrower not found" });
+    await b.update({ status: "disabled" });
+    res.json({ id: b.id, status: b.status });
+  } catch (error) {
+    console.error("disableBorrower error:", error);
+    res.status(500).json({ error: "Failed to disable borrower" });
   }
 };
 
@@ -574,7 +584,7 @@ exports.listKycQueue = async (_req, res) => {
 exports.listGroups = async (_req, res) => {
   try {
     if (!Group) return res.json([]);
-    const groups = await Group.findAll({ order: [["createdAt", "DESC"]] });
+  const groups = await Group.findAll({ order: [["createdAt", "DESC"]] });
     res.json(groups || []);
   } catch (error) {
     console.error("listGroups error:", error);
@@ -835,7 +845,7 @@ exports.summaryReport = async (req, res) => {
       txCount = txs.length;
 
       let dep = 0,
-        wdr = 0;
+          wdr = 0;
       for (const t of txs) {
         if (t.reversed === true) continue;
         if (t.type === "deposit") dep += safeNum(t.amount);

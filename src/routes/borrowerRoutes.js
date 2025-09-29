@@ -58,13 +58,14 @@ router.post('/groups/:groupId/import',   authenticateUser, requireMulterSingleFi
 router.get('/',                          authenticateUser, ctrl.getAllBorrowers);
 
 /**
- * 🆕 IMPORTANT:
  * Frontend sends multipart/form-data (optional photo). We must parse it.
  * Using upload.any() keeps backward compatibility if no files are sent.
  */
 router.post('/',                         authenticateUser, requireMulterAny, ctrl.createBorrower);
 
 router.put('/:id',                       authenticateUser, ctrl.updateBorrower);
+router.patch('/:id',                     authenticateUser, ctrl.updateBorrower); // ✅ allow PATCH fallback
+router.post('/:id/disable',              authenticateUser, ctrl.disableBorrower); // ✅ explicit disable route
 router.delete('/:id',                    authenticateUser, ctrl.deleteBorrower);
 
 // Explicit branch assign/unassign (additive, optional to use)
