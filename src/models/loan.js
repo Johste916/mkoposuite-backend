@@ -6,21 +6,18 @@ module.exports = (sequelize, DataTypes) => {
       // PK
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
-      // Keep the ones that already worked as-is (to avoid breaking inserts)
+      // Columns confirmed working
       borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' },
       branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId' },
 
-      // Your DB already uses product_id (this was correct)
+      // DB uses product_id
       productId:  { type: DataTypes.INTEGER, allowNull: false, field: 'product_id' },
 
       reference:  { type: DataTypes.STRING, unique: true },
 
       amount:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
       currency:     { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS' },
-
-      // Leave as-is since your INSERT was already using "interestRate" successfully
       interestRate: { type: DataTypes.DECIMAL(10, 4), field: 'interestRate' },
-
       termMonths:   { type: DataTypes.INTEGER, allowNull: false, field: 'term_months' },
 
       startDate: { type: DataTypes.DATEONLY, allowNull: false, field: 'startDate' },
@@ -32,7 +29,6 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: 'monthly',
         field: 'repaymentFrequency',
       },
-
       interestMethod: {
         type: DataTypes.ENUM('flat', 'reducing'),
         allowNull: false,
@@ -40,12 +36,7 @@ module.exports = (sequelize, DataTypes) => {
         field: 'interestMethod',
       },
 
-      status: {
-        type: DataTypes.STRING,
-        allowNull: false,
-        defaultValue: 'pending',
-        field: 'status',
-      },
+      status: { type: DataTypes.STRING, allowNull: false, defaultValue: 'pending', field: 'status' },
 
       totalInterest: { type: DataTypes.DECIMAL(14, 2), field: 'total_interest' },
       totalPaid:     { type: DataTypes.DECIMAL(14, 2), field: 'total_paid' },
@@ -57,25 +48,27 @@ module.exports = (sequelize, DataTypes) => {
       rejectedBy:  { type: DataTypes.UUID, field: 'rejected_by' },
       disbursedBy: { type: DataTypes.UUID, field: 'disbursed_by' },
 
-      // 🔧 Problem columns — map to snake_case that exists in DB
-      approvalDate:       { type: DataTypes.DATE,  field: 'approval_date' },
-      rejectionDate:      { type: DataTypes.DATE,  field: 'rejection_date' }, // renamed (was rejectedDate)
-      disbursementDate:   { type: DataTypes.DATE,  field: 'disbursement_date' },
-      disbursementMethod: { type: DataTypes.STRING, field: 'disbursement_method' },
+      // ✅ These two are snake_case in your DB (per PG hint)
+      approvalDate:  { type: DataTypes.DATE, field: 'approval_date' },
+      rejectionDate: { type: DataTypes.DATE, field: 'rejection_date' },
 
+      // ✅ Map back to existing camelCase DB columns (the snake_case versions don't exist)
+      disbursementDate:   { type: DataTypes.DATE,  field: 'disbursementDate' },
+      disbursementMethod: { type: DataTypes.STRING, field: 'disbursementMethod' },
+
+      // These snake_case columns appear to exist (seen in RETURNING list)
       closedBy:    { type: DataTypes.UUID,  field: 'closed_by' },
       closedDate:  { type: DataTypes.DATE,  field: 'closed_date' },
       closeReason: { type: DataTypes.STRING, field: 'close_reason' },
-
       rescheduledFromId: { type: DataTypes.INTEGER, field: 'rescheduled_from_id' },
       topUpOfId:         { type: DataTypes.INTEGER, field: 'top_up_of_id' },
     },
     {
       tableName: 'loans',
       timestamps: true,
-      underscored: false, // keep as-is since your timestamps and many cols are camel in DB
+      underscored: false,
       hooks: {
-        beforeValidate: async (loan) => {
+        beforeValidate: (loan) => {
           if (!loan.reference) {
             const rnd = Math.random().toString(36).slice(2, 8).toUpperCase();
             loan.reference = `LN-${(loan.borrowerId || 'X')}-${rnd}`;
