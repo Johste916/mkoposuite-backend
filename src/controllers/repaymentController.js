@@ -116,10 +116,6 @@ function getRepaymentAmountValue(r) {
   return Number(r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0);
 }
 
-/* ===== numeric helpers (no external deps) ===== */
-const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
-const max0 = (v) => Math.max(0, Number(v) || 0);
-
 /* ===== Safely update loan totals & status (auto-active / auto-closed) ===== */
 async function updateLoanFinancials(loan, deltaPaid, t) {
   // deltaPaid: +amount when approving/applying; -amount when voiding/reversing
@@ -129,7 +125,7 @@ async function updateLoanFinancials(loan, deltaPaid, t) {
   const totalPaidPrev = Number(loan.totalPaid || 0);
   const totalPaidField = mapAttrToField("totalPaid");
   if (totalPaidField && cols[totalPaidField]) {
-    updates.totalPaid = max0(round2(totalPaidPrev + Number(deltaPaid || 0)));
+    updates.totalPaid = Math.max(0, totalPaidPrev + Number(deltaPaid || 0));
   }
 
   const outstandingField = mapAttrToField("outstanding");
@@ -137,14 +133,14 @@ async function updateLoanFinancials(loan, deltaPaid, t) {
 
   if (outstandingField && cols[outstandingField]) {
     if (newOutstanding != null) {
-      newOutstanding = max0(round2(newOutstanding - Number(deltaPaid || 0)));
+      newOutstanding = Math.max(0, newOutstanding - Number(deltaPaid || 0));
       updates.outstanding = newOutstanding;
     } else {
       const principal = Number(loan.amount || 0);
       const totalInterest = Number(loan.totalInterest || 0);
       const newTotalPaid =
-        updates.totalPaid != null ? updates.totalPaid : max0(round2(totalPaidPrev + Number(deltaPaid || 0)));
-      newOutstanding = max0(round2(principal + totalInterest - newTotalPaid));
+        updates.totalPaid != null ? updates.totalPaid : Math.max(0, totalPaidPrev + Number(deltaPaid || 0));
+      newOutstanding = Math.max(0, principal + totalInterest - newTotalPaid);
       updates.outstanding = newOutstanding;
     }
   }
@@ -210,40 +206,6 @@ const shapeReceipt = (repayment, allocation = []) => {
 };
 
 /* =========================== allocations =========================== */
-// Helper: compute remaining parts from a schedule row safely
-function remainingFromRow(row) {
-  const principal = max0((row.principal ?? 0) - (row.principalPaid ?? 0));
-  const interest  = max0((row.interest  ?? 0) - (row.interestPaid  ?? 0));
-  const fees      = max0((row.fees      ?? 0) - (row.feesPaid      ?? 0));
-  const penalties = max0((row.penalties ?? row.penalty ?? 0) - (row.penaltiesPaid ?? 0));
-
-  // total/paid guard (some schemas rely on total/paid more than parts)
-  const total = Number(row.total ?? ((row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || row.penalty || 0)));
-  const paid  = Number(row.paid  ?? ((row.principalPaid || 0) + (row.interestPaid || 0) + (row.feesPaid || 0) + (row.penaltiesPaid || 0)));
-  const totalLeft = max0(total - paid);
-
-  const sumParts = principal + interest + fees + penalties;
-  if (totalLeft > 0 && sumParts === 0) {
-    // Heuristic fallback: attribute remaining first to interest then principal
-    const guessInterest = Math.min(totalLeft, Number(row.interest || 0));
-    const guessPrincipal = max0(totalLeft - guessInterest);
-    return { principal: guessPrincipal, interest: guessInterest, fees: 0, penalties: 0, totalLeft };
-  }
-  // Also never let parts sum exceed totalLeft
-  if (sumParts > totalLeft + 0.0001) {
-    const ratio = totalLeft / sumParts;
-    return {
-      principal: round2(principal * ratio),
-      interest:  round2(interest  * ratio),
-      fees:      round2(fees      * ratio),
-      penalties: round2(penalties * ratio),
-      totalLeft,
-    };
-  }
-
-  return { principal, interest, fees, penalties, totalLeft };
-}
-
 async function computeAllocations({
   loanId,
   amount,
@@ -276,16 +238,18 @@ async function computeAllocations({
   }
 
   const items = schedule.map((s, idx) => {
-    const rem = remainingFromRow(s);
+    const principalDue = Math.max(0, Number(s.principal || 0) - Number(s.principalPaid || 0));
+    const interestDue = Math.max(0, Number(s.interest || 0) - Number(s.interestPaid || 0));
+    const feesDue = Math.max(0, Number(s.fees || 0) - Number(s.feesPaid || 0));
+    const penDue = Math.max(0, Number(s.penalties ?? s.penalty ?? 0) - Number(s.penaltiesPaid || 0));
     return {
-      id: s.id,
       period: s.period ?? idx + 1,
       dueDate: s.dueDate,
       remaining: {
-        principal: rem.principal,
-        interest: rem.interest,
-        fees: rem.fees,
-        penalties: waivePenalties ? 0 : rem.penalties,
+        principal: Number.isFinite(principalDue) ? principalDue : 0,
+        interest: Number.isFinite(interestDue) ? interestDue : 0,
+        fees: Number.isFinite(feesDue) ? feesDue : 0,
+        penalties: waivePenalties ? 0 : Number.isFinite(penDue) ? penDue : 0,
       },
     };
   });
@@ -303,7 +267,7 @@ async function computeAllocations({
 
   if (waivePenalties) order = order.filter((x) => x !== "penalties");
 
-  let left = round2(Number(amount));
+  let left = Number(amount);
   const allocations = [];
   const totals = { principal: 0, interest: 0, fees: 0, penalties: 0 };
 
@@ -313,14 +277,13 @@ async function computeAllocations({
 
     for (const cat of order) {
       if (left <= 0) break;
-      const need = max0(it.remaining[cat] || 0);
+      const need = Math.max(0, it.remaining[cat] || 0);
       if (!need) continue;
       const take = Math.min(need, left);
-      const rTake = round2(take);
-      line[cat] = round2((line[cat] || 0) + rTake);
-      totals[cat] = round2((totals[cat] || 0) + rTake);
-      it.remaining[cat] = round2(need - rTake);
-      left = round2(left - rTake);
+      line[cat] += take;
+      totals[cat] += take;
+      it.remaining[cat] -= take;
+      left -= take;
     }
 
     if (line.principal || line.interest || line.fees || line.penalties) {
@@ -334,56 +297,23 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
   if (!LoanSchedule || !allocations?.length) return;
 
   for (const line of allocations) {
-    // Prefer row by (loanId, period); if duplicate periods can exist, this matches your existing approach.
-    const row = await LoanSchedule.findOne({
-      where: { loanId, period: line.period },
-      transaction: t,
-      lock: t?.LOCK?.UPDATE, // row-level lock inside tx
-    });
+    const row = await LoanSchedule.findOne({ where: { loanId, period: line.period }, transaction: t });
     if (!row) continue;
 
-    // Current remaining snapshot
-    const rem = remainingFromRow(row);
+    const principalPaid = Number(row.principalPaid || 0) + sign * Number(line.principal || 0);
+    const interestPaid = Number(row.interestPaid || 0) + sign * Number(line.interest || 0);
+    const feesPaid = Number(row.feesPaid || 0) + sign * Number(line.fees || 0);
+    const penaltiesPaid = Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0);
 
-    // Clamp deltas to remaining (or to what was previously allocated, if sign = -1)
-    const wantP = round2(Number(line.principal || 0) * sign);
-    const wantI = round2(Number(line.interest  || 0) * sign);
-    const wantF = round2(Number(line.fees      || 0) * sign);
-    const wantPen = round2(Number(line.penalties || 0) * sign);
-
-    // When applying (+1), cap by remaining; when reversing (-1), cap by already-paid
-    const capP = sign > 0 ? rem.principal : Math.min(Number(row.principalPaid || 0), Math.abs(wantP));
-    const capI = sign > 0 ? rem.interest  : Math.min(Number(row.interestPaid  || 0), Math.abs(wantI));
-    const capF = sign > 0 ? rem.fees      : Math.min(Number(row.feesPaid      || 0), Math.abs(wantF));
-    const capPen = sign > 0 ? rem.penalties: Math.min(Number(row.penaltiesPaid || 0), Math.abs(wantPen));
-
-    const dP = round2(sign > 0 ? Math.min(Math.abs(wantP), capP) : -Math.min(Math.abs(wantP), capP));
-    const dI = round2(sign > 0 ? Math.min(Math.abs(wantI), capI) : -Math.min(Math.abs(wantI), capI));
-    const dF = round2(sign > 0 ? Math.min(Math.abs(wantF), capF) : -Math.min(Math.abs(wantF), capF));
-    const dPen = round2(sign > 0 ? Math.min(Math.abs(wantPen), capPen) : -Math.min(Math.abs(wantPen), capPen));
-
-    const newPrincipalPaid = max0(round2((row.principalPaid || 0) + dP));
-    const newInterestPaid  = max0(round2((row.interestPaid  || 0) + dI));
-    const newFeesPaid      = max0(round2((row.feesPaid      || 0) + dF));
-    const newPenaltiesPaid = max0(round2((row.penaltiesPaid || 0) + dPen));
-
-    const incSum = round2((newPrincipalPaid - (row.principalPaid || 0)) +
-                          (newInterestPaid  - (row.interestPaid  || 0)) +
-                          (newFeesPaid      - (row.feesPaid      || 0)) +
-                          (newPenaltiesPaid - (row.penaltiesPaid || 0)));
-
-    const rawPaid = round2((row.paid || 0) + incSum);
     const total = Number(
       row.total != null
         ? row.total
-        : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || row.penalty || 0)
+        : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || 0)
     );
-
-    // Final clamp: never exceed total, never drop below 0
-    const newPaid = Math.min(Math.max(0, rawPaid), total);
+    const paid = Math.max(0, principalPaid + interestPaid + feesPaid + penaltiesPaid);
 
     const status =
-      newPaid >= total - 0.01
+      paid >= total - 0.01
         ? "paid"
         : new Date(row.dueDate) < new Date(asOfDate || new Date())
         ? "overdue"
@@ -391,11 +321,11 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
 
     await row.update(
       {
-        principalPaid: round2(newPrincipalPaid),
-        interestPaid:  round2(newInterestPaid),
-        feesPaid:      round2(newFeesPaid),
-        penaltiesPaid: round2(newPenaltiesPaid),
-        paid:          round2(newPaid),
+        principalPaid: Math.max(0, principalPaid),
+        interestPaid: Math.max(0, interestPaid),
+        feesPaid: Math.max(0, feesPaid),
+        penaltiesPaid: Math.max(0, penaltiesPaid),
+        paid,
         status,
       },
       { transaction: t }
@@ -684,7 +614,6 @@ const createRepayment = async (req, res) => {
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
       include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
       transaction: t,
-      lock: t.LOCK.UPDATE,
     });
     if (!loan) {
       await t.rollback();
@@ -805,7 +734,7 @@ const createBulkRepayments = async (req, res) => {
 
       let loan = null;
       if (inLoanId) {
-        loan = await Loan.findByPk(inLoanId, { transaction: t, lock: t.LOCK.UPDATE });
+        loan = await Loan.findByPk(inLoanId, { transaction: t });
       } else if (loanReference || loanRef) {
         if (!hasRef) {
           await t.rollback();
@@ -816,7 +745,6 @@ const createBulkRepayments = async (req, res) => {
         loan = await Loan.findOne({
           where: { reference: loanReference || loanRef },
           transaction: t,
-          lock: t.LOCK.UPDATE,
         });
       }
 
@@ -899,7 +827,7 @@ const uploadRepaymentsCsv = async (req, res) => {
     const created = [];
     for (const r of rows) {
       const loanRef = r.loanRef || r.loanReference || r.loan_ref || r.reference;
-      const loan = await Loan.findOne({ where: { reference: loanRef }, transaction: t, lock: t.LOCK.UPDATE });
+      const loan = await Loan.findOne({ where: { reference: loanRef }, transaction: t });
       if (!loan) throw new Error(`Loan not found for reference ${loanRef}`);
 
       const payload = {
@@ -954,7 +882,6 @@ const approveRepayment = async (req, res) => {
     const repayment = await Repayment.findByPk(req.params.id, {
       include: [await loanInclude({ needAmounts: true })],
       transaction: t,
-      lock: t.LOCK.UPDATE,
     });
     if (!repayment) {
       await t.rollback();
@@ -1035,7 +962,6 @@ const voidRepayment = async (req, res) => {
     const repayment = await Repayment.findByPk(req.params.id, {
       include: [await loanInclude({ needAmounts: true })],
       transaction: t,
-      lock: t.LOCK.UPDATE,
     });
     if (!repayment) {
       await t.rollback();
@@ -1276,7 +1202,6 @@ const webhookMobileMoney = async (req, res) => {
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
       include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
       transaction: t,
-      lock: t.LOCK.UPDATE,
     });
     if (!loan) {
       await t.rollback();
@@ -1360,7 +1285,6 @@ const webhookBank = async (req, res) => {
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
       include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
       transaction: t,
-      lock: t.LOCK.UPDATE,
     });
     if (!loan) {
       await t.rollback();
