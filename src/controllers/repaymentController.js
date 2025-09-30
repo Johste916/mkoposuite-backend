@@ -1,4 +1,3 @@
-// controllers/repayments.js
 const fs = require("fs");
 const { Op, fn, col, literal } = require("sequelize");
 const {
@@ -18,74 +17,29 @@ const hasSavings = !!SavingsTransaction;
 const Notifier = require("../services/notifier")({ Communication, Borrower });
 const Gateway = require("../services/paymentGateway")();
 
-/* ------------------------------------------------------------
-   Permission helper (permission-first, role-fallback)
-   ------------------------------------------------------------ */
-function hasPermission(req, action, fallbackRoles = []) {
-  const perms = Array.isArray(req.user?.permissions) ? req.user.permissions : null;
-  if (perms && perms.length) {
-    return perms.includes(action);
-  }
-  // Fallback to roles until you fully roll out permissions
-  const allow = fallbackRoles.map((r) => String(r).toLowerCase());
-  const primary = String(req.user?.role || "").toLowerCase();
-  const all = Array.isArray(req.user?.roles)
-    ? req.user.roles.map((r) => String(r).toLowerCase())
-    : [];
-  return allow.length === 0 || allow.includes(primary) || all.some((r) => allow.includes(r));
-}
-
 /* ============================================================
-   SCHEMA PROBE + SAFE ATTRIBUTE PICKERS
+   SCHEMA PROBE + SAFE ATTRIBUTE PICKER
    ============================================================ */
-let _loanTableColumns = null;   // { [colName]: true }
-let _repayTableColumns = null;  // { [colName]: true }
-
-async function describeTableSafe(names = []) {
-  const qi = sequelize.getQueryInterface();
-  for (const name of names) {
-    try {
-      const desc = await qi.describeTable(name);
-      if (desc) return Object.fromEntries(Object.keys(desc).map((k) => [k, true]));
-    } catch {}
-  }
-  return {};
-}
-
+let _loanTableColumns = null; // { [colName]: true }
 async function getLoanTableColumns() {
   if (_loanTableColumns) return _loanTableColumns;
   try {
-    _loanTableColumns = await describeTableSafe(["loans", "Loans"]);
+    const qi = sequelize.getQueryInterface();
+    // Try both common casings to be tolerant across installs
+    let desc = null;
+    try { desc = await qi.describeTable("loans"); } catch {}
+    if (!desc) { try { desc = await qi.describeTable("Loans"); } catch {} }
+    _loanTableColumns = desc
+      ? Object.fromEntries(Object.keys(desc).map((k) => [k, true]))
+      : {};
   } catch {
     _loanTableColumns = {};
   }
   return _loanTableColumns;
 }
 
-async function getRepaymentTableColumns() {
-  if (_repayTableColumns) return _repayTableColumns;
-  try {
-    _repayTableColumns = await describeTableSafe([
-      "loan_repayments",
-      "LoanRepayments",
-      "loan_payments",
-      "LoanPayments",
-    ]);
-  } catch {
-    _repayTableColumns = {};
-  }
-  return _repayTableColumns;
-}
-
-function mapLoanAttrToField(attrName) {
+function mapAttrToField(attrName) {
   const ra = Loan?.rawAttributes || {};
-  const def = ra[attrName];
-  if (!def) return null;
-  return def.field || attrName;
-}
-
-function mapRepaymentAttrToField(attrName) {
-  const ra = Repayment?.rawAttributes || {};
   const def = ra[attrName];
   if (!def) return null;
   return def.field || attrName;
@@ -95,7 +49,7 @@ async function pickExistingLoanAttributes(attrNames = []) {
   const cols = await getLoanTableColumns();
   const selected = [];
   for (const name of attrNames) {
-    const field = mapLoanAttrToField(name);
+    const field = mapAttrToField(name);
     if (!field) continue;
     if (cols[field]) selected.push(name);
   }
@@ -103,25 +57,12 @@ async function pickExistingLoanAttributes(attrNames = []) {
   return selected.length ? selected : undefined;
 }
 
-async function repaymentHasColumn(attrName) {
-  const cols = await getRepaymentTableColumns();
-  const field = mapRepaymentAttrToField(attrName);
-  return !!(field && cols[field]);
-}
-
 const BORROWER_ATTRS = ["id", "name", "phone", "email"];
 
 // Default minimal attributes safe across schema variations
 const LOAN_BASE_ATTRS = ["id", "borrowerId", "currency", "reference"];
 // When we need to compute balances
-const LOAN_AMOUNT_ATTRS = [
-  ...LOAN_BASE_ATTRS,
-  "amount",
-  "totalInterest",
-  "outstanding",
-  "totalPaid",
-  "status",
-];
+const LOAN_AMOUNT_ATTRS = [...LOAN_BASE_ATTRS, "amount", "totalInterest", "outstanding", "totalPaid", "status"];
 
 async function loanInclude({ where = {}, borrowerWhere, needAmounts = false } = {}) {
   const attrsWanted = needAmounts ? LOAN_AMOUNT_ATTRS : LOAN_BASE_ATTRS;
@@ -146,7 +87,7 @@ async function loanRefSupported() {
   return !!cols["reference"];
 }
 
-/* =================== util helpers (attr pickers) =================== */
+/* =============== util helpers (attr pickers) =============== */
 function repaymentDateAttr() {
   const attrs = (Repayment && Repayment.rawAttributes) || {};
   if ("date" in attrs) return "date";
@@ -172,9 +113,7 @@ function getRepaymentDateValue(r) {
   );
 }
 function getRepaymentAmountValue(r) {
-  return Number(
-    r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0
-  );
+  return Number(r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0);
 }
 
 /* ===== numeric helpers (no external deps) ===== */
@@ -188,12 +127,12 @@ async function updateLoanFinancials(loan, deltaPaid, t) {
   const updates = {};
 
   const totalPaidPrev = Number(loan.totalPaid || 0);
-  const totalPaidField = mapLoanAttrToField("totalPaid");
+  const totalPaidField = mapAttrToField("totalPaid");
   if (totalPaidField && cols[totalPaidField]) {
     updates.totalPaid = max0(round2(totalPaidPrev + Number(deltaPaid || 0)));
   }
 
-  const outstandingField = mapLoanAttrToField("outstanding");
+  const outstandingField = mapAttrToField("outstanding");
   let newOutstanding = loan.outstanding != null ? Number(loan.outstanding) : null;
 
   if (outstandingField && cols[outstandingField]) {
@@ -204,16 +143,14 @@ async function updateLoanFinancials(loan, deltaPaid, t) {
       const principal = Number(loan.amount || 0);
       const totalInterest = Number(loan.totalInterest || 0);
       const newTotalPaid =
-        updates.totalPaid != null
-          ? updates.totalPaid
-          : max0(round2(totalPaidPrev + Number(deltaPaid || 0)));
+        updates.totalPaid != null ? updates.totalPaid : max0(round2(totalPaidPrev + Number(deltaPaid || 0)));
       newOutstanding = max0(round2(principal + totalInterest - newTotalPaid));
       updates.outstanding = newOutstanding;
     }
   }
 
   // Auto status transitions if column exists:
-  const statusField = mapLoanAttrToField("status");
+  const statusField = mapAttrToField("status");
   if (statusField && cols[statusField]) {
     const curr = String(loan.status || "").toLowerCase();
     // Close when fully paid
@@ -273,29 +210,16 @@ const shapeReceipt = (repayment, allocation = []) => {
 };
 
 /* =========================== allocations =========================== */
+// Helper: compute remaining parts from a schedule row safely
 function remainingFromRow(row) {
   const principal = max0((row.principal ?? 0) - (row.principalPaid ?? 0));
-  const interest = max0((row.interest ?? 0) - (row.interestPaid ?? 0));
-  const fees = max0((row.fees ?? 0) - (row.feesPaid ?? 0));
-  const penalties = max0(
-    (row.penalties ?? row.penalty ?? 0) - (row.penaltiesPaid ?? 0)
-  );
+  const interest  = max0((row.interest  ?? 0) - (row.interestPaid  ?? 0));
+  const fees      = max0((row.fees      ?? 0) - (row.feesPaid      ?? 0));
+  const penalties = max0((row.penalties ?? row.penalty ?? 0) - (row.penaltiesPaid ?? 0));
 
   // total/paid guard (some schemas rely on total/paid more than parts)
-  const total = Number(
-    row.total ??
-      (row.principal || 0) +
-        (row.interest || 0) +
-        (row.fees || 0) +
-        (row.penalties || row.penalty || 0)
-  );
-  const paid = Number(
-    row.paid ??
-      (row.principalPaid || 0) +
-        (row.interestPaid || 0) +
-        (row.feesPaid || 0) +
-        (row.penaltiesPaid || 0)
-  );
+  const total = Number(row.total ?? ((row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || row.penalty || 0)));
+  const paid  = Number(row.paid  ?? ((row.principalPaid || 0) + (row.interestPaid || 0) + (row.feesPaid || 0) + (row.penaltiesPaid || 0)));
   const totalLeft = max0(total - paid);
 
   const sumParts = principal + interest + fees + penalties;
@@ -303,21 +227,15 @@ function remainingFromRow(row) {
     // Heuristic fallback: attribute remaining first to interest then principal
     const guessInterest = Math.min(totalLeft, Number(row.interest || 0));
     const guessPrincipal = max0(totalLeft - guessInterest);
-    return {
-      principal: guessPrincipal,
-      interest: guessInterest,
-      fees: 0,
-      penalties: 0,
-      totalLeft,
-    };
+    return { principal: guessPrincipal, interest: guessInterest, fees: 0, penalties: 0, totalLeft };
   }
   // Also never let parts sum exceed totalLeft
   if (sumParts > totalLeft + 0.0001) {
     const ratio = totalLeft / sumParts;
     return {
       principal: round2(principal * ratio),
-      interest: round2(interest * ratio),
-      fees: round2(fees * ratio),
+      interest:  round2(interest  * ratio),
+      fees:      round2(fees      * ratio),
       penalties: round2(penalties * ratio),
       totalLeft,
     };
@@ -416,6 +334,7 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
   if (!LoanSchedule || !allocations?.length) return;
 
   for (const line of allocations) {
+    // Prefer row by (loanId, period); if duplicate periods can exist, this matches your existing approach.
     const row = await LoanSchedule.findOne({
       where: { loanId, period: line.period },
       transaction: t,
@@ -423,17 +342,20 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     });
     if (!row) continue;
 
+    // Current remaining snapshot
     const rem = remainingFromRow(row);
 
+    // Clamp deltas to remaining (or to what was previously allocated, if sign = -1)
     const wantP = round2(Number(line.principal || 0) * sign);
-    const wantI = round2(Number(line.interest || 0) * sign);
-    const wantF = round2(Number(line.fees || 0) * sign);
+    const wantI = round2(Number(line.interest  || 0) * sign);
+    const wantF = round2(Number(line.fees      || 0) * sign);
     const wantPen = round2(Number(line.penalties || 0) * sign);
 
+    // When applying (+1), cap by remaining; when reversing (-1), cap by already-paid
     const capP = sign > 0 ? rem.principal : Math.min(Number(row.principalPaid || 0), Math.abs(wantP));
-    const capI = sign > 0 ? rem.interest : Math.min(Number(row.interestPaid || 0), Math.abs(wantI));
-    const capF = sign > 0 ? rem.fees : Math.min(Number(row.feesPaid || 0), Math.abs(wantF));
-    const capPen = sign > 0 ? rem.penalties : Math.min(Number(row.penaltiesPaid || 0), Math.abs(wantPen));
+    const capI = sign > 0 ? rem.interest  : Math.min(Number(row.interestPaid  || 0), Math.abs(wantI));
+    const capF = sign > 0 ? rem.fees      : Math.min(Number(row.feesPaid      || 0), Math.abs(wantF));
+    const capPen = sign > 0 ? rem.penalties: Math.min(Number(row.penaltiesPaid || 0), Math.abs(wantPen));
 
     const dP = round2(sign > 0 ? Math.min(Math.abs(wantP), capP) : -Math.min(Math.abs(wantP), capP));
     const dI = round2(sign > 0 ? Math.min(Math.abs(wantI), capI) : -Math.min(Math.abs(wantI), capI));
@@ -441,27 +363,23 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     const dPen = round2(sign > 0 ? Math.min(Math.abs(wantPen), capPen) : -Math.min(Math.abs(wantPen), capPen));
 
     const newPrincipalPaid = max0(round2((row.principalPaid || 0) + dP));
-    const newInterestPaid = max0(round2((row.interestPaid || 0) + dI));
-    const newFeesPaid = max0(round2((row.feesPaid || 0) + dF));
+    const newInterestPaid  = max0(round2((row.interestPaid  || 0) + dI));
+    const newFeesPaid      = max0(round2((row.feesPaid      || 0) + dF));
     const newPenaltiesPaid = max0(round2((row.penaltiesPaid || 0) + dPen));
 
-    const incSum = round2(
-      (newPrincipalPaid - (row.principalPaid || 0)) +
-        (newInterestPaid - (row.interestPaid || 0)) +
-        (newFeesPaid - (row.feesPaid || 0)) +
-        (newPenaltiesPaid - (row.penaltiesPaid || 0))
-    );
+    const incSum = round2((newPrincipalPaid - (row.principalPaid || 0)) +
+                          (newInterestPaid  - (row.interestPaid  || 0)) +
+                          (newFeesPaid      - (row.feesPaid      || 0)) +
+                          (newPenaltiesPaid - (row.penaltiesPaid || 0)));
 
     const rawPaid = round2((row.paid || 0) + incSum);
     const total = Number(
       row.total != null
         ? row.total
-        : (row.principal || 0) +
-            (row.interest || 0) +
-            (row.fees || 0) +
-            (row.penalties || row.penalty || 0)
+        : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || row.penalty || 0)
     );
 
+    // Final clamp: never exceed total, never drop below 0
     const newPaid = Math.min(Math.max(0, rawPaid), total);
 
     const status =
@@ -474,10 +392,10 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     await row.update(
       {
         principalPaid: round2(newPrincipalPaid),
-        interestPaid: round2(newInterestPaid),
-        feesPaid: round2(newFeesPaid),
+        interestPaid:  round2(newInterestPaid),
+        feesPaid:      round2(newFeesPaid),
         penaltiesPaid: round2(newPenaltiesPaid),
-        paid: round2(newPaid),
+        paid:          round2(newPaid),
         status,
       },
       { transaction: t }
@@ -485,10 +403,9 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
   }
 }
 
-/* ============================================================
+/* =========================
    📥 LIST
-   - Added: method, minAmount, maxAmount filters
-   ============================================================ */
+========================== */
 const getAllRepayments = async (req, res) => {
   try {
     const {
@@ -498,9 +415,6 @@ const getAllRepayments = async (req, res) => {
       dateFrom,
       dateTo,
       status, // allow filtering by status
-      method,
-      minAmount,
-      maxAmount,
       page = 1,
       pageSize = 20,
     } = req.query;
@@ -508,7 +422,6 @@ const getAllRepayments = async (req, res) => {
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
     const dateAttr = repaymentDateAttr();
-    const amtAttr = repaymentAmountAttr();
 
     const where = {};
     if (dateFrom || dateTo) {
@@ -520,14 +433,6 @@ const getAllRepayments = async (req, res) => {
 
     if (status && (Repayment.rawAttributes || {}).status) {
       where.status = status;
-    }
-    if (method && (Repayment.rawAttributes || {}).method) {
-      where.method = method;
-    }
-    if (amtAttr && (minAmount || maxAmount)) {
-      where[amtAttr] = {};
-      if (minAmount) where[amtAttr][Op.gte] = Number(minAmount);
-      if (maxAmount) where[amtAttr][Op.lte] = Number(maxAmount);
     }
 
     const loanWhere = {};
@@ -586,9 +491,9 @@ const getAllRepayments = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    🔍 BY BORROWER / LOAN
-   ============================================================ */
+========================== */
 const getRepaymentsByBorrower = async (req, res) => {
   try {
     const { borrowerId } = req.params;
@@ -648,13 +553,14 @@ const getRepaymentById = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    🧮 PREVIEW
-   ============================================================ */
+========================== */
 const previewAllocation = async (req, res) => {
   try {
     const { loanId, amount, date, strategy, customOrder, waivePenalties } = req.body;
 
+    // Fetch the loan with safe attributes
     const loan = await Loan.findByPk(loanId, {
       attributes: await pickExistingLoanAttributes(LOAN_BASE_ATTRS),
       include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
@@ -688,8 +594,7 @@ const previewAllocationQuery = async (req, res) => {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
     const strategy = req.query.strategy;
     const customOrder = req.query.customOrder;
-    const waivePenalties =
-      String(req.query.waivePenalties || "").toLowerCase() === "true";
+    const waivePenalties = String(req.query.waivePenalties || "").toLowerCase() === "true";
 
     req.body = { loanId, amount, date, strategy, customOrder, waivePenalties };
     return previewAllocation(req, res);
@@ -699,21 +604,16 @@ const previewAllocationQuery = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    helpers: safe Savings write
-   ============================================================ */
-async function createSavingsDepositSafely({
-  borrowerId,
-  amount,
-  date,
-  reference,
-  narrative,
-}) {
+========================== */
+async function createSavingsDepositSafely({ borrowerId, amount, date, reference, narrative }) {
   if (!hasSavings) return;
   try {
     const attrs = SavingsTransaction.rawAttributes || {};
     const payload = {};
 
+    // Only include fields that exist in the actual table
     if (attrs.borrowerId) payload.borrowerId = borrowerId;
     if (attrs.amount) payload.amount = Number(amount);
     if (attrs.type) payload.type = "deposit";
@@ -725,7 +625,7 @@ async function createSavingsDepositSafely({
 
     await SavingsTransaction.create(payload);
   } catch (e) {
-    // Unique reference collision -> retry once
+    // If unique reference collision, retry once with a new reference
     const code = e?.parent?.code || e?.original?.code;
     if (code === "23505") {
       try {
@@ -748,22 +648,17 @@ async function createSavingsDepositSafely({
   }
 }
 
-/* ============================================================
+/* ==========================
    💰 CREATE (manual, immediate post)
-   ------------------------------------------------------------
-   Permission: "repayments:create:manual"
-   Role fallback (until permissions are fully set up):
-   ["admin", "loanofficer", "loan_officer", "loan-officer"]
-   ============================================================ */
+========================== */
 const createRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!hasPermission(req, "repayments:create:manual", allowedRoles)) {
+    const role = String(req.user?.role || "").toLowerCase();
+    const allowed = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!allowed.includes(role)) {
       await t.rollback();
-      return res
-        .status(403)
-        .json({ error: "Access denied: missing permission 'repayments:create:manual' or sufficient role" });
+      return res.status(403).json({ error: "Not permitted to create repayments" });
     }
 
     const {
@@ -781,11 +676,10 @@ const createRepayment = async (req, res) => {
 
     if (!loanId || !Number(amount) || !date) {
       await t.rollback();
-      return res
-        .status(400)
-        .json({ error: "loanId, amount and date are required" });
+      return res.status(400).json({ error: "loanId, amount and date are required" });
     }
 
+    // Fetch loan with only columns we actually need to compute balances
     const loan = await Loan.findByPk(loanId, {
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
       include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
@@ -806,6 +700,7 @@ const createRepayment = async (req, res) => {
       waivePenalties,
     });
 
+    // Build payload flexibly
     const payload = {
       loanId,
       amountPaid: Number(amount),
@@ -829,18 +724,13 @@ const createRepayment = async (req, res) => {
     const repayment = await Repayment.create(payload, { transaction: t });
 
     // Apply allocations + aggregates
-    await applyAllocationToSchedule({
-      loanId,
-      allocations,
-      asOfDate: date,
-      t,
-      sign: +1,
-    });
+    await applyAllocationToSchedule({ loanId, allocations, asOfDate: date, t, sign: +1 });
     await updateLoanFinancials(loan, +Number(amount), t);
 
     await t.commit();
 
-    // Savings deposit after commit
+    // Savings deposit moved *after* commit so a uniqueness/NOT NULL on savings
+    // doesn't abort the repayment transaction (fixes 25P02 cascade)
     const refForSavings = repayment.reference || reference || `RCPT-${repayment.id}`;
     await createSavingsDepositSafely({
       borrowerId: loan.borrowerId,
@@ -858,9 +748,7 @@ const createRepayment = async (req, res) => {
       method,
     });
 
-    const repFull = await Repayment.findByPk(repayment.id, {
-      include: [await loanInclude()],
-    });
+    const repFull = await Repayment.findByPk(repayment.id, { include: [await loanInclude()] });
 
     res.status(201).json({
       repaymentId: repayment.id,
@@ -870,6 +758,7 @@ const createRepayment = async (req, res) => {
   } catch (err) {
     if (!t.finished) await t.rollback();
     console.error("Create repayment error:", err);
+    // Try to surface the original PG code when possible
     const code = err?.parent?.code || err?.original?.code;
     if (code === "23503") return res.status(422).json({ error: "Foreign key constraint failed" });
     if (code === "23502") return res.status(422).json({ error: "Missing required field" });
@@ -878,25 +767,21 @@ const createRepayment = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    ✨ BULK JSON (PENDING rows)
-   Permission: "repayments:bulk:create"
-   Fallback roles: admin, loanofficer
-   ============================================================ */
+========================== */
 const createBulkRepayments = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!hasPermission(req, "repayments:bulk:create", allowedRoles)) {
+    const role = String(req.user?.role || "").toLowerCase();
+    const allowed = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!allowed.includes(role)) {
       await t.rollback();
-      return res
-        .status(403)
-        .json({ error: "Access denied: missing permission 'repayments:bulk:create' or sufficient role" });
+      return res.status(403).json({ error: "Not permitted" });
     }
 
-    const itemsInput = Array.isArray(req.body)
-      ? req.body
-      : req.body?.items || req.body?.rows || [];
+    // Accept: array body, {items: [...]}, or {rows: [...]}
+    const itemsInput = Array.isArray(req.body) ? req.body : req.body?.items || req.body?.rows || [];
     const items = Array.isArray(itemsInput) ? itemsInput : [];
     if (!items.length) {
       await t.rollback();
@@ -920,16 +805,13 @@ const createBulkRepayments = async (req, res) => {
 
       let loan = null;
       if (inLoanId) {
-        loan = await Loan.findByPk(inLoanId, {
-          transaction: t,
-          lock: t.LOCK.UPDATE,
-        });
+        loan = await Loan.findByPk(inLoanId, { transaction: t, lock: t.LOCK.UPDATE });
       } else if (loanReference || loanRef) {
         if (!hasRef) {
           await t.rollback();
-          return res.status(409).json({
-            error: "Loan reference column not available. Run the migration first.",
-          });
+          return res
+            .status(409)
+            .json({ error: "Loan reference column not available. Run the migration first." });
         }
         loan = await Loan.findOne({
           where: { reference: loanReference || loanRef },
@@ -940,9 +822,7 @@ const createBulkRepayments = async (req, res) => {
 
       if (!loan)
         throw new Error(
-          `Loan not found (loanId=${inLoanId || "N/A"}; loanReference=${
-            loanReference || loanRef || "N/A"
-          })`
+          `Loan not found (loanId=${inLoanId || "N/A"}; loanReference=${loanReference || loanRef || "N/A"})`
         );
 
       const payload = {
@@ -964,9 +844,7 @@ const createBulkRepayments = async (req, res) => {
     }
 
     await t.commit();
-    res
-      .status(201)
-      .json({ message: "Bulk repayments queued for approval", ids: created });
+    res.status(201).json({ message: "Bulk repayments queued for approval", ids: created });
   } catch (err) {
     if (!t.finished) await t.rollback();
     console.error("Bulk create error:", err);
@@ -974,11 +852,9 @@ const createBulkRepayments = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    📄 CSV UPLOAD (PENDING rows)
-   Permission: "repayments:csv:upload"
-   Fallback roles: admin, loanofficer
-   ============================================================ */
+========================== */
 const parseCsvBuffer = async (buffer) => {
   const text = buffer.toString("utf8");
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
@@ -997,30 +873,21 @@ const parseCsvBuffer = async (buffer) => {
 const uploadRepaymentsCsv = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!hasPermission(req, "repayments:csv:upload", allowedRoles)) {
-      await t.rollback();
-      return res
-        .status(403)
-        .json({ error: "Access denied: missing permission 'repayments:csv:upload' or sufficient role" });
-    }
-
+    // Support memory or disk storage
     let buf = null;
     if (req.file?.buffer) buf = req.file.buffer;
     else if (req.file?.path) buf = fs.readFileSync(req.file.path);
     if (!buf) {
       await t.rollback();
-      return res
-        .status(400)
-        .json({ error: 'CSV file missing (field name "file")' });
+      return res.status(400).json({ error: 'CSV file missing (field name "file")' });
     }
 
     const hasRef = await loanRefSupported();
     if (!hasRef) {
       await t.rollback();
-      return res.status(409).json({
-        error: "Loan reference column not available. Run the migration first.",
-      });
+      return res
+        .status(409)
+        .json({ error: "Loan reference column not available. Run the migration first." });
     }
 
     const rows = await parseCsvBuffer(buf);
@@ -1032,11 +899,7 @@ const uploadRepaymentsCsv = async (req, res) => {
     const created = [];
     for (const r of rows) {
       const loanRef = r.loanRef || r.loanReference || r.loan_ref || r.reference;
-      const loan = await Loan.findOne({
-        where: { reference: loanRef },
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
+      const loan = await Loan.findOne({ where: { reference: loanRef }, transaction: t, lock: t.LOCK.UPDATE });
       if (!loan) throw new Error(`Loan not found for reference ${loanRef}`);
 
       const payload = {
@@ -1068,23 +931,11 @@ const uploadRepaymentsCsv = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    ✅ APPROVALS
-   Permissions:
-     - list:   "repayments:approve:list"
-     - approve:"repayments:approve"
-     - reject: "repayments:reject"
-   Fallback roles: admin, loanofficer
-   ============================================================ */
+========================== */
 const listPendingApprovals = async (req, res) => {
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!hasPermission(req, "repayments:approve:list", allowedRoles)) {
-      return res
-        .status(403)
-        .json({ error: "Access denied: missing permission 'repayments:approve:list' or sufficient role" });
-    }
-
     const items = await Repayment.findAll({
       where: { status: "pending" },
       include: [await loanInclude()],
@@ -1100,14 +951,6 @@ const listPendingApprovals = async (req, res) => {
 const approveRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!hasPermission(req, "repayments:approve", allowedRoles)) {
-      await t.rollback();
-      return res
-        .status(403)
-        .json({ error: "Access denied: missing permission 'repayments:approve' or sufficient role" });
-    }
-
     const repayment = await Repayment.findByPk(req.params.id, {
       include: [await loanInclude({ needAmounts: true })],
       transaction: t,
@@ -1123,8 +966,7 @@ const approveRepayment = async (req, res) => {
     }
 
     const loan = repayment.Loan;
-    const date =
-      getRepaymentDateValue(repayment) || new Date().toISOString().slice(0, 10);
+    const date = getRepaymentDateValue(repayment) || new Date().toISOString().slice(0, 10);
     const allocations =
       repayment.allocation ||
       (
@@ -1135,25 +977,16 @@ const approveRepayment = async (req, res) => {
         })
       ).allocations;
 
-    await applyAllocationToSchedule({
-      loanId: loan.id,
-      allocations,
-      asOfDate: date,
-      t,
-      sign: +1,
-    });
+    await applyAllocationToSchedule({ loanId: loan.id, allocations, asOfDate: date, t, sign: +1 });
 
     const paidThis = getRepaymentAmountValue(repayment);
     await updateLoanFinancials(loan, +Number(paidThis), t);
 
-    await repayment.update(
-      { status: "approved", applied: true, allocation: allocations },
-      { transaction: t }
-    );
+    await repayment.update({ status: "approved", applied: true, allocation: allocations }, { transaction: t });
 
     await t.commit();
 
-    // Savings after commit
+    // Savings deposit after commit (avoid aborting approval tx)
     const refForSavings = repayment.reference || `RCPT-${repayment.id}`;
     await createSavingsDepositSafely({
       borrowerId: loan.borrowerId,
@@ -1180,13 +1013,6 @@ const approveRepayment = async (req, res) => {
 
 const rejectRepayment = async (req, res) => {
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!hasPermission(req, "repayments:reject", allowedRoles)) {
-      return res
-        .status(403)
-        .json({ error: "Access denied: missing permission 'repayments:reject' or sufficient role" });
-    }
-
     const repayment = await Repayment.findByPk(req.params.id);
     if (!repayment) return res.status(404).json({ error: "Repayment not found" });
     if (repayment.status !== "pending")
@@ -1200,22 +1026,12 @@ const rejectRepayment = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    🚫 VOID / REVERSE (applied rows)
-   Permission: "repayments:void"
-   Fallback roles: admin, loanofficer
-   ============================================================ */
+========================== */
 const voidRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!hasPermission(req, "repayments:void", allowedRoles)) {
-      await t.rollback();
-      return res
-        .status(403)
-        .json({ error: "Access denied: missing permission 'repayments:void' or sufficient role" });
-    }
-
     const repayment = await Repayment.findByPk(req.params.id, {
       include: [await loanInclude({ needAmounts: true })],
       transaction: t,
@@ -1234,6 +1050,7 @@ const voidRepayment = async (req, res) => {
     const date = getRepaymentDateValue(repayment) || new Date().toISOString();
 
     if (repayment.applied) {
+      // reverse schedule & totals
       if (repayment.allocation?.length) {
         await applyAllocationToSchedule({
           loanId: loan.id,
@@ -1248,11 +1065,7 @@ const voidRepayment = async (req, res) => {
     }
 
     await repayment.update(
-      {
-        status: "voided",
-        applied: false,
-        voidReason: req.body?.voidReason || null,
-      },
+      { status: "voided", applied: false, voidReason: req.body?.voidReason || null },
       { transaction: t }
     );
 
@@ -1265,13 +1078,12 @@ const voidRepayment = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    📊 REPORTS
-   (read-only — no extra permission guard here)
-   ============================================================ */
+========================== */
 const getRepaymentsSummary = async (req, res) => {
   try {
-    const { dateFrom, dateTo, loanId, borrowerId, method } = req.query;
+    const { dateFrom, dateTo, loanId, borrowerId } = req.query;
     const dateAttr = repaymentDateAttr();
     const amtAttr = repaymentAmountAttr();
     if (!amtAttr) return res.json({ totalAmount: 0, totalCount: 0, byMethod: [] });
@@ -1282,9 +1094,6 @@ const getRepaymentsSummary = async (req, res) => {
       if (dateFrom) and[Op.gte] = new Date(dateFrom);
       if (dateTo) and[Op.lte] = new Date(dateTo);
       where[dateAttr] = and;
-    }
-    if (method && (Repayment.rawAttributes || {}).method) {
-      where.method = method;
     }
 
     const loanWhere = {};
@@ -1359,32 +1168,13 @@ const getRepaymentsTimeSeries = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    📤 EXPORT CSV
-   Permission: "repayments:export"
-   Fallback roles: admin, loanofficer
-   ============================================================ */
+========================== */
 const exportRepaymentsCsv = async (req, res) => {
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!hasPermission(req, "repayments:export", allowedRoles)) {
-      return res
-        .status(403)
-        .json({ error: "Access denied: missing permission 'repayments:export' or sufficient role" });
-    }
-
-    const {
-      q = "",
-      loanId,
-      borrowerId,
-      dateFrom,
-      dateTo,
-      method,
-      minAmount,
-      maxAmount,
-    } = req.query;
+    const { q = "", loanId, borrowerId, dateFrom, dateTo } = req.query;
     const dateAttr = repaymentDateAttr();
-    const amtAttr = repaymentAmountAttr();
 
     const where = {};
     if (dateFrom || dateTo) {
@@ -1392,14 +1182,6 @@ const exportRepaymentsCsv = async (req, res) => {
       if (dateFrom) and[Op.gte] = new Date(dateFrom);
       if (dateTo) and[Op.lte] = new Date(dateTo);
       where[dateAttr] = and;
-    }
-    if (method && (Repayment.rawAttributes || {}).method) {
-      where.method = method;
-    }
-    if (amtAttr && (minAmount || maxAmount)) {
-      where[amtAttr] = {};
-      if (minAmount) where[amtAttr][Op.gte] = Number(minAmount);
-      if (maxAmount) where[amtAttr][Op.lte] = Number(maxAmount);
     }
 
     const loanWhere = {};
@@ -1466,21 +1248,9 @@ const exportRepaymentsCsv = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    🔔 WEBHOOKS (mobile & bank)
-   - Added idempotency via (gateway, gatewayRef) when available
-   (These are system callbacks; no user permission checks here.)
-   ============================================================ */
-async function isDuplicateGatewayRef(kind, gatewayRef) {
-  if (!gatewayRef) return false;
-  const hasGateway = await repaymentHasColumn("gateway");
-  const hasGatewayRef = await repaymentHasColumn("gatewayRef");
-  if (!hasGateway || !hasGatewayRef) return false;
-
-  const where = { gateway: kind, gatewayRef };
-  return !!(await Repayment.findOne({ where, attributes: ["id"] }));
-}
-
+========================== */
 const webhookMobileMoney = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -1492,11 +1262,6 @@ const webhookMobileMoney = async (req, res) => {
     if (!n?.loanReference || !n.amount) {
       await t.rollback();
       return res.status(400).json({ error: "Missing loan reference or amount" });
-    }
-
-    if (await isDuplicateGatewayRef("mobile", n.gatewayRef)) {
-      await t.rollback();
-      return res.json({ ok: true, duplicate: true });
     }
 
     if (!(await loanRefSupported())) {
@@ -1524,50 +1289,34 @@ const webhookMobileMoney = async (req, res) => {
       date: n.paidAt,
     });
 
-    // Build payload guarded by schema
-    const basePayload = {
-      loanId: loan.id,
-      amountPaid: Number(n.amount),
-      paymentDate: n.paidAt?.slice(0, 10),
-      method: "mobile",
-      status: "approved",
-      applied: true,
-      currency: n.currency || loan.currency || "TZS",
-      allocation: allocations,
-    };
+    const repayment = await Repayment.create(
+      {
+        loanId: loan.id,
+        amountPaid: Number(n.amount),
+        paymentDate: n.paidAt?.slice(0, 10),
+        method: "mobile",
+        status: "approved",
+        applied: true,
+        currency: n.currency || loan.currency || "TZS",
+        gateway: n.gateway || "mobile",
+        gatewayRef: n.gatewayRef || null,
+        reference: `MM-${n.gatewayRef || Date.now()}`,
+        allocation: allocations,
+      },
+      { transaction: t }
+    );
 
-    // Optional gateway fields
-    if (await repaymentHasColumn("gateway")) basePayload.gateway = n.gateway || "mobile";
-    if (await repaymentHasColumn("gatewayRef")) basePayload.gatewayRef = n.gatewayRef || null;
-
-    // Optional reference
-    if (await repaymentHasColumn("reference")) {
-      basePayload.reference = `MM-${n.gatewayRef || Date.now()}`;
-    }
-
-    const repayment = await Repayment.create(basePayload, { transaction: t });
-
-    await applyAllocationToSchedule({
-      loanId: loan.id,
-      allocations,
-      asOfDate: n.paidAt,
-      t,
-      sign: +1,
-    });
+    await applyAllocationToSchedule({ loanId: loan.id, allocations, asOfDate: n.paidAt, t, sign: +1 });
     await updateLoanFinancials(loan, +Number(n.amount), t);
 
     await t.commit();
 
     // Savings after commit
-    const refToUse =
-      (await repaymentHasColumn("reference")) && repayment.reference
-        ? repayment.reference
-        : `MM-${n.gatewayRef || repayment.id}`;
     await createSavingsDepositSafely({
       borrowerId: loan.borrowerId,
       amount: Number(n.amount),
       date: n.paidAt?.slice(0, 10),
-      reference: refToUse,
+      reference: repayment.reference,
       narrative: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`,
     });
 
@@ -1599,11 +1348,6 @@ const webhookBank = async (req, res) => {
       return res.status(400).json({ error: "Missing loan reference or amount" });
     }
 
-    if (await isDuplicateGatewayRef("bank", n.gatewayRef)) {
-      await t.rollback();
-      return res.json({ ok: true, duplicate: true });
-    }
-
     if (!(await loanRefSupported())) {
       await t.rollback();
       return res
@@ -1629,50 +1373,33 @@ const webhookBank = async (req, res) => {
       date: n.paidAt,
     });
 
-    // Build payload guarded by schema
-    const basePayload = {
-      loanId: loan.id,
-      amountPaid: Number(n.amount),
-      paymentDate: n.paidAt?.slice(0, 10),
-      method: "bank",
-      status: "approved",
-      applied: true,
-      currency: n.currency || loan.currency || "TZS",
-      allocation: allocations,
-    };
+    const repayment = await Repayment.create(
+      {
+        loanId: loan.id,
+        amountPaid: Number(n.amount),
+        paymentDate: n.paidAt?.slice(0, 10),
+        method: "bank",
+        status: "approved",
+        applied: true,
+        currency: n.currency || loan.currency || "TZS",
+        gateway: "bank",
+        gatewayRef: n.gatewayRef || null,
+        reference: `BK-${n.gatewayRef || Date.now()}`,
+        allocation: allocations,
+      },
+      { transaction: t }
+    );
 
-    // Optional gateway fields
-    if (await repaymentHasColumn("gateway")) basePayload.gateway = "bank";
-    if (await repaymentHasColumn("gatewayRef")) basePayload.gatewayRef = n.gatewayRef || null;
-
-    // Optional reference
-    if (await repaymentHasColumn("reference")) {
-      basePayload.reference = `BK-${n.gatewayRef || Date.now()}`;
-    }
-
-    const repayment = await Repayment.create(basePayload, { transaction: t });
-
-    await applyAllocationToSchedule({
-      loanId: loan.id,
-      allocations,
-      asOfDate: n.paidAt,
-      t,
-      sign: +1,
-    });
+    await applyAllocationToSchedule({ loanId: loan.id, allocations, asOfDate: n.paidAt, t, sign: +1 });
     await updateLoanFinancials(loan, +Number(n.amount), t);
 
     await t.commit();
 
-    // Savings after commit
-    const refToUse =
-      (await repaymentHasColumn("reference")) && repayment.reference
-        ? repayment.reference
-        : `BK-${n.gatewayRef || repayment.id}`;
     await createSavingsDepositSafely({
       borrowerId: loan.borrowerId,
       amount: Number(n.amount),
       date: n.paidAt?.slice(0, 10),
-      reference: refToUse,
+      reference: repayment.reference,
       narrative: `Loan repayment deposit (bank) for ${loan.reference || loan.id}`,
     });
 
@@ -1691,9 +1418,9 @@ const webhookBank = async (req, res) => {
   }
 };
 
-/* ============================================================
+/* ==========================
    ✏️ UPDATE & DELETE (compat)
-   ============================================================ */
+========================== */
 const updateRepayment = async (req, res) => {
   try {
     const repayment = await Repayment.findByPk(req.params.id);
@@ -1701,19 +1428,9 @@ const updateRepayment = async (req, res) => {
 
     const body = { ...req.body };
     const attrs = (Repayment && Repayment.rawAttributes) || {};
-
-    // Guard common date field variants by schema
     if (body.date && !("date" in attrs)) delete body.date;
     if (body.paymentDate && !("paymentDate" in attrs)) delete body.paymentDate;
     if (body.paidAt && !("paidAt" in attrs)) delete body.paidAt;
-
-    // Don't allow changing loanId via this endpoint (safer)
-    if ("loanId" in body) delete body.loanId;
-
-    // Strip any attributes not on the model
-    for (const k of Object.keys(body)) {
-      if (!(k in attrs)) delete body[k];
-    }
 
     await repayment.update(body);
     res.json(repayment);
@@ -1724,46 +1441,36 @@ const updateRepayment = async (req, res) => {
 };
 
 const deleteRepayment = async (req, res) => {
-  // Soft-delete via void logic (reversible and keeps audit)
   return voidRepayment(req, res);
 };
 
-/* ============================================================
+/* ==========================
    EXPORTS
-   ============================================================ */
+========================== */
 module.exports = {
-  // list & fetch
+  // core
   getAllRepayments,
   getRepaymentsByBorrower,
   getRepaymentsByLoan,
   getRepaymentById,
-
-  // preview
   previewAllocation,
   previewAllocationQuery,
-
-  // create/update/delete
   createRepayment,
   updateRepayment,
   deleteRepayment,
-
   // bulk & csv
   createBulkRepayments,
   uploadRepaymentsCsv,
-
   // approvals
   listPendingApprovals,
   approveRepayment,
   rejectRepayment,
-
   // void
   voidRepayment,
-
   // reports
   getRepaymentsSummary,
   getRepaymentsTimeSeries,
   exportRepaymentsCsv,
-
   // webhooks
   webhookMobileMoney,
   webhookBank,
