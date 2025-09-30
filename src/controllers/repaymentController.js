@@ -753,8 +753,6 @@ async function safeFindLoanForCreate(loanId) {
   });
 }
 
-const { Transaction } = require("sequelize");
-
 /** createRepayment (robust, 25P02-proof) */
 const createRepayment = async (req, res) => {
   // NOTE: your hasPermission() currently allows permissive mode while testing

@@ -1146,10 +1146,19 @@ app.use('/api/admin/tenants', tenantsCompatRoutes);
 app.use('/api/banks', ...auth, ...active, bankRoutes);
 
 /* ✅ Compat for Comments & Repayments (mounted BEFORE real routers) */
+/* ✅ Repayments + Comments: REAL first, then compat (compat has NO entitlement guard) */
 const commentsCompatRoutes   = makeCommentsCompatRouter();
 const repaymentsCompatRoutes = makeRepaymentsCompatRouter();
-app.use('/api/comments',   ...auth, ...active, commentsCompatRoutes);
-app.use('/api/repayments', ...auth, ...active, ...ent('loans'), repaymentsCompatRoutes);
+
+/* REAL repayments routes (with entitlement) */
+app.use('/api/repayments',     ...auth, ...active, ...ent('loans'), repaymentRoutes);
+
+/* COMPAT repayments routes (fallback only, NO entitlement here) */
+app.use('/api/repayments',     ...auth, ...active,                 repaymentsCompatRoutes);
+
+/* Comments (real then compat if you ever add a real comments router later) */
+app.use('/api/comments',       ...auth, ...active,                 commentRoutes);
+app.use('/api/comments',       ...auth, ...active,                 commentsCompatRoutes);
 
 /* Feature modules with guards (no-op if guards missing) */
 app.use('/api/borrowers',      ...auth, ...active, borrowerRoutes);
