@@ -410,76 +410,100 @@ async function computeAllocations({
   return { allocations, totals };
 }
 
+// add near the other helpers at the top of repaymentController.js
+function scheduleAttrMap() {
+  const ra = (LoanSchedule && LoanSchedule.rawAttributes) || {};
+  const has = (k) => !!ra[k];
+  // prefer camelCase attribute names first; fall back to underscored if that’s how the model was defined
+  return {
+    principalPaid: has('principalPaid') ? 'principalPaid' : (has('principal_paid') ? 'principal_paid' : null),
+    interestPaid:  has('interestPaid')  ? 'interestPaid'  : (has('interest_paid')  ? 'interest_paid'  : null),
+    feesPaid:      has('feesPaid')      ? 'feesPaid'      : (has('fees_paid')      ? 'fees_paid'      : null),
+    penaltiesPaid: has('penaltiesPaid') ? 'penaltiesPaid' : (has('penalties_paid') ? 'penalties_paid' : (has('penaltyPaid') ? 'penaltyPaid' : null)),
+    paid:          has('paid')          ? 'paid'          : (has('amountPaid')     ? 'amountPaid'     : null),
+    status:        has('status')        ? 'status'        : null,
+  };
+}
+
+// ⬇️ REPLACE your existing function with this one
 async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sign = +1 }) {
   if (!LoanSchedule || !allocations?.length) return;
+
+  const AM = scheduleAttrMap();
 
   for (const line of allocations) {
     const row = await LoanSchedule.findOne({
       where: { loanId, period: line.period },
       transaction: t,
-      lock: t?.LOCK?.UPDATE, // row-level lock inside tx
+      lock: t?.LOCK?.UPDATE,
     });
     if (!row) continue;
 
     const rem = remainingFromRow(row);
 
-    const wantP = round2(Number(line.principal || 0) * sign);
-    const wantI = round2(Number(line.interest || 0) * sign);
-    const wantF = round2(Number(line.fees || 0) * sign);
+    const wantP   = round2(Number(line.principal || 0) * sign);
+    const wantI   = round2(Number(line.interest  || 0) * sign);
+    const wantF   = round2(Number(line.fees      || 0) * sign);
     const wantPen = round2(Number(line.penalties || 0) * sign);
 
-    const capP = sign > 0 ? rem.principal : Math.min(Number(row.principalPaid || 0), Math.abs(wantP));
-    const capI = sign > 0 ? rem.interest : Math.min(Number(row.interestPaid || 0), Math.abs(wantI));
-    const capF = sign > 0 ? rem.fees : Math.min(Number(row.feesPaid || 0), Math.abs(wantF));
-    const capPen = sign > 0 ? rem.penalties : Math.min(Number(row.penaltiesPaid || 0), Math.abs(wantPen));
+    const capP   = sign > 0 ? rem.principal  : Math.min(Number(row.principalPaid  || row.principal_paid  || 0), Math.abs(wantP));
+    const capI   = sign > 0 ? rem.interest   : Math.min(Number(row.interestPaid   || row.interest_paid   || 0), Math.abs(wantI));
+    const capF   = sign > 0 ? rem.fees       : Math.min(Number(row.feesPaid       || row.fees_paid       || 0), Math.abs(wantF));
+    const capPen = sign > 0 ? rem.penalties  : Math.min(Number(row.penaltiesPaid  || row.penalties_paid  || row.penaltyPaid || 0), Math.abs(wantPen));
 
-    const dP = round2(sign > 0 ? Math.min(Math.abs(wantP), capP) : -Math.min(Math.abs(wantP), capP));
-    const dI = round2(sign > 0 ? Math.min(Math.abs(wantI), capI) : -Math.min(Math.abs(wantI), capI));
-    const dF = round2(sign > 0 ? Math.min(Math.abs(wantF), capF) : -Math.min(Math.abs(wantF), capF));
+    const dP   = round2(sign > 0 ? Math.min(Math.abs(wantP),   capP)   : -Math.min(Math.abs(wantP),   capP));
+    const dI   = round2(sign > 0 ? Math.min(Math.abs(wantI),   capI)   : -Math.min(Math.abs(wantI),   capI));
+    const dF   = round2(sign > 0 ? Math.min(Math.abs(wantF),   capF)   : -Math.min(Math.abs(wantF),   capF));
     const dPen = round2(sign > 0 ? Math.min(Math.abs(wantPen), capPen) : -Math.min(Math.abs(wantPen), capPen));
 
-    const newPrincipalPaid = max0(round2((row.principalPaid || 0) + dP));
-    const newInterestPaid = max0(round2((row.interestPaid || 0) + dI));
-    const newFeesPaid = max0(round2((row.feesPaid || 0) + dF));
-    const newPenaltiesPaid = max0(round2((row.penaltiesPaid || 0) + dPen));
+    // read current values from either camel or underscored fields
+    const curP   = Number(row.principalPaid  ?? row.principal_paid  ?? 0);
+    const curI   = Number(row.interestPaid   ?? row.interest_paid   ?? 0);
+    const curF   = Number(row.feesPaid       ?? row.fees_paid       ?? 0);
+    const curPen = Number(row.penaltiesPaid  ?? row.penalties_paid  ?? row.penaltyPaid ?? 0);
+    const curPaid= Number(row.paid           ?? row.amountPaid      ?? 0);
+
+    const newPrincipalPaid  = max0(round2(curP   + dP));
+    const newInterestPaid   = max0(round2(curI   + dI));
+    const newFeesPaid       = max0(round2(curF   + dF));
+    const newPenaltiesPaid  = max0(round2(curPen + dPen));
 
     const incSum = round2(
-      (newPrincipalPaid - (row.principalPaid || 0)) +
-        (newInterestPaid - (row.interestPaid || 0)) +
-        (newFeesPaid - (row.feesPaid || 0)) +
-        (newPenaltiesPaid - (row.penaltiesPaid || 0))
+      (newPrincipalPaid - curP) +
+      (newInterestPaid  - curI) +
+      (newFeesPaid      - curF) +
+      (newPenaltiesPaid - curPen)
     );
 
-    const rawPaid = round2((row.paid || 0) + incSum);
     const total = Number(
       row.total != null
         ? row.total
-        : (row.principal || 0) +
-            (row.interest || 0) +
-            (row.fees || 0) +
-            (row.penalties || row.penalty || 0)
+        : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || row.penalty || 0)
     );
 
+    const rawPaid = round2(curPaid + incSum);
     const newPaid = Math.min(Math.max(0, rawPaid), total);
 
-    const status =
+    const statusVal =
       newPaid >= total - 0.01
-        ? "paid"
+        ? 'paid'
         : new Date(row.dueDate) < new Date(asOfDate || new Date())
-        ? "overdue"
-        : "upcoming";
+        ? 'overdue'
+        : 'upcoming';
 
-    await row.update(
-      {
-        principalPaid: round2(newPrincipalPaid),
-        interestPaid: round2(newInterestPaid),
-        feesPaid: round2(newFeesPaid),
-        penaltiesPaid: round2(newPenaltiesPaid),
-        paid: round2(newPaid),
-        status,
-      },
-      { transaction: t }
-    );
+    // 👉 Build payload *only with attributes that exist* on this model
+    const payload = {};
+    if (AM.principalPaid)  payload[AM.principalPaid]  = newPrincipalPaid;
+    if (AM.interestPaid)   payload[AM.interestPaid]   = newInterestPaid;
+    if (AM.feesPaid)       payload[AM.feesPaid]       = newFeesPaid;
+    if (AM.penaltiesPaid)  payload[AM.penaltiesPaid]  = newPenaltiesPaid;
+    if (AM.paid)           payload[AM.paid]           = round2(newPaid);
+    if (AM.status)         payload[AM.status]         = statusVal;
+
+    // If nothing is mappable, skip update to avoid 42703
+    if (Object.keys(payload).length === 0) continue;
+
+    await row.update(payload, { transaction: t });
   }
 }
 
