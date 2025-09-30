@@ -18,6 +18,23 @@ const hasSavings = !!SavingsTransaction;
 const Notifier = require("../services/notifier")({ Communication, Borrower });
 const Gateway = require("../services/paymentGateway")();
 
+/* ------------------------------------------------------------
+   Permission helper (permission-first, role-fallback)
+   ------------------------------------------------------------ */
+function hasPermission(req, action, fallbackRoles = []) {
+  const perms = Array.isArray(req.user?.permissions) ? req.user.permissions : null;
+  if (perms && perms.length) {
+    return perms.includes(action);
+  }
+  // Fallback to roles until you fully roll out permissions
+  const allow = fallbackRoles.map((r) => String(r).toLowerCase());
+  const primary = String(req.user?.role || "").toLowerCase();
+  const all = Array.isArray(req.user?.roles)
+    ? req.user.roles.map((r) => String(r).toLowerCase())
+    : [];
+  return allow.length === 0 || allow.includes(primary) || all.some((r) => allow.includes(r));
+}
+
 /* ============================================================
    SCHEMA PROBE + SAFE ATTRIBUTE PICKERS
    ============================================================ */
@@ -733,15 +750,20 @@ async function createSavingsDepositSafely({
 
 /* ============================================================
    💰 CREATE (manual, immediate post)
+   ------------------------------------------------------------
+   Permission: "repayments:create:manual"
+   Role fallback (until permissions are fully set up):
+   ["admin", "loanofficer", "loan_officer", "loan-officer"]
    ============================================================ */
 const createRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const role = String(req.user?.role || "").toLowerCase();
-    const allowed = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!allowed.includes(role)) {
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!hasPermission(req, "repayments:create:manual", allowedRoles)) {
       await t.rollback();
-      return res.status(403).json({ error: "Not permitted to create repayments" });
+      return res
+        .status(403)
+        .json({ error: "Access denied: missing permission 'repayments:create:manual' or sufficient role" });
     }
 
     const {
@@ -858,15 +880,18 @@ const createRepayment = async (req, res) => {
 
 /* ============================================================
    ✨ BULK JSON (PENDING rows)
+   Permission: "repayments:bulk:create"
+   Fallback roles: admin, loanofficer
    ============================================================ */
 const createBulkRepayments = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const role = String(req.user?.role || "").toLowerCase();
-    const allowed = ["admin", "loanofficer", "loan_officer", "loan-officer"];
-    if (!allowed.includes(role)) {
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!hasPermission(req, "repayments:bulk:create", allowedRoles)) {
       await t.rollback();
-      return res.status(403).json({ error: "Not permitted" });
+      return res
+        .status(403)
+        .json({ error: "Access denied: missing permission 'repayments:bulk:create' or sufficient role" });
     }
 
     const itemsInput = Array.isArray(req.body)
@@ -951,7 +976,8 @@ const createBulkRepayments = async (req, res) => {
 
 /* ============================================================
    📄 CSV UPLOAD (PENDING rows)
-   NOTE: simple CSV parsing (no embedded commas/quotes).
+   Permission: "repayments:csv:upload"
+   Fallback roles: admin, loanofficer
    ============================================================ */
 const parseCsvBuffer = async (buffer) => {
   const text = buffer.toString("utf8");
@@ -971,6 +997,14 @@ const parseCsvBuffer = async (buffer) => {
 const uploadRepaymentsCsv = async (req, res) => {
   const t = await sequelize.transaction();
   try {
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!hasPermission(req, "repayments:csv:upload", allowedRoles)) {
+      await t.rollback();
+      return res
+        .status(403)
+        .json({ error: "Access denied: missing permission 'repayments:csv:upload' or sufficient role" });
+    }
+
     let buf = null;
     if (req.file?.buffer) buf = req.file.buffer;
     else if (req.file?.path) buf = fs.readFileSync(req.file.path);
@@ -1036,9 +1070,21 @@ const uploadRepaymentsCsv = async (req, res) => {
 
 /* ============================================================
    ✅ APPROVALS
+   Permissions:
+     - list:   "repayments:approve:list"
+     - approve:"repayments:approve"
+     - reject: "repayments:reject"
+   Fallback roles: admin, loanofficer
    ============================================================ */
 const listPendingApprovals = async (req, res) => {
   try {
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!hasPermission(req, "repayments:approve:list", allowedRoles)) {
+      return res
+        .status(403)
+        .json({ error: "Access denied: missing permission 'repayments:approve:list' or sufficient role" });
+    }
+
     const items = await Repayment.findAll({
       where: { status: "pending" },
       include: [await loanInclude()],
@@ -1054,6 +1100,14 @@ const listPendingApprovals = async (req, res) => {
 const approveRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!hasPermission(req, "repayments:approve", allowedRoles)) {
+      await t.rollback();
+      return res
+        .status(403)
+        .json({ error: "Access denied: missing permission 'repayments:approve' or sufficient role" });
+    }
+
     const repayment = await Repayment.findByPk(req.params.id, {
       include: [await loanInclude({ needAmounts: true })],
       transaction: t,
@@ -1126,6 +1180,13 @@ const approveRepayment = async (req, res) => {
 
 const rejectRepayment = async (req, res) => {
   try {
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!hasPermission(req, "repayments:reject", allowedRoles)) {
+      return res
+        .status(403)
+        .json({ error: "Access denied: missing permission 'repayments:reject' or sufficient role" });
+    }
+
     const repayment = await Repayment.findByPk(req.params.id);
     if (!repayment) return res.status(404).json({ error: "Repayment not found" });
     if (repayment.status !== "pending")
@@ -1141,10 +1202,20 @@ const rejectRepayment = async (req, res) => {
 
 /* ============================================================
    🚫 VOID / REVERSE (applied rows)
+   Permission: "repayments:void"
+   Fallback roles: admin, loanofficer
    ============================================================ */
 const voidRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!hasPermission(req, "repayments:void", allowedRoles)) {
+      await t.rollback();
+      return res
+        .status(403)
+        .json({ error: "Access denied: missing permission 'repayments:void' or sufficient role" });
+    }
+
     const repayment = await Repayment.findByPk(req.params.id, {
       include: [await loanInclude({ needAmounts: true })],
       transaction: t,
@@ -1196,6 +1267,7 @@ const voidRepayment = async (req, res) => {
 
 /* ============================================================
    📊 REPORTS
+   (read-only — no extra permission guard here)
    ============================================================ */
 const getRepaymentsSummary = async (req, res) => {
   try {
@@ -1289,10 +1361,18 @@ const getRepaymentsTimeSeries = async (req, res) => {
 
 /* ============================================================
    📤 EXPORT CSV
-   - Added same filters as list (method, min/maxAmount)
+   Permission: "repayments:export"
+   Fallback roles: admin, loanofficer
    ============================================================ */
 const exportRepaymentsCsv = async (req, res) => {
   try {
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    if (!hasPermission(req, "repayments:export", allowedRoles)) {
+      return res
+        .status(403)
+        .json({ error: "Access denied: missing permission 'repayments:export' or sufficient role" });
+    }
+
     const {
       q = "",
       loanId,
@@ -1389,6 +1469,7 @@ const exportRepaymentsCsv = async (req, res) => {
 /* ============================================================
    🔔 WEBHOOKS (mobile & bank)
    - Added idempotency via (gateway, gatewayRef) when available
+   (These are system callbacks; no user permission checks here.)
    ============================================================ */
 async function isDuplicateGatewayRef(kind, gatewayRef) {
   if (!gatewayRef) return false;
