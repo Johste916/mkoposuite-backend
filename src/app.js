@@ -1099,7 +1099,6 @@ app.use('/api/tenants', tenantsCompatRoutes);
 app.use('/api/system/tenants', tenantsCompatRoutes);
 app.use('/api/orgs', tenantsCompatRoutes);
 app.use('/api/organizations', tenantsCompatRoutes);
-/* ⛳️ CHANGED: removed early '/api/admin/tenants' compat mount here to avoid shadowing */
 
 /* ✅ Tenant feature bridge BEFORE canonical tenants to avoid shadowing */
 app.use('/api/tenants', ...auth, ...active, tenantFeatureRoutes);
@@ -1139,26 +1138,24 @@ app.use('/api/support', ...auth, ...active, supportRoutes);
 
 /* Super-admin tenant console — mount REAL routes first */
 app.use('/api/admin/tenants', adminTenantsRoutes);
-/* ⛳️ CHANGED: mount compat AFTER so it only catches gaps */
+/* Mount compat AFTER so it only catches gaps */
 app.use('/api/admin/tenants', tenantsCompatRoutes);
 
 /* ✅ NEW: Banks (use initialized router to avoid double require) */
 app.use('/api/banks', ...auth, ...active, bankRoutes);
 
-/* ✅ Compat for Comments & Repayments (mounted BEFORE real routers) */
-/* ✅ Repayments + Comments: REAL first, then compat (compat has NO entitlement guard) */
+/* ✅ Repayments & Comments — REAL first, then COMPAT fallback (no duplicates) */
 const commentsCompatRoutes   = makeCommentsCompatRouter();
 const repaymentsCompatRoutes = makeRepaymentsCompatRouter();
 
 /* REAL repayments routes (with entitlement) */
-app.use('/api/repayments',     ...auth, ...active, ...ent('loans'), repaymentRoutes);
+app.use('/api/repayments', ...auth, ...active, ...ent('loans'), repaymentRoutes);
+/* COMPAT repayments routes (fallback only) */
+app.use('/api/repayments', ...auth, ...active, repaymentsCompatRoutes);
 
-/* COMPAT repayments routes (fallback only, NO entitlement here) */
-app.use('/api/repayments',     ...auth, ...active,                 repaymentsCompatRoutes);
-
-/* Comments (real then compat if you ever add a real comments router later) */
-app.use('/api/comments',       ...auth, ...active,                 commentRoutes);
-app.use('/api/comments',       ...auth, ...active,                 commentsCompatRoutes);
+/* Comments (real router if present, then compat fallback) */
+app.use('/api/comments', ...auth, ...active, commentRoutes);
+app.use('/api/comments', ...auth, ...active, commentsCompatRoutes);
 
 /* Feature modules with guards (no-op if guards missing) */
 app.use('/api/borrowers',      ...auth, ...active, borrowerRoutes);
@@ -1167,12 +1164,9 @@ app.use('/api/dashboard',      ...auth, ...active, dashboardRoutes);
 app.use('/api/savings',        ...auth, ...active, ...ent('savings'),     savingsRoutes);
 app.use('/api/savings/transactions', ...auth, ...active, ...ent('savings'), savingsTransactionsRoutes);
 app.use('/api/disbursements',  ...auth, ...active, ...ent('loans'),       disbursementRoutes);
-app.use('/api/repayments',     ...auth, ...active, ...ent('loans'),       repaymentRoutes);
+/* ⛳ removed duplicate /api/repayments mounts here to avoid shadowing */
 app.use('/api/reports',        ...auth, ...active, reportRoutes);
 app.use('/api/settings',       ...auth, ...active, settingRoutes);
-
-/* ✅ NEW: Comments (loan notes) */
-app.use('/api/comments',       ...auth, ...active, commentRoutes);
 
 /* Admin/ACL */
 app.use('/api/admin/staff',     ...auth, ...active, adminStaffRoutes);
@@ -1186,7 +1180,7 @@ app.use('/api/admin/types',      ...auth, ...active, adminTypesRoutes);
 app.use('/api/admin/templates',  ...auth, ...active, adminTemplatesRoutes);
 
 /* Other core mounts */
-app.use('/api/users',          ...auth, ...active, userRoutes);   // ← now tries plural then singular
+app.use('/api/users',          ...auth, ...active, userRoutes);
 app.use('/api/roles',          ...auth, ...active, roleRoutes);
 app.use('/api/branches',       ...auth, ...active, branchRoutes);
 app.use('/api/user-roles',     ...auth, ...active, userRoleRoutes);
