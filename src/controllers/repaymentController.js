@@ -753,8 +753,11 @@ async function safeFindLoanForCreate(loanId) {
   });
 }
 
+const { Transaction } = require("sequelize");
+
+/** createRepayment (robust, 25P02-proof) */
 const createRepayment = async (req, res) => {
-  // NOTE: Permission is bypassed while PERMISSIVE_REPAYMENTS = true
+  // NOTE: your hasPermission() currently allows permissive mode while testing
   const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
   if (!hasPermission(req, "repayments:create:manual", allowedRoles)) {
     return res
@@ -779,70 +782,103 @@ const createRepayment = async (req, res) => {
     return res.status(400).json({ error: "loanId, amount and date are required" });
   }
 
-  // Validate loan OUTSIDE the transaction (prevents masked 25P02)
+  // -------- 0) Validate loan OUTSIDE tx (prevents tx abort masking) --------
   const loanPre = await safeFindLoanForCreate(loanId);
   if (!loanPre) return res.status(404).json({ error: "Loan not found" });
 
+  // Precompute allocations OUTSIDE tx (read-only)
+  const { allocations, totals } = await computeAllocations({
+    loanId,
+    amount,
+    date,
+    strategy,
+    customOrder,
+    waivePenalties,
+  });
+
+  // Build payload, strip fields not in model
+  const rawPayload = {
+    loanId,
+    amountPaid: Number(amount),
+    paymentDate: date,
+    method,
+    reference: reference || null,
+    notes: notes || null,
+    allocation: allocations,
+    currency: loanPre.currency || "TZS",
+    status: "approved",
+    applied: true,
+    postedBy: req.user?.id,
+    postedByName: req.user?.name,
+    postedByEmail: req.user?.email,
+  };
+  const attrs = (Repayment && Repayment.rawAttributes) || {};
+  for (const k of Object.keys(rawPayload)) if (!(k in attrs)) delete rawPayload[k];
+
+  // -------- 1) Pre-VALIDATE the model instance before starting tx ----------
+  try {
+    const draft = Repayment.build(rawPayload);
+    await draft.validate(); // catches NOT NULL / type / custom validators now
+  } catch (e) {
+    const msg = e?.errors?.[0]?.message || e?.message || "Validation failed";
+    return res.status(422).json({ error: `Repayment validation error: ${msg}` });
+  }
+
   try {
     const result = await sequelize.transaction(
-      {
-        isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
-      },
+      { isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED },
       async (t) => {
-        // Re-fetch INSIDE tx & LOCK ONLY the Loan row (no join while locking)
-        const loan = await Loan.findByPk(loanId, {
-          attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
-          transaction: t,
-          lock: t.LOCK.UPDATE,
-        });
-        if (!loan) throw new Error("Loan not found");
+        // -------- 2) Re-fetch & LOCK just the Loan row (no joins during lock) ------
+        let loan;
+        try {
+          loan = await Loan.findByPk(loanId, {
+            attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+          });
+        } catch (lockErr) {
+          // fall back without lock if dialect/driver complains
+          loan = await Loan.findByPk(loanId, {
+            attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
+            transaction: t,
+          });
+        }
+        if (!loan) throw new Error("Loan not found (during tx)");
 
-        // Compute allocations (read-only outside tx is fine, but harmless here)
-        const { allocations, totals } = await computeAllocations({
-          loanId,
-          amount,
-          date,
-          strategy,
-          customOrder,
-          waivePenalties,
-        });
+        // -------- 3) Create repayment --------------------------------------------
+        let repayment;
+        try {
+          repayment = await Repayment.create(rawPayload, { transaction: t });
+        } catch (e) {
+          e._where = "create-repayment";
+          throw e;
+        }
 
-        // Build payload guarded by schema
-        const payload = {
-          loanId,
-          amountPaid: Number(amount),
-          paymentDate: date,
-          method,
-          reference: reference || null,
-          notes: notes || null,
-          allocation: allocations,
-          currency: loan.currency || "TZS",
-          status: "approved",
-          applied: true,
-          postedBy: req.user?.id,
-          postedByName: req.user?.name,
-          postedByEmail: req.user?.email,
-        };
+        // -------- 4) Apply allocation to schedule -------------------------------
+        try {
+          await applyAllocationToSchedule({
+            loanId,
+            allocations,
+            asOfDate: date,
+            t,
+            sign: +1,
+          });
+        } catch (e) {
+          e._where = "apply-allocation";
+          throw e;
+        }
 
-        // Strip attributes not in model (prevents constraint errors)
-        const attrs = (Repayment && Repayment.rawAttributes) || {};
-        for (const k of Object.keys(payload)) if (!(k in attrs)) delete payload[k];
+        // -------- 5) Update loan aggregates -------------------------------------
+        try {
+          await updateLoanFinancials(loan, +Number(amount), t);
+        } catch (e) {
+          e._where = "update-loan";
+          throw e;
+        }
 
-        const repayment = await Repayment.create(payload, { transaction: t });
-
-        // Apply allocation and update aggregates atomically
-        await applyAllocationToSchedule({
-          loanId,
-          allocations,
-          asOfDate: date,
-          t,
-          sign: +1,
-        });
-        await updateLoanFinancials(loan, +Number(amount), t);
-
-        // Defer side-effects until AFTER COMMIT
+        // -------- 6) After-commit side-effects (no DB tx contamination) ---------
         t.afterCommit(async () => {
-          const refForSavings = repayment.reference || reference || `RCPT-${repayment.id}`;
+          const refForSavings = (repayment && repayment.reference) || reference || `RCPT-${repayment?.id || ""}`;
           await createSavingsDepositSafely({
             borrowerId: loan.borrowerId,
             amount: Number(amount),
@@ -851,7 +887,7 @@ const createRepayment = async (req, res) => {
             narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
           });
 
-          // Fetch borrower for notification (separate read; not in tx)
+          // reload with borrower for notification
           const fullLoan = await Loan.findByPk(loanId, {
             attributes: await pickExistingLoanAttributes(LOAN_BASE_ATTRS),
             include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
@@ -865,32 +901,30 @@ const createRepayment = async (req, res) => {
           });
         });
 
-        // Return values for response (we can shape receipt outside)
-        return { repaymentId: repayment.id, allocations, totals };
+        return { repaymentId: repayment.id };
       }
     );
 
-    // Shape receipt using a fresh read (outside tx)
+    // -------- 7) Shape receipt outside tx ---------------------------------------
     const repFull = await Repayment.findByPk(result.repaymentId, {
       include: [await loanInclude()],
     });
 
     return res.status(201).json({
       repaymentId: result.repaymentId,
-      receipt: issueReceipt ? shapeReceipt(repFull, result.allocations) : undefined,
-      totals: result.totals,
+      receipt: issueReceipt ? shapeReceipt(repFull, allocations) : undefined,
+      totals,
     });
   } catch (err) {
-    // Managed transaction already rolled back — just map error cleanly
-    const VERBOSE = process.env.SQL_DEBUG === "1" || process.env.DEBUG_SQL === "1";
-    console.error("Create repayment error:", VERBOSE ? err : err?.message);
-
+    // Managed tx has already rolled back if anything failed
     const code = err?.parent?.code || err?.original?.code || err?.code;
+    const where = err?._where ? ` at ${err._where}` : "";
+    console.error(`Create repayment error${where}:`, err?.message, code || "");
+
     if (code === "23503") return res.status(422).json({ error: "Foreign key constraint failed" });
     if (code === "23502") return res.status(422).json({ error: "Missing required field" });
     if (code === "23505") return res.status(409).json({ error: "Duplicate value" });
 
-    // Common domain errors come through with message text
     return res.status(500).json({ error: err?.message || "Error saving repayment" });
   }
 };
