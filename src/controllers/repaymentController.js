@@ -758,7 +758,7 @@ async function createSavingsDepositSafely({
 const createRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer", "cashier"]; // add your role(s)
     if (!hasPermission(req, "repayments:create:manual", allowedRoles)) {
       await t.rollback();
       return res
@@ -886,7 +886,7 @@ const createRepayment = async (req, res) => {
 const createBulkRepayments = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer", "cashier"]; // add your role(s)
     if (!hasPermission(req, "repayments:bulk:create", allowedRoles)) {
       await t.rollback();
       return res
@@ -997,7 +997,7 @@ const parseCsvBuffer = async (buffer) => {
 const uploadRepaymentsCsv = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer", "cashier"]; // add your role(s)
     if (!hasPermission(req, "repayments:csv:upload", allowedRoles)) {
       await t.rollback();
       return res
@@ -1078,7 +1078,7 @@ const uploadRepaymentsCsv = async (req, res) => {
    ============================================================ */
 const listPendingApprovals = async (req, res) => {
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer", "cashier"]; // add your role(s)
     if (!hasPermission(req, "repayments:approve:list", allowedRoles)) {
       return res
         .status(403)
@@ -1100,7 +1100,7 @@ const listPendingApprovals = async (req, res) => {
 const approveRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer", "cashier"]; // add your role(s)
     if (!hasPermission(req, "repayments:approve", allowedRoles)) {
       await t.rollback();
       return res
@@ -1180,7 +1180,7 @@ const approveRepayment = async (req, res) => {
 
 const rejectRepayment = async (req, res) => {
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer", "cashier"]; // add your role(s)
     if (!hasPermission(req, "repayments:reject", allowedRoles)) {
       return res
         .status(403)
@@ -1208,7 +1208,7 @@ const rejectRepayment = async (req, res) => {
 const voidRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer", "cashier"]; // add your role(s)
     if (!hasPermission(req, "repayments:void", allowedRoles)) {
       await t.rollback();
       return res
@@ -1366,7 +1366,7 @@ const getRepaymentsTimeSeries = async (req, res) => {
    ============================================================ */
 const exportRepaymentsCsv = async (req, res) => {
   try {
-    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const allowedRoles = ["admin", "loanofficer", "loan_officer", "loan-officer", "cashier"]; // add your role(s)
     if (!hasPermission(req, "repayments:export", allowedRoles)) {
       return res
         .status(403)
