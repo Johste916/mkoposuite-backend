@@ -275,11 +275,11 @@ const shapeReceipt = (repayment, allocation = []) => {
 
 /* =========================== allocations =========================== */
 function remainingFromRow(row) {
-  const principal = max0((row.principal ?? 0) - (row.principalPaid ?? 0));
-  const interest = max0((row.interest ?? 0) - (row.interestPaid ?? 0));
-  const fees = max0((row.fees ?? 0) - (row.feesPaid ?? 0));
+  const principal = max0((row.principal ?? 0) - (row.principalPaid ?? row.principal_paid ?? 0));
+  const interest  = max0((row.interest  ?? 0) - (row.interestPaid  ?? row.interest_paid  ?? 0));
+  const fees      = max0((row.fees      ?? 0) - (row.feesPaid      ?? row.fees_paid      ?? 0));
   const penalties = max0(
-    (row.penalties ?? row.penalty ?? 0) - (row.penaltiesPaid ?? 0)
+    (row.penalties ?? row.penalty ?? 0) - (row.penaltiesPaid ?? row.penalties_paid ?? row.penaltyPaid ?? 0)
   );
 
   const total = Number(
@@ -289,18 +289,31 @@ function remainingFromRow(row) {
         (row.fees || 0) +
         (row.penalties || row.penalty || 0)
   );
-  const paid = Number(
-    row.paid ??
-      (row.principalPaid || 0) +
-        (row.interestPaid || 0) +
-        (row.feesPaid || 0) +
-        (row.penaltiesPaid || 0)
-  );
-  const totalLeft = max0(total - paid);
+
+  // If "paid" is boolean in your schema, don't treat it as a number.
+  let paid;
+  if (typeof row.paid === "boolean") {
+    paid =
+      Number(row.principalPaid  ?? row.principal_paid  ?? 0) +
+      Number(row.interestPaid   ?? row.interest_paid   ?? 0) +
+      Number(row.feesPaid       ?? row.fees_paid       ?? 0) +
+      Number(row.penaltiesPaid  ?? row.penalties_paid  ?? row.penaltyPaid ?? 0);
+  } else {
+    paid = Number(
+      row.paid ??
+      row.amountPaid ??
+      (row.principalPaid  ?? row.principal_paid  ?? 0) +
+      (row.interestPaid   ?? row.interest_paid   ?? 0) +
+      (row.feesPaid       ?? row.fees_paid       ?? 0) +
+      (row.penaltiesPaid  ?? row.penalties_paid  ?? row.penaltyPaid ?? 0)
+    );
+  }
+
+  const totalLeft = max0(total - (Number.isFinite(paid) ? paid : 0));
 
   const sumParts = principal + interest + fees + penalties;
   if (totalLeft > 0 && sumParts === 0) {
-    const guessInterest = Math.min(totalLeft, Number(row.interest || 0));
+    const guessInterest  = Math.min(totalLeft, Number(row.interest || 0));
     const guessPrincipal = max0(totalLeft - guessInterest);
     return {
       principal: guessPrincipal,
@@ -314,8 +327,8 @@ function remainingFromRow(row) {
     const ratio = totalLeft / sumParts;
     return {
       principal: round2(principal * ratio),
-      interest: round2(interest * ratio),
-      fees: round2(fees * ratio),
+      interest:  round2(interest  * ratio),
+      fees:      round2(fees      * ratio),
       penalties: round2(penalties * ratio),
       totalLeft,
     };
@@ -425,7 +438,7 @@ function scheduleAttrMap() {
   };
 }
 
-// ⬇️ REPLACE your existing function with this one
+// ⬇️ UPDATED: BOOLEAN-safe schedule updates
 async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sign = +1 }) {
   if (!LoanSchedule || !allocations?.length) return;
 
@@ -446,10 +459,10 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     const wantF   = round2(Number(line.fees      || 0) * sign);
     const wantPen = round2(Number(line.penalties || 0) * sign);
 
-    const capP   = sign > 0 ? rem.principal  : Math.min(Number(row.principalPaid  || row.principal_paid  || 0), Math.abs(wantP));
-    const capI   = sign > 0 ? rem.interest   : Math.min(Number(row.interestPaid   || row.interest_paid   || 0), Math.abs(wantI));
-    const capF   = sign > 0 ? rem.fees       : Math.min(Number(row.feesPaid       || row.fees_paid       || 0), Math.abs(wantF));
-    const capPen = sign > 0 ? rem.penalties  : Math.min(Number(row.penaltiesPaid  || row.penalties_paid  || row.penaltyPaid || 0), Math.abs(wantPen));
+    const capP   = sign > 0 ? rem.principal  : Math.min(Number(row.principalPaid  ?? row.principal_paid  ?? 0), Math.abs(wantP));
+    const capI   = sign > 0 ? rem.interest   : Math.min(Number(row.interestPaid   ?? row.interest_paid   ?? 0), Math.abs(wantI));
+    const capF   = sign > 0 ? rem.fees       : Math.min(Number(row.feesPaid       ?? row.fees_paid       ?? 0), Math.abs(wantF));
+    const capPen = sign > 0 ? rem.penalties  : Math.min(Number(row.penaltiesPaid  ?? row.penalties_paid  ?? row.penaltyPaid ?? 0), Math.abs(wantPen));
 
     const dP   = round2(sign > 0 ? Math.min(Math.abs(wantP),   capP)   : -Math.min(Math.abs(wantP),   capP));
     const dI   = round2(sign > 0 ? Math.min(Math.abs(wantI),   capI)   : -Math.min(Math.abs(wantI),   capI));
@@ -461,18 +474,18 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     const curI   = Number(row.interestPaid   ?? row.interest_paid   ?? 0);
     const curF   = Number(row.feesPaid       ?? row.fees_paid       ?? 0);
     const curPen = Number(row.penaltiesPaid  ?? row.penalties_paid  ?? row.penaltyPaid ?? 0);
-    const curPaid= Number(row.paid           ?? row.amountPaid      ?? 0);
 
     const newPrincipalPaid  = max0(round2(curP   + dP));
     const newInterestPaid   = max0(round2(curI   + dI));
     const newFeesPaid       = max0(round2(curF   + dF));
     const newPenaltiesPaid  = max0(round2(curPen + dPen));
 
-    const incSum = round2(
-      (newPrincipalPaid - curP) +
-      (newInterestPaid  - curI) +
-      (newFeesPaid      - curF) +
-      (newPenaltiesPaid - curPen)
+    // compute cumulative paid from components (works for both boolean/number "paid" schemas)
+    const compPaid = round2(
+      newPrincipalPaid +
+      newInterestPaid  +
+      newFeesPaid      +
+      newPenaltiesPaid
     );
 
     const total = Number(
@@ -481,11 +494,10 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
         : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || row.penalty || 0)
     );
 
-    const rawPaid = round2(curPaid + incSum);
-    const newPaid = Math.min(Math.max(0, rawPaid), total);
+    const newPaidNumeric = Math.min(Math.max(0, compPaid), total);
 
     const statusVal =
-      newPaid >= total - 0.01
+      newPaidNumeric >= total - 0.01
         ? 'paid'
         : new Date(row.dueDate) < new Date(asOfDate || new Date())
         ? 'overdue'
@@ -497,8 +509,20 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     if (AM.interestPaid)   payload[AM.interestPaid]   = newInterestPaid;
     if (AM.feesPaid)       payload[AM.feesPaid]       = newFeesPaid;
     if (AM.penaltiesPaid)  payload[AM.penaltiesPaid]  = newPenaltiesPaid;
-    if (AM.paid)           payload[AM.paid]           = round2(newPaid);
-    if (AM.status)         payload[AM.status]         = statusVal;
+
+    // Handle boolean-vs-numeric "paid" safely
+    if (AM.paid) {
+      const paidAttrDef   = LoanSchedule?.rawAttributes?.[AM.paid];
+      const paidIsBoolean =
+        !!paidAttrDef &&
+        String(paidAttrDef.type?.key || paidAttrDef.type || "")
+          .toUpperCase()
+          .includes("BOOLEAN");
+
+      payload[AM.paid] = paidIsBoolean ? (newPaidNumeric >= total - 0.01) : round2(newPaidNumeric);
+    }
+
+    if (AM.status) payload[AM.status] = statusVal;
 
     // If nothing is mappable, skip update to avoid 42703
     if (Object.keys(payload).length === 0) continue;
