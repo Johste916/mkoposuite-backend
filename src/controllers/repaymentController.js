@@ -83,68 +83,6 @@ async function loanRefSupported() {
   return !!cols["reference"];
 }
 
-/* ============================================================
-   LoanSchedule schema-awareness (camelCase vs snake_case)
-   ============================================================ */
-let _scheduleAttrCache = null;
-/**
- * Returns a map of logical schedule fields -> actual attribute names on the model
- * We prefer model rawAttributes (Sequelize-level names), which work for row.get()/update()
- */
-function getScheduleAttrMap() {
-  if (_scheduleAttrCache) return _scheduleAttrCache;
-
-  const ra = (LoanSchedule && LoanSchedule.rawAttributes) || {};
-
-  const pick = (...candidates) => {
-    for (const c of candidates) {
-      if (ra[c]) return c; // model attr exists
-    }
-    return null;
-  };
-
-  // Base components (both "penalties" and "penalty" variants are common)
-  const penaltiesKey = pick("penalties", "penalty", "penaltiesAmount", "penaltyAmount");
-  const penaltiesPaidKey = pick("penaltiesPaid", "penaltyPaid", "penalties_paid", "penalty_paid");
-
-  // Detect boolean vs numeric "paid" style columns
-  let paidBool = null;
-  if (ra.paid && ra.paid.type) {
-    const tkey = ra.paid.type.key || String(ra.paid.type);
-    if (/BOOLEAN/i.test(tkey)) paidBool = "paid";
-  }
-  // Numeric aggregates that some schemas use instead of boolean
-  const paidAmount =
-    pick("paidAmount", "amountPaid", "paid_amount", "amount_paid") ||
-    (!paidBool && ra.paid ? "paid" : null);
-
-  _scheduleAttrCache = {
-    // scheduled amounts
-    principal: pick("principal", "principal_amount", "principalAmount"),
-    interest: pick("interest", "interest_amount", "interestAmount"),
-    fees: pick("fees", "fee", "fees_amount", "feeAmount", "feesAmount"),
-    penalties: penaltiesKey,
-
-    // paid trackers
-    principalPaid: pick("principalPaid", "principal_paid"),
-    interestPaid: pick("interestPaid", "interest_paid"),
-    feesPaid: pick("feesPaid", "feePaid", "fees_paid", "fee_paid"),
-    penaltiesPaid: penaltiesPaidKey,
-
-    // other columns
-    period: pick("period", "installmentNo", "installment_no"),
-    dueDate: pick("dueDate", "due_date"),
-    total: pick("total", "totalDue", "total_due", "installmentAmount", "installment_amount"),
-
-    // status + "paid" variants
-    status: pick("status", "state"),
-    paidBool,
-    paidAmount,
-  };
-
-  return _scheduleAttrCache;
-}
-
 /* =============== util helpers (attr pickers) =============== */
 function repaymentDateAttr() {
   const attrs = (Repayment && Repayment.rawAttributes) || {};
@@ -173,12 +111,6 @@ function getRepaymentDateValue(r) {
 function getRepaymentAmountValue(r) {
   return Number(r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0);
 }
-
-/* ============== math helpers (robust allocation math) ============== */
-const EPS = 1e-6;
-const toNum = (n) => (Number.isFinite(+n) ? +n : 0);
-const round2 = (n) => Math.round((+n + Number.EPSILON) * 100) / 100;
-const clampNonNeg = (n) => (n > 0 ? n : 0);
 
 /* ===== Safely update loan totals (avoid touching non-existent columns) ===== */
 async function updateLoanFinancials(loan, deltaPaid, t) {
@@ -260,22 +192,18 @@ async function computeAllocations({
   customOrder,
   waivePenalties = false,
 }) {
-  const payAmount = round2(toNum(amount));
-  if (!loanId || payAmount <= 0 || !LoanSchedule) {
+  if (!loanId || !Number(amount) || !LoanSchedule) {
     return {
       allocations: [],
       totals: { principal: 0, interest: 0, fees: 0, penalties: 0 },
     };
   }
 
-  const A = getScheduleAttrMap();
-
-  // Pull schedule rows
   const schedule = await LoanSchedule.findAll({
     where: { loanId },
     order: [
-      [A.dueDate || "id", "ASC"],
-      [A.period || "id", "ASC"],
+      ["dueDate", "ASC"],
+      ["period", "ASC"],
     ],
     raw: true,
   });
@@ -287,28 +215,23 @@ async function computeAllocations({
     };
   }
 
-  // Normalize each row and compute remaining components safely
   const items = schedule.map((s, idx) => {
-    const principalDue = clampNonNeg(round2(toNum(s[A.principal]) - toNum(s[A.principalPaid])));
-    const interestDue  = clampNonNeg(round2(toNum(s[A.interest])  - toNum(s[A.interestPaid])));
-    const feesDue      = clampNonNeg(round2(toNum(s[A.fees])      - toNum(s[A.feesPaid])));
-    const penKeyValue  = A.penalties ? toNum(s[A.penalties]) : toNum(s.penalties ?? s.penalty);
-    const penPaidVal   = A.penaltiesPaid ? toNum(s[A.penaltiesPaid]) : toNum(s.penaltiesPaid ?? s.penaltyPaid);
-    const penDue       = clampNonNeg(round2(penKeyValue - penPaidVal));
-
+    const principalDue = Math.max(0, Number(s.principal || 0) - Number(s.principalPaid || 0));
+    const interestDue = Math.max(0, Number(s.interest || 0) - Number(s.interestPaid || 0));
+    const feesDue = Math.max(0, Number(s.fees || 0) - Number(s.feesPaid || 0));
+    const penDue = Math.max(0, Number(s.penalties ?? s.penalty ?? 0) - Number(s.penaltiesPaid || 0));
     return {
-      period: s[A.period] ?? idx + 1,
-      dueDate: s[A.dueDate] || s.due_date || null,
+      period: s.period ?? idx + 1,
+      dueDate: s.dueDate,
       remaining: {
-        principal: principalDue,
-        interest:  interestDue,
-        fees:      feesDue,
-        penalties: waivePenalties ? 0 : penDue,
+        principal: Number.isFinite(principalDue) ? principalDue : 0,
+        interest: Number.isFinite(interestDue) ? interestDue : 0,
+        fees: Number.isFinite(feesDue) ? feesDue : 0,
+        penalties: waivePenalties ? 0 : Number.isFinite(penDue) ? penDue : 0,
       },
     };
   });
 
-  // Decide allocation order
   let order;
   if (strategy === "principal_first") order = ["principal", "interest", "fees", "penalties"];
   else if (strategy === "interest_first") order = ["interest", "fees", "penalties", "principal"];
@@ -318,122 +241,73 @@ async function computeAllocations({
       .split(",")
       .map((x) => x.trim())
       .filter(Boolean);
-  else order = ["penalties", "interest", "fees", "principal"]; // default oldest_due_first cat order
+  else order = ["penalties", "interest", "fees", "principal"];
 
   if (waivePenalties) order = order.filter((x) => x !== "penalties");
 
-  let left = payAmount;
+  let left = Number(amount);
   const allocations = [];
   const totals = { principal: 0, interest: 0, fees: 0, penalties: 0 };
 
   for (const it of items) {
-    if (left <= EPS) break;
+    if (left <= 0) break;
     const line = { period: it.period, principal: 0, interest: 0, fees: 0, penalties: 0 };
 
     for (const cat of order) {
-      if (left <= EPS) break;
-      const need = clampNonNeg(round2(toNum(it.remaining[cat])));
-      if (need <= EPS) continue;
-
-      // take up to need, with 2dp rounding to avoid drifts
-      const take = round2(Math.min(need, left));
-      if (take <= EPS) continue;
-
-      line[cat] = round2(line[cat] + take);
-      totals[cat] = round2(totals[cat] + take);
-      it.remaining[cat] = round2(need - take);
-      left = round2(left - take);
+      if (left <= 0) break;
+      const need = Math.max(0, it.remaining[cat] || 0);
+      if (!need) continue;
+      const take = Math.min(need, left);
+      line[cat] += take;
+      totals[cat] += take;
+      it.remaining[cat] -= take;
+      left -= take;
     }
 
     if (line.principal || line.interest || line.fees || line.penalties) {
       allocations.push(line);
     }
   }
-
-  // If a cent (or less) is left because of rounding, add it to the last non-zero bucket, preferring principal
-  if (left > EPS && allocations.length) {
-    const last = allocations[allocations.length - 1];
-    const bumpCat = ["principal", "interest", "fees", "penalties"].find((k) => last[k] > 0) || "principal";
-    last[bumpCat] = round2(last[bumpCat] + left);
-    totals[bumpCat] = round2(totals[bumpCat] + left);
-    left = 0;
-  }
-
   return { allocations, totals };
 }
 
-/* =========================
-   Apply allocation to schedule (schema-aware)
-   ======================== */
 async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sign = +1 }) {
   if (!LoanSchedule || !allocations?.length) return;
 
-  const A = getScheduleAttrMap();
-
-  const updateIfExists = (obj, key, value) => {
-    if (key) obj[key] = value;
-  };
-
   for (const line of allocations) {
-    const row = await LoanSchedule.findOne({
-      where: { loanId, [A.period || "period"]: line.period },
-      transaction: t,
-    });
+    const row = await LoanSchedule.findOne({ where: { loanId, period: line.period }, transaction: t });
     if (!row) continue;
 
-    // Current values
-    const cur = {
-      principalPaid: toNum(row.get(A.principalPaid)) ,
-      interestPaid:  toNum(row.get(A.interestPaid))  ,
-      feesPaid:      toNum(row.get(A.feesPaid))      ,
-      penaltiesPaid: toNum(A.penaltiesPaid ? row.get(A.penaltiesPaid) : (row.get("penaltiesPaid") ?? row.get("penaltyPaid"))),
-      principal:     toNum(row.get(A.principal)),
-      interest:      toNum(row.get(A.interest)),
-      fees:          toNum(row.get(A.fees)),
-      penalties:     toNum(A.penalties ? row.get(A.penalties) : (row.get("penalties") ?? row.get("penalty"))),
-      total:         A.total ? toNum(row.get(A.total)) : null,
-      dueDate:       A.dueDate ? row.get(A.dueDate) : row.get("due_date"),
-    };
+    const principalPaid = Number(row.principalPaid || 0) + sign * Number(line.principal || 0);
+    const interestPaid = Number(row.interestPaid || 0) + sign * Number(line.interest || 0);
+    const feesPaid = Number(row.feesPaid || 0) + sign * Number(line.fees || 0);
+    const penaltiesPaid = Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0);
 
-    // Apply delta
-    const next = {
-      principalPaid: clampNonNeg(round2(cur.principalPaid + sign * toNum(line.principal))),
-      interestPaid:  clampNonNeg(round2(cur.interestPaid  + sign * toNum(line.interest))),
-      feesPaid:      clampNonNeg(round2(cur.feesPaid      + sign * toNum(line.fees))),
-      penaltiesPaid: clampNonNeg(round2(cur.penaltiesPaid + sign * toNum(line.penalties))),
-    };
-
-    const totalRow = cur.total != null
-      ? cur.total
-      : round2(cur.principal + cur.interest + cur.fees + cur.penalties);
-
-    const paidSum = clampNonNeg(
-      round2(next.principalPaid + next.interestPaid + next.feesPaid + next.penaltiesPaid)
+    const total = Number(
+      row.total != null
+        ? row.total
+        : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || 0)
     );
+    const paid = Math.max(0, principalPaid + interestPaid + feesPaid + penaltiesPaid);
 
-    // Status computation, only if column exists
-    let nextStatus;
-    if (A.status) {
-      const asOf = asOfDate ? new Date(asOfDate) : new Date();
-      if (paidSum >= totalRow - 0.01) nextStatus = "paid";
-      else if (cur.dueDate && new Date(cur.dueDate) < asOf) nextStatus = "overdue";
-      else nextStatus = "upcoming";
-    }
+    const status =
+      paid >= total - 0.01
+        ? "paid"
+        : new Date(row.dueDate) < new Date(asOfDate || new Date())
+        ? "overdue"
+        : "upcoming";
 
-    // Persist only columns that exist on this schema
-    const updates = {};
-    updateIfExists(updates, A.principalPaid, next.principalPaid);
-    updateIfExists(updates, A.interestPaid, next.interestPaid);
-    updateIfExists(updates, A.feesPaid, next.feesPaid);
-    if (A.penaltiesPaid) updateIfExists(updates, A.penaltiesPaid, next.penaltiesPaid);
-
-    // paidBool => boolean; paidAmount => numeric aggregate; never write numeric into boolean
-    if (A.paidBool) updates[A.paidBool] = paidSum >= totalRow - 0.01;
-    if (A.paidAmount) updates[A.paidAmount] = paidSum;
-
-    if (A.status && nextStatus) updates[A.status] = nextStatus;
-
-    await row.update(updates, { transaction: t });
+    await row.update(
+      {
+        principalPaid: Math.max(0, principalPaid),
+        interestPaid: Math.max(0, interestPaid),
+        feesPaid: Math.max(0, feesPaid),
+        penaltiesPaid: Math.max(0, penaltiesPaid),
+        paid,
+        status,
+      },
+      { transaction: t }
+    );
   }
 }
 
@@ -618,25 +492,6 @@ const previewAllocation = async (req, res) => {
   } catch (err) {
     console.error("previewAllocation error:", err);
     res.status(500).json({ error: "Preview allocation failed" });
-  }
-};
-
-// GET wrapper so /repayments/preview-allocation (GET) works with router alias
-const previewAllocationQuery = async (req, res) => {
-  try {
-    const { loanId, amount, date, strategy, customOrder, waivePenalties } = req.query || {};
-    req.body = {
-      loanId,
-      amount,
-      date,
-      strategy,
-      customOrder,
-      waivePenalties: waivePenalties === "1" || waivePenalties === "true",
-    };
-    return previewAllocation(req, res);
-  } catch (err) {
-    console.error("previewAllocationQuery error:", err);
-    res.status(500).json({ error: "Preview allocation (GET) failed" });
   }
 };
 
@@ -1455,7 +1310,6 @@ module.exports = {
   getRepaymentsByLoan,
   getRepaymentById,
   previewAllocation,
-  previewAllocationQuery, // ← added GET wrapper for router alias
   createRepayment,
   updateRepayment,
   deleteRepayment,
