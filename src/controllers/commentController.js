@@ -1,71 +1,109 @@
+// controllers/commentController.js
 'use strict';
 
-const { AuditLog, Loan } = require('../models');
+const { Op } = require('sequelize');
+const { AuditLog, sequelize } = require('../models');
 
-const ensureLoan = async (loanId) => {
-  const id = Number(loanId);
-  if (!Number.isFinite(id)) return null;
-  return Loan && (await Loan.findByPk(id));
-};
+async function auditLogHasColumns(...cols) {
+  try {
+    const qi = sequelize.getQueryInterface();
+    const desc = await qi.describeTable('audit_logs');
+    return cols.every(c => desc[c] || desc[c.toLowerCase()] || desc[c.toUpperCase()]);
+  } catch {
+    return false;
+  }
+}
 
+/**
+ * GET /api/comments/loan/:loanId
+ * Returns comments stored in AuditLog.
+ * Works whether or not entityType/entityId columns exist.
+ */
 exports.listLoanComments = async (req, res) => {
   try {
-    const loan = await ensureLoan(req.params.loanId);
-    if (!loan) return res.status(404).json({ error: 'Loan not found' });
+    const { loanId } = req.params;
+    const supportsEntityCols = await auditLogHasColumns('entity_type', 'entity_id');
 
-    if (!AuditLog || typeof AuditLog.findAll !== 'function') return res.json([]);
+    let where;
+    if (supportsEntityCols) {
+      // Newer schema (preferred)
+      where = {
+        entityType: 'Loan',
+        entityId: Number(loanId),
+        action: 'comment',
+      };
+    } else {
+      // Fallback schema: we don’t have entityType/entityId. Use category/action/message.
+      // Convention: category='loan' (or 'loans'), action='comment', message contains "#<loanId>" or JSON with loanId
+      const needle = String(loanId);
+      where = {
+        action: 'comment',
+        category: { [Op.iLike]: 'loan%' },
+        message: { [Op.iLike]: `%${needle}%` }, // message should include the loan id somewhere
+      };
+    }
 
     const rows = await AuditLog.findAll({
-      where: { entityType: 'Loan', entityId: loan.id, action: 'comment' },
+      where,
       order: [['createdAt', 'ASC']],
     });
 
-    const items = rows.map((r) => ({
+    // Map to a simple comment shape
+    const items = rows.map(r => ({
       id: r.id,
-      loanId: r.entityId,
-      text: (r.after && (r.after.text || r.after.message)) || '',
-      userId: r.userId || null,
+      loanId: Number(loanId),
+      author: r.userId ? { id: r.userId } : null,
+      content: r.message || '',
       createdAt: r.createdAt,
     }));
 
     res.json(items);
-  } catch (e) {
-    console.error('[comments] listLoanComments error:', e);
-    res.status(500).json({ error: 'Failed to load comments' });
+  } catch (err) {
+    console.error('[comments] listLoanComments error:', err);
+    // Return an empty list instead of 500 so the UI doesn’t break
+    res.status(200).json([]);
   }
 };
 
-exports.addLoanComment = async (req, res) => {
+/**
+ * POST /api/comments
+ * Body: { loanId, content }
+ */
+exports.createLoanComment = async (req, res) => {
   try {
-    const loan = await ensureLoan(req.params.loanId);
-    if (!loan) return res.status(404).json({ error: 'Loan not found' });
+    const { loanId, content } = req.body || {};
+    if (!loanId || !content) return res.status(400).json({ error: 'loanId and content are required' });
 
-    const text = (req.body && (req.body.text || req.body.message)) || '';
-    if (!text.trim()) return res.status(400).json({ error: 'text is required' });
+    const supportsEntityCols = await auditLogHasColumns('entity_type', 'entity_id');
 
-    if (!AuditLog || typeof AuditLog.create !== 'function') {
-      return res.status(501).json({ error: 'Comments not available on this deployment' });
+    const payload = {
+      userId: req.user?.id || null,
+      branchId: req.user?.branchId || null,
+      category: 'loan',
+      action: 'comment',
+      message: String(content),
+      ip: req.ip || null,
+      reversed: false,
+    };
+
+    if (supportsEntityCols) {
+      payload.entityType = 'Loan';
+      payload.entityId = Number(loanId);
+    } else {
+      // Encode the target into the message so listing can discover it
+      payload.message = `[loan:${loanId}] ${payload.message}`;
     }
 
-    const row = await AuditLog.create({
-      entityType: 'Loan',
-      entityId: loan.id,
-      action: 'comment',
-      before: null,
-      after: { text },
-      userId: req.user?.id || null,
-      ip: req.ip,
-    });
-
+    const row = await AuditLog.create(payload);
     res.status(201).json({
       id: row.id,
-      loanId: loan.id,
-      text,
-      userId: row.userId,
+      loanId: Number(loanId),
+      author: row.userId ? { id: row.userId } : null,
+      content: row.message,
       createdAt: row.createdAt,
     });
-  } catch (e) {
-    console.error('[comments] addLoanComment error:', e);
-    res.status(500).json({ error: 'Failed to add comment' });
+  } catch (err) {
+    console.error('[comments] createLoanComment error:', err);
+    res.status(500).json({ error: 'Failed to create comment' });
   }
 };

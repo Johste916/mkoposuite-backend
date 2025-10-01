@@ -279,8 +279,8 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     if (!row) continue;
 
     const principalPaid = Number(row.principalPaid || 0) + sign * Number(line.principal || 0);
-    const interestPaid = Number(row.interestPaid || 0) + sign * Number(line.interest || 0);
-    const feesPaid = Number(row.feesPaid || 0) + sign * Number(line.fees || 0);
+    const interestPaid  = Number(row.interestPaid  || 0) + sign * Number(line.interest  || 0);
+    const feesPaid      = Number(row.feesPaid      || 0) + sign * Number(line.fees      || 0);
     const penaltiesPaid = Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0);
 
     const total = Number(
@@ -292,22 +292,32 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
 
     const status =
       paid >= total - 0.01
-        ? "paid"
+        ? 'paid'
         : new Date(row.dueDate) < new Date(asOfDate || new Date())
-        ? "overdue"
-        : "upcoming";
+        ? 'overdue'
+        : 'upcoming';
 
-    await row.update(
-      {
-        principalPaid: Math.max(0, principalPaid),
-        interestPaid: Math.max(0, interestPaid),
-        feesPaid: Math.max(0, feesPaid),
-        penaltiesPaid: Math.max(0, penaltiesPaid),
-        paid,
-        status,
-      },
-      { transaction: t }
-    );
+    try {
+      await row.update(
+        {
+          principalPaid: Math.max(0, principalPaid),
+          interestPaid:  Math.max(0, interestPaid),
+          feesPaid:      Math.max(0, feesPaid),
+          penaltiesPaid: Math.max(0, penaltiesPaid),
+          paid,
+          status,
+        },
+        { transaction: t }
+      );
+    } catch (e) {
+      // Surface the *original* error; helps avoid "25P02 mystery"
+      console.error('[applyAllocationToSchedule] update failed for period', line.period, {
+        code: e?.original?.code || e?.parent?.code,
+        message: e?.original?.message || e.message,
+        sql: e?.original?.sql,
+      });
+      throw e; // keep behavior the same, but with a useful log
+    }
   }
 }
 
