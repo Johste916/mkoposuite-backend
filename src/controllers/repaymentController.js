@@ -107,6 +107,17 @@ function getScheduleAttrMap() {
   const penaltiesKey = pick("penalties", "penalty", "penaltiesAmount", "penaltyAmount");
   const penaltiesPaidKey = pick("penaltiesPaid", "penaltyPaid", "penalties_paid", "penalty_paid");
 
+  // Detect boolean vs numeric "paid" style columns
+  let paidBool = null;
+  if (ra.paid && ra.paid.type) {
+    const tkey = ra.paid.type.key || String(ra.paid.type);
+    if (/BOOLEAN/i.test(tkey)) paidBool = "paid";
+  }
+  // Numeric aggregates that some schemas use instead of boolean
+  const paidAmount =
+    pick("paidAmount", "amountPaid", "paid_amount", "amount_paid") ||
+    (!paidBool && ra.paid ? "paid" : null);
+
   _scheduleAttrCache = {
     // scheduled amounts
     principal: pick("principal", "principal_amount", "principalAmount"),
@@ -124,8 +135,11 @@ function getScheduleAttrMap() {
     period: pick("period", "installmentNo", "installment_no"),
     dueDate: pick("dueDate", "due_date"),
     total: pick("total", "totalDue", "total_due", "installmentAmount", "installment_amount"),
-    paid: pick("paid", "amountPaid", "amount_paid"),
+
+    // status + "paid" variants
     status: pick("status", "state"),
+    paidBool,
+    paidAmount,
   };
 
   return _scheduleAttrCache;
@@ -413,8 +427,9 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     updateIfExists(updates, A.feesPaid, next.feesPaid);
     if (A.penaltiesPaid) updateIfExists(updates, A.penaltiesPaid, next.penaltiesPaid);
 
-    // optional aggregate "paid" column
-    if (A.paid) updates[A.paid] = paidSum;
+    // paidBool => boolean; paidAmount => numeric aggregate; never write numeric into boolean
+    if (A.paidBool) updates[A.paidBool] = paidSum >= totalRow - 0.01;
+    if (A.paidAmount) updates[A.paidAmount] = paidSum;
 
     if (A.status && nextStatus) updates[A.status] = nextStatus;
 
@@ -603,6 +618,25 @@ const previewAllocation = async (req, res) => {
   } catch (err) {
     console.error("previewAllocation error:", err);
     res.status(500).json({ error: "Preview allocation failed" });
+  }
+};
+
+// GET wrapper so /repayments/preview-allocation (GET) works with router alias
+const previewAllocationQuery = async (req, res) => {
+  try {
+    const { loanId, amount, date, strategy, customOrder, waivePenalties } = req.query || {};
+    req.body = {
+      loanId,
+      amount,
+      date,
+      strategy,
+      customOrder,
+      waivePenalties: waivePenalties === "1" || waivePenalties === "true",
+    };
+    return previewAllocation(req, res);
+  } catch (err) {
+    console.error("previewAllocationQuery error:", err);
+    res.status(500).json({ error: "Preview allocation (GET) failed" });
   }
 };
 
@@ -1271,7 +1305,7 @@ const webhookMobileMoney = async (req, res) => {
         {
           borrowerId: loan.borrowerId,
           amount: Number(n.amount),
-        type: "deposit",
+          type: "deposit",
           narrative: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`,
           reference: repayment.reference,
           date: n.paidAt?.slice(0, 10),
@@ -1421,6 +1455,7 @@ module.exports = {
   getRepaymentsByLoan,
   getRepaymentById,
   previewAllocation,
+  previewAllocationQuery, // ← added GET wrapper for router alias
   createRepayment,
   updateRepayment,
   deleteRepayment,
