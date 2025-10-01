@@ -19,40 +19,6 @@ const Notifier = require("../services/notifier")({ Communication, Borrower });
 const Gateway = require("../services/paymentGateway")();
 
 /* ============================================================
-   OPTIONAL SYNC BUS (auto-sync to other components)
-   - Tries a few common service names; no-op if absent.
-   - Emits after a successful DB commit to avoid 25P02 noise.
-   ============================================================ */
-function safeRequire(path) {
-  try {
-    // eslint-disable-next-line import/no-dynamic-require, global-require
-    return require(path);
-  } catch (_) {
-    return null;
-  }
-}
-const Sync =
-  safeRequire("../services/syncBus") ||
-  safeRequire("../services/sync") ||
-  safeRequire("../services/integrationBus") ||
-  {};
-function afterCommit(t, fn) {
-  if (t && typeof t.afterCommit === "function") t.afterCommit(fn);
-  else fn();
-}
-function emitSync(type, payload) {
-  try {
-    if (typeof Sync.emit === "function") Sync.emit(type, payload);
-    else if (Sync.queue?.push) Sync.queue.push({ type, payload, ts: Date.now() });
-    else if (typeof Sync.publish === "function") Sync.publish(type, payload);
-    // else: no-op
-  } catch (e) {
-    // Never let sync failures affect core flow
-    console.warn("Sync emit error:", e?.message || e);
-  }
-}
-
-/* ============================================================
    SCHEMA PROBE + SAFE ATTRIBUTE PICKER
    ============================================================ */
 let _loanTableColumns = null; // { [colName]: true }
@@ -146,11 +112,7 @@ function getRepaymentAmountValue(r) {
   return Number(r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0);
 }
 
-/* ===== Safely update loan totals (avoid touching non-existent columns) =====
-   IMPORTANT: We DO NOT touch loan.status here to prevent auto-closing.
-   If you have a model hook that closes on outstanding<=0, consider reading
-   a flag from options (e.g., { context: { skipClose: true } }) in that hook.
-============================================================================= */
+/* ===== Safely update loan totals (avoid touching non-existent columns) ===== */
 async function updateLoanFinancials(loan, deltaPaid, t) {
   // deltaPaid: +amount when approving/applying; -amount when voiding/reversing
   const cols = await getLoanTableColumns();
@@ -177,8 +139,7 @@ async function updateLoanFinancials(loan, deltaPaid, t) {
   }
 
   if (Object.keys(updates).length) {
-    // NOTE: we pass a hint to any hooks to avoid auto-close logic elsewhere.
-    await loan.update(updates, { transaction: t, context: { skipClose: true } });
+    await loan.update(updates, { transaction: t });
   }
 }
 
@@ -629,25 +590,7 @@ const createRepayment = async (req, res) => {
 
     await t.commit();
 
-    // Post-commit side-effects / sync
-    afterCommit(t, () => {
-      emitSync("repayment.created", { id: repayment.id, loanId: loan.id, amount: Number(amount) });
-      emitSync("repayment.applied", {
-        id: repayment.id,
-        loanId: loan.id,
-        allocations,
-        amount: Number(amount),
-        date,
-      });
-      emitSync("loan.updated", {
-        id: loan.id,
-        // We never set status here; other listeners may decide what to do.
-        totals: { totalPaid: loan.totalPaid, outstanding: loan.outstanding },
-      });
-      emitSync("schedule.updated", { loanId: loan.id });
-    });
-
-    // Notify borrower (out of band)
+    // Notify borrower
     await Notifier.notifyBorrowerRepayment({
       borrower: loan.Borrower,
       amount: Number(amount),
@@ -745,11 +688,6 @@ const createBulkRepayments = async (req, res) => {
     }
 
     await t.commit();
-
-    afterCommit(t, () => {
-      emitSync("repayment.bulk_queued", { count: created.length, ids: created });
-    });
-
     res.status(201).json({ message: "Bulk repayments queued for approval", ids: created });
   } catch (err) {
     await t.rollback();
@@ -827,11 +765,6 @@ const uploadRepaymentsCsv = async (req, res) => {
     }
 
     await t.commit();
-
-    afterCommit(t, () => {
-      emitSync("repayment.csv_queued", { count: created.length, ids: created });
-    });
-
     res
       .status(201)
       .json({ message: "CSV uploaded, repayments queued for approval", ids: created });
@@ -911,15 +844,6 @@ const approveRepayment = async (req, res) => {
 
     await t.commit();
 
-    afterCommit(t, () => {
-      emitSync("repayment.approved", { id: repayment.id, loanId: loan.id, amount: Number(paidThis) });
-      emitSync("loan.updated", {
-        id: loan.id,
-        totals: { totalPaid: loan.totalPaid, outstanding: loan.outstanding },
-      });
-      emitSync("schedule.updated", { loanId: loan.id });
-    });
-
     await Notifier.notifyBorrowerRepayment({
       borrower: loan.Borrower,
       amount: Number(paidThis),
@@ -943,7 +867,6 @@ const rejectRepayment = async (req, res) => {
       return res.status(400).json({ error: "Repayment is not pending" });
 
     await repayment.update({ status: "rejected", applied: false });
-    emitSync("repayment.rejected", { id: repayment.id, loanId: repayment.loanId });
     res.json({ message: "Repayment rejected" });
   } catch (err) {
     console.error("rejectRepayment error:", err);
@@ -994,16 +917,6 @@ const voidRepayment = async (req, res) => {
     );
 
     await t.commit();
-
-    afterCommit(t, () => {
-      emitSync("repayment.voided", { id: repayment.id, loanId: loan.id });
-      emitSync("loan.updated", {
-        id: loan.id,
-        totals: { totalPaid: loan.totalPaid, outstanding: loan.outstanding },
-      });
-      emitSync("schedule.updated", { loanId: loan.id });
-    });
-
     res.json({ message: "Repayment voided" });
   } catch (err) {
     await t.rollback();
@@ -1258,20 +1171,6 @@ const webhookMobileMoney = async (req, res) => {
 
     await t.commit();
 
-    afterCommit(t, () => {
-      emitSync("repayment.webhook_mobile.applied", {
-        id: repayment.id,
-        loanId: loan.id,
-        amount: Number(n.amount),
-        allocations,
-      });
-      emitSync("loan.updated", {
-        id: loan.id,
-        totals: { totalPaid: loan.totalPaid, outstanding: loan.outstanding },
-      });
-      emitSync("schedule.updated", { loanId: loan.id });
-    });
-
     await Notifier.notifyBorrowerRepayment({
       borrower: loan.Borrower,
       amount: Number(n.amount),
@@ -1360,20 +1259,6 @@ const webhookBank = async (req, res) => {
 
     await t.commit();
 
-    afterCommit(t, () => {
-      emitSync("repayment.webhook_bank.applied", {
-        id: repayment.id,
-        loanId: loan.id,
-        amount: Number(n.amount),
-        allocations,
-      });
-      emitSync("loan.updated", {
-        id: loan.id,
-        totals: { totalPaid: loan.totalPaid, outstanding: loan.outstanding },
-      });
-      emitSync("schedule.updated", { loanId: loan.id });
-    });
-
     await Notifier.notifyBorrowerRepayment({
       borrower: loan.Borrower,
       amount: Number(n.amount),
@@ -1404,7 +1289,6 @@ const updateRepayment = async (req, res) => {
     if (body.paidAt && !("paidAt" in attrs)) delete body.paidAt;
 
     await repayment.update(body);
-    emitSync("repayment.updated", { id: repayment.id, loanId: repayment.loanId });
     res.json(repayment);
   } catch (err) {
     console.error("Update repayment error:", err);
