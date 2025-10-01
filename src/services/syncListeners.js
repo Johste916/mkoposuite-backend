@@ -1,22 +1,35 @@
-// backend/src/services/syncListeners.js
-"use strict";
+// services/syncListeners.js
+'use strict';
 
-const Sync = require("./syncBus");
+const { bus, EVENTS } = require('./syncBus');
 
-// Examples — add/adjust as you like. Leaving them here means the file loads cleanly.
-Sync.on("repayment.created", (evt) => {
-  // e.g., refresh dashboards/caches inside the API
-  // console.log("[listener] repayment.created", evt);
+// Optionally pull models for side effects like denormalized totals
+let models;
+try { models = require('../models'); } catch { try { models = require('../../models'); } catch {} }
+
+function log(event, data) {
+  const idPart = data?.id ? ` id=${data.id}` : '';
+  console.log(`[sync] ${event}${idPart}`);
+}
+
+/** Example listeners — keep them lightweight and idempotent */
+bus.on(EVENTS.BORROWER_UPDATED, async (payload) => {
+  log(EVENTS.BORROWER_UPDATED, payload);
+  // e.g., rebuild borrower search index, refresh aggregates, etc.
 });
 
-Sync.on("repayment.approved", (evt) => {
-  // e.g., bump metrics, recalc summaries, warm caches
-  // console.log("[listener] repayment.approved", evt);
+bus.on(EVENTS.LOAN_UPDATED, async (payload) => {
+  log(EVENTS.LOAN_UPDATED, payload);
+  // e.g., recompute cached outstanding if needed
 });
 
-Sync.on("repayment.voided", (evt) => {
-  // e.g., invalidate aggregates
-  // console.log("[listener] repayment.voided", evt);
+bus.on(EVENTS.REPAYMENT_POSTED, async (payload) => {
+  log(EVENTS.REPAYMENT_POSTED, payload);
+  // e.g., enqueue receipt email/SMS, refresh dashboards
 });
 
-// You can export nothing; requiring this file just registers listeners.
+bus.on(EVENTS.REPAYMENT_VOIDED, async (payload) => {
+  log(EVENTS.REPAYMENT_VOIDED, payload);
+});
+
+module.exports = bus; // not strictly required, but handy if you want to import the emitter
