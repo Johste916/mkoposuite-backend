@@ -951,33 +951,60 @@ const deleteLoan = async (req, res) => {
 /* ===========================
    GENERATE SCHEDULE (Preview)
 =========================== */
+/* ===========================
+   GET LOAN SCHEDULE (prefer DB; fallback to preview)
+=========================== */
 const getLoanSchedule = async (req, res) => {
   try {
     const loanId = req.params.loanId || req.params.id;
     const loan = await fetchLoanByPkSafe(loanId);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
-    const input = {
-      amount: Number(loan.amount || 0),
-      interestRate: Number(loan.interestRate || 0),
-      term: loan.termMonths,
-      issueDate: loan.startDate,
-    };
+    // 1) Prefer persisted rows (so we return paid*, balance, settled, etc.)
+    let rows = [];
+    if (LoanSchedule && (await tableExists("loan_schedules"))) {
+      try {
+        const scheduleAttrs = await getSafeScheduleAttributeNames();
+        rows = await LoanSchedule.findAll({
+          where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
+          attributes: scheduleAttrs,
+          order: [["period", "ASC"]],
+        });
+      } catch (e) {
+        console.warn(`[loans] getLoanSchedule DB fetch failed: ${e.message}`);
+      }
+    }
 
+    if (rows && rows.length) {
+      return res.json(rows);
+    }
+
+    // 2) Fallback to generated preview (first-time / no table)
     const schedule =
       loan.interestMethod === "flat"
-        ? generateFlatRateSchedule(input)
+        ? generateFlatRateSchedule({
+            amount: Number(loan.amount || 0),
+            interestRate: Number(loan.interestRate || 0),
+            term: loan.termMonths,
+            issueDate: loan.startDate,
+          })
         : loan.interestMethod === "reducing"
-        ? generateReducingBalanceSchedule(input)
+        ? generateReducingBalanceSchedule({
+            amount: Number(loan.amount || 0),
+            interestRate: Number(loan.interestRate || 0),
+            term: loan.termMonths,
+            issueDate: loan.startDate,
+          })
         : [];
 
     if (!schedule.length) return res.status(400).json({ error: "Invalid interest method" });
-    res.json(schedule);
+    return res.json(schedule);
   } catch (err) {
     console.error("Get schedule error:", err);
-    res.status(500).json({ error: "Failed to generate schedule" });
+    res.status(500).json({ error: "Failed to get schedule" });
   }
 };
+
 
 /* ===========================
    RESCHEDULE (replace or preview)
