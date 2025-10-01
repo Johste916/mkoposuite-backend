@@ -274,33 +274,13 @@ async function computeAllocations({
 async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sign = +1 }) {
   if (!LoanSchedule || !allocations?.length) return;
 
-  // 1) Gather all periods we will touch
-  const periods = [...new Set(allocations.map(a => a.period))].sort((a, b) => a - b);
-
-  // 2) Preload rows for those periods in one go (within the same transaction)
-  const rows = await LoanSchedule.findAll({
-    where: { loanId, period: { [Op.in]: periods } },
-    transaction: t,
-  });
-
-  const byPeriod = new Map(rows.map(r => [Number(r.period), r]));
-
-  // 3) Validate presence — fail fast before making any updates
-  const missing = periods.filter(p => !byPeriod.get(Number(p)));
-  if (missing.length) {
-    throw Object.assign(new Error(`Schedule rows missing for periods: ${missing.join(', ')}`), {
-      code: 'SCHEDULE_MISSING',
-      meta: { loanId, missingPeriods: missing }
-    });
-  }
-
-  // 4) Apply updates; if any fails, rethrow immediately so transaction can roll back
   for (const line of allocations) {
-    const row = byPeriod.get(Number(line.period));
-    // compute new paid amounts (support sign = -1 when reversing)
+    const row = await LoanSchedule.findOne({ where: { loanId, period: line.period }, transaction: t });
+    if (!row) continue;
+
     const principalPaid = Number(row.principalPaid || 0) + sign * Number(line.principal || 0);
-    const interestPaid  = Number(row.interestPaid  || 0) + sign * Number(line.interest  || 0);
-    const feesPaid      = Number(row.feesPaid      || 0) + sign * Number(line.fees      || 0);
+    const interestPaid = Number(row.interestPaid || 0) + sign * Number(line.interest || 0);
+    const feesPaid = Number(row.feesPaid || 0) + sign * Number(line.fees || 0);
     const penaltiesPaid = Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0);
 
     const total = Number(
@@ -309,36 +289,25 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
         : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || 0)
     );
     const paid = Math.max(0, principalPaid + interestPaid + feesPaid + penaltiesPaid);
+
     const status =
       paid >= total - 0.01
-        ? 'paid'
+        ? "paid"
         : new Date(row.dueDate) < new Date(asOfDate || new Date())
-          ? 'overdue'
-          : 'upcoming';
+        ? "overdue"
+        : "upcoming";
 
-    try {
-      await row.update(
-        {
-          principalPaid: Math.max(0, principalPaid),
-          interestPaid:  Math.max(0, interestPaid),
-          feesPaid:      Math.max(0, feesPaid),
-          penaltiesPaid: Math.max(0, penaltiesPaid),
-          paid,
-          status,
-        },
-        { transaction: t }
-      );
-    } catch (err) {
-      // Log with context and rethrow the ORIGINAL error so the caller sees the true cause.
-      console.error('[applyAllocationToSchedule] update failed', {
-        loanId,
-        period: line.period,
-        code: err?.parent?.code || err?.original?.code || err.code,
-        message: err.message,
-        sql: err?.original?.sql || err?.sql
-      });
-      throw err; // IMPORTANT: bubble up real error; do not continue to the next update
-    }
+    await row.update(
+      {
+        principalPaid: Math.max(0, principalPaid),
+        interestPaid: Math.max(0, interestPaid),
+        feesPaid: Math.max(0, feesPaid),
+        penaltiesPaid: Math.max(0, penaltiesPaid),
+        paid,
+        status,
+      },
+      { transaction: t }
+    );
   }
 }
 
