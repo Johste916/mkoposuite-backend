@@ -1306,6 +1306,8 @@ try {
   }
 } catch {}
 
+require("./services/syncListeners"); // just importing sets up listeners
+
 /* -------- Optional fallback for /auth/me if your authRoutes lacks it ------- */
 if (process.env.AUTH_ME_FALLBACK === '1') {
   try {
