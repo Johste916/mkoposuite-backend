@@ -112,6 +112,12 @@ function getRepaymentAmountValue(r) {
   return Number(r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0);
 }
 
+/* ============== math helpers ============== */
+const EPS = 1e-6;
+const toNum = (n) => (Number.isFinite(+n) ? +n : 0);
+const round2 = (n) => Math.round((+n + Number.EPSILON) * 100) / 100;
+const clampNonNeg = (n) => (n > 0 ? n : 0);
+
 /* ===== Safely update loan totals (avoid touching non-existent columns) ===== */
 async function updateLoanFinancials(loan, deltaPaid, t) {
   // deltaPaid: +amount when approving/applying; -amount when voiding/reversing
@@ -216,18 +222,18 @@ async function computeAllocations({
   }
 
   const items = schedule.map((s, idx) => {
-    const principalDue = Math.max(0, Number(s.principal || 0) - Number(s.principalPaid || 0));
-    const interestDue = Math.max(0, Number(s.interest || 0) - Number(s.interestPaid || 0));
-    const feesDue = Math.max(0, Number(s.fees || 0) - Number(s.feesPaid || 0));
-    const penDue = Math.max(0, Number(s.penalties ?? s.penalty ?? 0) - Number(s.penaltiesPaid || 0));
+    const principalDue = clampNonNeg(round2(Number(s.principal || 0) - Number(s.principalPaid || 0)));
+    const interestDue  = clampNonNeg(round2(Number(s.interest  || 0) - Number(s.interestPaid  || 0)));
+    const feesDue      = clampNonNeg(round2(Number(s.fees      || 0) - Number(s.feesPaid      || 0)));
+    const penDue       = clampNonNeg(round2(Number(s.penalties ?? s.penalty ?? 0) - Number(s.penaltiesPaid || s.penaltyPaid || 0)));
     return {
       period: s.period ?? idx + 1,
       dueDate: s.dueDate,
       remaining: {
-        principal: Number.isFinite(principalDue) ? principalDue : 0,
-        interest: Number.isFinite(interestDue) ? interestDue : 0,
-        fees: Number.isFinite(feesDue) ? feesDue : 0,
-        penalties: waivePenalties ? 0 : Number.isFinite(penDue) ? penDue : 0,
+        principal: principalDue,
+        interest:  interestDue,
+        fees:      feesDue,
+        penalties: waivePenalties ? 0 : penDue,
       },
     };
   });
@@ -245,29 +251,39 @@ async function computeAllocations({
 
   if (waivePenalties) order = order.filter((x) => x !== "penalties");
 
-  let left = Number(amount);
+  let left = round2(Number(amount));
   const allocations = [];
   const totals = { principal: 0, interest: 0, fees: 0, penalties: 0 };
 
   for (const it of items) {
-    if (left <= 0) break;
+    if (left <= EPS) break;
     const line = { period: it.period, principal: 0, interest: 0, fees: 0, penalties: 0 };
 
     for (const cat of order) {
-      if (left <= 0) break;
-      const need = Math.max(0, it.remaining[cat] || 0);
+      if (left <= EPS) break;
+      const need = clampNonNeg(round2(it.remaining[cat] || 0));
       if (!need) continue;
-      const take = Math.min(need, left);
-      line[cat] += take;
-      totals[cat] += take;
-      it.remaining[cat] -= take;
-      left -= take;
+      const take = round2(Math.min(need, left));
+      line[cat] = round2(line[cat] + take);
+      totals[cat] = round2(totals[cat] + take);
+      it.remaining[cat] = round2(need - take);
+      left = round2(left - take);
     }
 
     if (line.principal || line.interest || line.fees || line.penalties) {
       allocations.push(line);
     }
   }
+
+  // push rounding residue
+  if (left > EPS && allocations.length) {
+    const last = allocations[allocations.length - 1];
+    const bumpCat = ["principal", "interest", "fees", "penalties"].find((k) => last[k] > 0) || "principal";
+    last[bumpCat] = round2(last[bumpCat] + left);
+    totals[bumpCat] = round2(totals[bumpCat] + left);
+    left = 0;
+  }
+
   return { allocations, totals };
 }
 
@@ -281,14 +297,14 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     const principalPaid = Number(row.principalPaid || 0) + sign * Number(line.principal || 0);
     const interestPaid = Number(row.interestPaid || 0) + sign * Number(line.interest || 0);
     const feesPaid = Number(row.feesPaid || 0) + sign * Number(line.fees || 0);
-    const penaltiesPaid = Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0);
+    const penaltiesPaid = Number(row.penaltiesPaid || row.penaltyPaid || 0) + sign * Number(line.penalties || 0);
 
     const total = Number(
       row.total != null
         ? row.total
-        : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || 0)
+        : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || row.penalty || 0)
     );
-    const paid = Math.max(0, principalPaid + interestPaid + feesPaid + penaltiesPaid);
+    const paid = clampNonNeg(round2(principalPaid + interestPaid + feesPaid + penaltiesPaid));
 
     const status =
       paid >= total - 0.01
@@ -299,10 +315,10 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
 
     await row.update(
       {
-        principalPaid: Math.max(0, principalPaid),
-        interestPaid: Math.max(0, interestPaid),
-        feesPaid: Math.max(0, feesPaid),
-        penaltiesPaid: Math.max(0, penaltiesPaid),
+        principalPaid: clampNonNeg(round2(principalPaid)),
+        interestPaid: clampNonNeg(round2(interestPaid)),
+        feesPaid: clampNonNeg(round2(feesPaid)),
+        penaltiesPaid: clampNonNeg(round2(penaltiesPaid)),
         paid,
         status,
       },
@@ -580,7 +596,7 @@ const createRepayment = async (req, res) => {
           borrowerId: loan.borrowerId,
           amount: Number(amount),
           type: "deposit",
-          narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
+          notes: `Loan repayment deposit for ${loan.reference || loan.id}`, // << fixed
           reference: payload.reference || `RCPT-${repayment.id}`,
           date: date,
         },
@@ -834,7 +850,7 @@ const approveRepayment = async (req, res) => {
           borrowerId: loan.borrowerId,
           amount: Number(paidThis),
           type: "deposit",
-          narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
+          notes: `Loan repayment deposit for ${loan.reference || loan.id}`, // << fixed
           reference: repayment.reference || `RCPT-${repayment.id}`,
           date: date,
         },
@@ -909,6 +925,21 @@ const voidRepayment = async (req, res) => {
       }
       const amt = getRepaymentAmountValue(repayment);
       await updateLoanFinancials(loan, -Number(amt || 0), t);
+
+      // Reverse auto-savings deposit to keep savings in sync
+      if (hasSavings) {
+        await SavingsTransaction.create(
+          {
+            borrowerId: loan.borrowerId,
+            amount: Number(amt || 0),
+            type: "withdraw",
+            notes: `Reversal of loan repayment deposit for ${loan.reference || loan.id}`,
+            reference: `VOID-${repayment.reference || repayment.id}`,
+            date: (typeof date === "string" ? date.slice(0, 10) : new Date().toISOString().slice(0,10)),
+          },
+          { transaction: t }
+        );
+      }
     }
 
     await repayment.update(
@@ -1161,7 +1192,7 @@ const webhookMobileMoney = async (req, res) => {
           borrowerId: loan.borrowerId,
           amount: Number(n.amount),
           type: "deposit",
-          narrative: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`,
+          notes: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`, // << fixed
           reference: repayment.reference,
           date: n.paidAt?.slice(0, 10),
         },
@@ -1249,7 +1280,7 @@ const webhookBank = async (req, res) => {
           borrowerId: loan.borrowerId,
           amount: Number(n.amount),
           type: "deposit",
-          narrative: `Loan repayment deposit (bank) for ${loan.reference || loan.id}`,
+          notes: `Loan repayment deposit (bank) for ${loan.reference || loan.id}`, // << fixed
           reference: repayment.reference,
           date: n.paidAt?.slice(0, 10),
         },
@@ -1278,19 +1309,65 @@ const webhookBank = async (req, res) => {
    ✏️ UPDATE & DELETE (compat)
 ========================== */
 const updateRepayment = async (req, res) => {
+  const t = await sequelize.transaction();
   try {
-    const repayment = await Repayment.findByPk(req.params.id);
-    if (!repayment) return res.status(404).json({ error: "Repayment not found" });
+    const repayment = await Repayment.findByPk(req.params.id, { transaction: t });
+    if (!repayment) {
+      await t.rollback();
+      return res.status(404).json({ error: "Repayment not found" });
+    }
 
-    const body = { ...req.body };
     const attrs = (Repayment && Repayment.rawAttributes) || {};
-    if (body.date && !("date" in attrs)) delete body.date;
-    if (body.paymentDate && !("paymentDate" in attrs)) delete body.paymentDate;
-    if (body.paidAt && !("paidAt" in attrs)) delete body.paidAt;
+    const body = { ...req.body };
 
-    await repayment.update(body);
+    // If already applied, do not allow financial edits (protect sync)
+    if (repayment.applied) {
+      const allowed = {};
+      if ("notes" in body) allowed.notes = body.notes;
+      if ("reference" in body) allowed.reference = body.reference;
+      if ("method" in body) allowed.method = body.method;
+      await repayment.update(allowed, { transaction: t });
+      await t.commit();
+      return res.json(repayment);
+    }
+
+    // Pending: if amount/date changed, recompute allocation so approval stays correct
+    const amountChanged = body.amount != null || body.amountPaid != null;
+    const dateChanged = !!body.date || !!body.paymentDate || !!body.paidAt;
+
+    // Sanitise unknown columns
+    for (const k of Object.keys(body)) if (!(k in attrs)) delete body[k];
+
+    if (amountChanged || dateChanged) {
+      const loanId = repayment.loanId;
+      const newAmount = body.amountPaid ?? body.amount ?? repayment.amountPaid ?? repayment.amount;
+      const newDate =
+        body.paymentDate || body.date || body.paidAt || getRepaymentDateValue(repayment) || new Date().toISOString().slice(0, 10);
+
+      const { allocations } = await computeAllocations({
+        loanId,
+        amount: newAmount,
+        date: newDate,
+      });
+      body.allocation = allocations;
+
+      // normalise main fields
+      if ("amount" in attrs && body.amount == null && repayment.amountPaid != null) {
+        body.amount = newAmount;
+      }
+      if ("amountPaid" in attrs) {
+        body.amountPaid = newAmount;
+      }
+      if ("paymentDate" in attrs && !body.paymentDate && ("date" in attrs || "paidAt" in attrs)) {
+        body.paymentDate = (typeof newDate === "string" ? newDate.slice(0,10) : new Date(newDate).toISOString().slice(0,10));
+      }
+    }
+
+    await repayment.update(body, { transaction: t });
+    await t.commit();
     res.json(repayment);
   } catch (err) {
+    await t.rollback();
     console.error("Update repayment error:", err);
     res.status(500).json({ error: "Error updating repayment" });
   }
