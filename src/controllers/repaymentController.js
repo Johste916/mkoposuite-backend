@@ -11,6 +11,8 @@ const {
   Communication,
   sequelize,
 } = require("../models");
+// helper: round to 2dp to avoid 0.01 drift
+const r2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 const Repayment = LoanRepayment || LoanPayment;
 const hasSavings = !!SavingsTransaction;
@@ -274,42 +276,50 @@ async function computeAllocations({
 async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sign = +1 }) {
   if (!LoanSchedule || !allocations?.length) return;
 
+  const asOf = asOfDate ? new Date(asOfDate) : new Date();
+
   for (const line of allocations) {
     const row = await LoanSchedule.findOne({ where: { loanId, period: line.period }, transaction: t });
     if (!row) continue;
 
-    const principalPaid = Number(row.principalPaid || 0) + sign * Number(line.principal || 0);
-    const interestPaid = Number(row.interestPaid || 0) + sign * Number(line.interest || 0);
-    const feesPaid = Number(row.feesPaid || 0) + sign * Number(line.fees || 0);
-    const penaltiesPaid = Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0);
+    // compute next paid subtotals
+    const nextPrincipalPaid = r2(Number(row.principalPaid || 0) + sign * Number(line.principal || 0));
+    const nextInterestPaid  = r2(Number(row.interestPaid  || 0) + sign * Number(line.interest  || 0));
+    const nextFeesPaid      = r2(Number(row.feesPaid      || 0) + sign * Number(line.fees      || 0));
+    const nextPensPaid      = r2(Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0));
 
-    const total = Number(
-      row.total != null
-        ? row.total
-        : (row.principal || 0) + (row.interest || 0) + (row.fees || 0) + (row.penalties || 0)
-    );
-    const paid = Math.max(0, principalPaid + interestPaid + feesPaid + penaltiesPaid);
+    // figure out what was originally due for the period
+    const duePrincipal = r2(Number(row.principal  ?? 0));
+    const dueInterest  = r2(Number(row.interest   ?? 0));
+    const dueFees      = r2(Number(row.fees       ?? 0));
+    const duePens      = r2(Number(row.penalties  ?? row.penalty ?? 0));
 
-    const status =
-      paid >= total - 0.01
-        ? "paid"
-        : new Date(row.dueDate) < new Date(asOfDate || new Date())
+    const totalDue  = r2(duePrincipal + dueInterest + dueFees + duePens);
+    const totalPaid = r2(nextPrincipalPaid + nextInterestPaid + nextFeesPaid + nextPensPaid);
+
+    // period state
+    const fullySettled = totalPaid >= totalDue - 0.01; // epsilon for rounding
+    const status = fullySettled
+      ? "paid"
+      : (row.dueDate ? new Date(row.dueDate) : asOf) < asOf
         ? "overdue"
         : "upcoming";
 
-    await row.update(
-      {
-        principalPaid: Math.max(0, principalPaid),
-        interestPaid: Math.max(0, interestPaid),
-        feesPaid: Math.max(0, feesPaid),
-        penaltiesPaid: Math.max(0, penaltiesPaid),
-        paid,
-        status,
-      },
-      { transaction: t }
-    );
+    // build update doc — IMPORTANT: paid is boolean (no numeric writes)
+    const updateDoc = {
+      principalPaid: Math.max(0, nextPrincipalPaid),
+      interestPaid:  Math.max(0, nextInterestPaid),
+      feesPaid:      Math.max(0, nextFeesPaid),
+      penaltiesPaid: Math.max(0, nextPensPaid),
+      paid:          !!fullySettled,   // ✅ boolean
+      status,                          // ✅ enum value
+      updated_at: new Date(),
+    };
+
+    await row.update(updateDoc, { transaction: t });
   }
 }
+
 
 /* =========================
    📥 LIST
