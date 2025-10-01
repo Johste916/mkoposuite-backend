@@ -120,7 +120,6 @@ const clampNonNeg = (n) => (n > 0 ? n : 0);
 
 /* ===== Safely update loan totals (avoid touching non-existent columns) ===== */
 async function updateLoanFinancials(loan, deltaPaid, t) {
-  // deltaPaid: +amount when approving/applying; -amount when voiding/reversing
   const cols = await getLoanTableColumns();
   const updates = {};
 
@@ -131,11 +130,9 @@ async function updateLoanFinancials(loan, deltaPaid, t) {
 
   const outstandingField = mapAttrToField("outstanding");
   if (outstandingField && cols[outstandingField]) {
-    // Prefer adjusting from current outstanding if present
     if (loan.outstanding != null) {
       updates.outstanding = Math.max(0, Number(loan.outstanding || 0) - Number(deltaPaid || 0));
     } else {
-      // Fallback derive if amount + totalInterest are available
       const principal = Number(loan.amount || 0);
       const totalInterest = Number(loan.totalInterest || 0);
       const newTotalPaid =
@@ -338,7 +335,7 @@ const getAllRepayments = async (req, res) => {
       borrowerId,
       dateFrom,
       dateTo,
-      status, // NEW: allow filtering by status e.g., "pending"
+      status,
       page = 1,
       pageSize = 20,
     } = req.query;
@@ -355,7 +352,6 @@ const getAllRepayments = async (req, res) => {
       where[dateAttr] = and;
     }
 
-    // optional status filter if model supports it
     if (status && (Repayment.rawAttributes || {}).status) {
       where.status = status;
     }
@@ -485,7 +481,6 @@ const previewAllocation = async (req, res) => {
   try {
     const { loanId, amount, date, strategy, customOrder, waivePenalties } = req.body;
 
-    // Fetch the loan with safe attributes
     const loan = await Loan.findByPk(loanId, {
       attributes: await pickExistingLoanAttributes(LOAN_BASE_ATTRS),
       include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
@@ -542,7 +537,6 @@ const createRepayment = async (req, res) => {
       return res.status(400).json({ error: "loanId, amount and date are required" });
     }
 
-    // Fetch loan with only columns we actually need to compute balances
     const loan = await Loan.findByPk(loanId, {
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
       include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
@@ -562,7 +556,6 @@ const createRepayment = async (req, res) => {
       waivePenalties,
     });
 
-    // Build payload flexibly
     const payload = {
       loanId,
       amountPaid: Number(amount),
@@ -579,24 +572,21 @@ const createRepayment = async (req, res) => {
       postedByEmail: req.user?.email,
     };
 
-    // Keep only valid attributes
     const attrs = (Repayment && Repayment.rawAttributes) || {};
     for (const k of Object.keys(payload)) if (!(k in attrs)) delete payload[k];
 
     const repayment = await Repayment.create(payload, { transaction: t });
 
-    // Apply allocations + aggregates
     await applyAllocationToSchedule({ loanId, allocations, asOfDate: date, t, sign: +1 });
     await updateLoanFinancials(loan, +Number(amount), t);
 
-    // Optional: credit borrower savings (auto-deposit)
     if (hasSavings) {
       await SavingsTransaction.create(
         {
           borrowerId: loan.borrowerId,
           amount: Number(amount),
           type: "deposit",
-          notes: `Loan repayment deposit for ${loan.reference || loan.id}`, // << fixed
+          notes: `Loan repayment deposit for ${loan.reference || loan.id}`,
           reference: payload.reference || `RCPT-${repayment.id}`,
           date: date,
         },
@@ -606,7 +596,6 @@ const createRepayment = async (req, res) => {
 
     await t.commit();
 
-    // Notify borrower
     await Notifier.notifyBorrowerRepayment({
       borrower: loan.Borrower,
       amount: Number(amount),
@@ -628,6 +617,9 @@ const createRepayment = async (req, res) => {
   }
 };
 
+// 🚩 Alias for routes that post to /repayments/manual
+const createRepaymentManual = (req, res) => createRepayment(req, res);
+
 /* ==========================
    ✨ BULK JSON (PENDING rows)
 ========================== */
@@ -641,7 +633,6 @@ const createBulkRepayments = async (req, res) => {
       return res.status(403).json({ error: "Not permitted" });
     }
 
-    // Accept: array body, {items: [...]}, or {rows: [...]}
     const itemsInput = Array.isArray(req.body) ? req.body : req.body?.items || req.body?.rows || [];
     const items = Array.isArray(itemsInput) ? itemsInput : [];
     if (!items.length) {
@@ -733,7 +724,6 @@ const parseCsvBuffer = async (buffer) => {
 const uploadRepaymentsCsv = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    // Support memory or disk storage
     let buf = null;
     if (req.file?.buffer) buf = req.file.buffer;
     else if (req.file?.path) buf = fs.readFileSync(req.file.path);
@@ -843,14 +833,13 @@ const approveRepayment = async (req, res) => {
 
     await repayment.update({ status: "approved", applied: true, allocation: allocations }, { transaction: t });
 
-    // Optional savings deposit
     if (hasSavings) {
       await SavingsTransaction.create(
         {
           borrowerId: loan.borrowerId,
           amount: Number(paidThis),
           type: "deposit",
-          notes: `Loan repayment deposit for ${loan.reference || loan.id}`, // << fixed
+          notes: `Loan repayment deposit for ${loan.reference || loan.id}`,
           reference: repayment.reference || `RCPT-${repayment.id}`,
           date: date,
         },
@@ -913,7 +902,6 @@ const voidRepayment = async (req, res) => {
     const date = getRepaymentDateValue(repayment) || new Date().toISOString();
 
     if (repayment.applied) {
-      // reverse schedule & totals
       if (repayment.allocation?.length) {
         await applyAllocationToSchedule({
           loanId: loan.id,
@@ -926,7 +914,6 @@ const voidRepayment = async (req, res) => {
       const amt = getRepaymentAmountValue(repayment);
       await updateLoanFinancials(loan, -Number(amt || 0), t);
 
-      // Reverse auto-savings deposit to keep savings in sync
       if (hasSavings) {
         await SavingsTransaction.create(
           {
@@ -1192,7 +1179,7 @@ const webhookMobileMoney = async (req, res) => {
           borrowerId: loan.borrowerId,
           amount: Number(n.amount),
           type: "deposit",
-          notes: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`, // << fixed
+          notes: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`,
           reference: repayment.reference,
           date: n.paidAt?.slice(0, 10),
         },
@@ -1280,7 +1267,7 @@ const webhookBank = async (req, res) => {
           borrowerId: loan.borrowerId,
           amount: Number(n.amount),
           type: "deposit",
-          notes: `Loan repayment deposit (bank) for ${loan.reference || loan.id}`, // << fixed
+          notes: `Loan repayment deposit (bank) for ${loan.reference || loan.id}`,
           reference: repayment.reference,
           date: n.paidAt?.slice(0, 10),
         },
@@ -1320,7 +1307,6 @@ const updateRepayment = async (req, res) => {
     const attrs = (Repayment && Repayment.rawAttributes) || {};
     const body = { ...req.body };
 
-    // If already applied, do not allow financial edits (protect sync)
     if (repayment.applied) {
       const allowed = {};
       if ("notes" in body) allowed.notes = body.notes;
@@ -1331,11 +1317,9 @@ const updateRepayment = async (req, res) => {
       return res.json(repayment);
     }
 
-    // Pending: if amount/date changed, recompute allocation so approval stays correct
     const amountChanged = body.amount != null || body.amountPaid != null;
     const dateChanged = !!body.date || !!body.paymentDate || !!body.paidAt;
 
-    // Sanitise unknown columns
     for (const k of Object.keys(body)) if (!(k in attrs)) delete body[k];
 
     if (amountChanged || dateChanged) {
@@ -1351,7 +1335,6 @@ const updateRepayment = async (req, res) => {
       });
       body.allocation = allocations;
 
-      // normalise main fields
       if ("amount" in attrs && body.amount == null && repayment.amountPaid != null) {
         body.amount = newAmount;
       }
@@ -1388,6 +1371,7 @@ module.exports = {
   getRepaymentById,
   previewAllocation,
   createRepayment,
+  createRepaymentManual, // 👈 alias for /repayments/manual
   updateRepayment,
   deleteRepayment,
   // bulk & csv
