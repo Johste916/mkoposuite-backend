@@ -5,7 +5,14 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+
+    "check:env": "node src/scripts/checkEnv.mjs",
+    "report:routes": "node src/scripts/listRoutes.mjs",
+    "report:deps": "node src/scripts/depsGraph.mjs",
+    "test:api:smoke": "node --test src/scripts/api.smoke.mjs",
+
+    "predeploy:check": "concurrently -c auto -n ENV,ROUTES,API,GRAPH \"npm:check:env\" \"npm:report:routes\" \"npm:test:api:smoke\" \"npm:report:deps\""
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
@@ -13,7 +20,6 @@
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "date-fns": "^4.1.0",
-    "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "helmet": "^8.1.0",
     "json2csv": "^6.0.0-alpha.2",
@@ -32,7 +38,16 @@
     "umzug": "^3.8.2"
   },
   "devDependencies": {
+    "@jest/globals": "^30.2.0",
+    "@playwright/test": "^1.56.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "dependency-cruiser": "^17.0.2",
+    "dotenv": "^17.2.3",
+    "madge": "^8.0.0",
     "nodemon": "^3.1.0",
-    "sequelize-cli": "^6.6.3"
+    "sequelize-cli": "^6.6.3",
+    "supertest": "^7.1.4",
+    "zx": "^8.8.4"
   }
 }

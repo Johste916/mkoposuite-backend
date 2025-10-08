@@ -14,6 +14,23 @@ const {
 } = require("../models");
 
 const { Op, where, col } = require("sequelize");
+/* ---------- soft deps: event bus + aggregates (both optional) ---------- */
+let BUS = null, EVENTS = null;
+try { ({ bus: BUS, EVENTS } = require('../services/syncBus')); } catch {}
+
+const emitSafe = (evt, payload) => {
+  try {
+    if (BUS?.emitSafe) BUS.emitSafe(evt, payload);
+    else if (BUS?.emit) BUS.emit(evt, payload);
+  } catch {}
+};
+
+let Aggregates = {
+  recomputeLoanAggregates: async () => {},
+  recomputeBorrowerAggregates: async () => {},
+  recomputeLoanAndBorrower: async () => {},
+};
+try { Aggregates = require('../services/aggregates'); } catch {}
 
 const {
   generateFlatRateSchedule,

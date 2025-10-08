@@ -340,6 +340,14 @@ async function getValue(req) {
   if (!key) throw Object.assign(new Error('key is required'), { status: 400 });
   return Setting.get(key, {}, { tenantId: tenantIdFrom(req) });
 }
+async function getMany(req) {
+  const { Setting } = getModels(req);
+  const keysCsv = String(req.query.keys || '').trim();
+  if (!keysCsv) return {};
+  const keys = keysCsv.split(',').map(s => s.trim()).filter(Boolean);
+  const defaults = {};
+  return Setting.getMany(keys, defaults, { tenantId: tenantIdFrom(req) });
+}
 async function putValue(req) {
   const { Setting } = getModels(req);
   const key = String(req.params.key || req.body?.key || '').trim();
@@ -368,8 +376,15 @@ async function patchValue(req) {
     updatedBy: req.user?.id || null,
   });
 }
+async function deleteValue(req) {
+  const { Setting } = getModels(req);
+  const key = String(req.params.key || '').trim();
+  if (!key) throw Object.assign(new Error('key is required'), { status: 400 });
+  await Setting.remove(key, { tenantId: tenantIdFrom(req) });
+  return { ok: true };
+}
 
-// Legacy forms
+/* -------- Legacy forms -------- */
 router.get('/', authenticateUser, ANY_AUTH, async (req, res, next) => {
   try { rawJson(res, await getValue(req)); } catch (e) { next(e); }
 });
@@ -388,19 +403,83 @@ router.put('/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
 router.patch('/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
   try { rawJson(res, await patchValue(req)); } catch (e) { next(e); }
 });
+router.delete('/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try { rawJson(res, await deleteValue(req)); } catch (e) { next(e); }
+});
 
 /* =============================================================================
-   KV ALIASES (the new editors call these)
-   These are just clean aliases to the same logic above.
+   KV ALIASES (new editors use these)
 ============================================================================= */
+// Get a single key (unchanged)
 router.get('/kv/:key', authenticateUser, ANY_AUTH, async (req, res, next) => {
   try { rawJson(res, await getValue(req)); } catch (e) { next(e); }
 });
+// Set a single key (unchanged)
 router.put('/kv/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
   try { rawJson(res, await putValue(req)); } catch (e) { next(e); }
 });
+// Merge a single key (unchanged)
 router.patch('/kv/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
   try { rawJson(res, await patchValue(req)); } catch (e) { next(e); }
+});
+// Delete a single key (NEW)
+router.delete('/kv/:key', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try { rawJson(res, await deleteValue(req)); } catch (e) { next(e); }
+});
+
+// Get many by CSV (?keys=a,b,c) (NEW, read-only)
+router.get('/kv', authenticateUser, ANY_AUTH, async (req, res, next) => {
+  try { rawJson(res, await getMany(req)); } catch (e) { next(e); }
+});
+
+// Bulk set/merge (NEW). Body:
+// { items: { "a": {...}, "b": {...} }, mode: "set" | "merge" }
+router.post('/kv/bulk', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try {
+    const { Setting } = getModels(req);
+    const { items = {}, mode = 'set' } = req.body || {};
+    if (!items || typeof items !== 'object') {
+      throw Object.assign(new Error('items object is required'), { status: 400 });
+    }
+    const tenantId = tenantIdFrom(req);
+    const userId = req.user?.id || null;
+
+    const result = mode === 'merge'
+      ? await Setting.mergeMany(items, { tenantId, updatedBy: userId })
+      : await Setting.setMany(items, { tenantId, updatedBy: userId, createdBy: userId });
+
+    rawJson(res, { ok: true, count: Object.keys(items).length, result });
+  } catch (e) { next(e); }
+});
+
+// List/export keys (NEW) — supports ?prefix=loan. or empty for all tenant keys
+router.get('/kv/_list', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try {
+    const { Setting } = getModels(req);
+    const prefix = String(req.query.prefix || '').trim();
+    const items = await Setting.list(prefix, { tenantId: tenantIdFrom(req) });
+    rawJson(res, { items, total: items.length });
+  } catch (e) { next(e); }
+});
+
+// Import (NEW) — body: { items: [ { key, value }, ... ], mode?: "set"|"merge" }
+router.post('/kv/_import', authenticateUser, ADMIN_ONLY, async (req, res, next) => {
+  try {
+    const { Setting } = getModels(req);
+    const { items = [], mode = 'set' } = req.body || {};
+    if (!Array.isArray(items) || items.length === 0) {
+      throw Object.assign(new Error('items array is required'), { status: 400 });
+    }
+    const map = Object.fromEntries(items.map(i => [String(i.key), i.value]));
+    const tenantId = tenantIdFrom(req);
+    const userId = req.user?.id || null;
+
+    const result = mode === 'merge'
+      ? await Setting.mergeMany(map, { tenantId, updatedBy: userId })
+      : await Setting.setMany(map, { tenantId, updatedBy: userId, createdBy: userId });
+
+    rawJson(res, { ok: true, count: items.length, result });
+  } catch (e) { next(e); }
 });
 
 module.exports = router;

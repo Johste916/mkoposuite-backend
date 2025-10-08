@@ -27,6 +27,7 @@ module.exports = (sequelize, DataTypes) => {
         ...(sequelize.getDialect() === 'postgres'
           ? [{ fields: ['value'], using: 'gin', name: 'settings_value_gin_idx' }]
           : []),
+        { fields: ['updatedAt'], name: 'settings_updated_at_idx' },
       ],
       hooks: {
         beforeValidate(instance) {
@@ -36,12 +37,19 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
+  /* ---------------------- Namespacing helpers (tenant) --------------------- */
   const nsKey = (key, tenantId) => {
     const cleanKey = String(key).trim();
     return tenantId ? `${String(tenantId)}:${cleanKey}` : cleanKey;
     // Example: 0000-...:signup.config
   };
+  const stripNs = (fullKey, tenantId) => {
+    if (!tenantId) return fullKey;
+    const prefix = `${tenantId}:`;
+    return fullKey.startsWith(prefix) ? fullKey.slice(prefix.length) : fullKey;
+  };
 
+  /* --------------------------------- CRUD ---------------------------------- */
   Setting.get = async function get(key, defaults = {}, opts = {}) {
     const row = await Setting.findOne({ where: { key: nsKey(key, opts.tenantId) } });
     return row?.value ?? defaults;
@@ -54,7 +62,7 @@ module.exports = (sequelize, DataTypes) => {
     const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
     return keys.reduce((acc, k) => {
       const nk = nsKey(k, opts.tenantId);
-      acc[k] = nk in map ? map[nk] : defaultsMap[k] ?? null;
+      acc[k] = nk in map ? map[nk] : (defaultsMap[k] ?? null);
       return acc;
     }, {});
   };
@@ -70,6 +78,27 @@ module.exports = (sequelize, DataTypes) => {
     return row?.value ?? value;
   };
 
+  Setting.setMany = async function setMany(map = {}, opts = {}) {
+    const { updatedBy = null, createdBy = null, tenantId } = opts || {};
+    const t = await sequelize.transaction();
+    try {
+      const entries = Object.entries(map);
+      for (const [key, value] of entries) {
+        await Setting.upsert({
+          key: nsKey(key, tenantId),
+          value,
+          updatedBy,
+          createdBy,
+        }, { transaction: t });
+      }
+      await t.commit();
+      return { ok: true, count: Object.keys(map).length };
+    } catch (e) {
+      await t.rollback();
+      throw e;
+    }
+  };
+
   Setting.merge = async function merge(key, patch = {}, opts = {}) {
     const { updatedBy = null, tenantId } = opts || {};
     const current = await Setting.get(key, {}, { tenantId });
@@ -80,6 +109,61 @@ module.exports = (sequelize, DataTypes) => {
       updatedBy,
     });
     return row?.value ?? next;
+  };
+
+  Setting.mergeMany = async function mergeMany(map = {}, opts = {}) {
+    const { updatedBy = null, tenantId } = opts || {};
+    const t = await sequelize.transaction();
+    try {
+      const keys = Object.keys(map);
+      if (keys.length === 0) { await t.commit(); return { ok: true, count: 0 }; }
+      const namespaced = keys.map(k => nsKey(k, tenantId));
+      const rows = await Setting.findAll({ where: { key: namespaced }, transaction: t });
+      const byKey = new Map(rows.map(r => [r.key, r]));
+      for (const k of keys) {
+        const nk = nsKey(k, tenantId);
+        const cur = byKey.get(nk)?.value || {};
+        const next = { ...(cur || {}), ...(map[k] || {}) };
+        await Setting.upsert({ key: nk, value: next, updatedBy }, { transaction: t });
+      }
+      await t.commit();
+      return { ok: true, count: keys.length };
+    } catch (e) {
+      await t.rollback();
+      throw e;
+    }
+  };
+
+  Setting.remove = async function remove(key, opts = {}) {
+    const { tenantId } = opts || {};
+    await Setting.destroy({ where: { key: nsKey(key, tenantId) } });
+    return true;
+  };
+
+  // List all keys for a tenant, optionally by prefix (prefix is *un-namespaced*).
+  Setting.list = async function list(prefix = '', opts = {}) {
+    const { tenantId } = opts || {};
+    const where = {};
+    if (tenantId) {
+      if (prefix) {
+        where.key = { [sequelize.Sequelize.Op.like]: `${tenantId}:${prefix}%` };
+      } else {
+        where.key = { [sequelize.Sequelize.Op.like]: `${tenantId}:%` };
+      }
+    } else if (prefix) {
+      where.key = { [sequelize.Sequelize.Op.like]: `${prefix}%` };
+    }
+    const rows = await Setting.findAll({
+      where,
+      order: [['updatedAt', 'DESC']],
+      attributes: ['key', 'value', 'updatedAt', 'createdAt'],
+    });
+    return rows.map(r => ({
+      key: stripNs(r.key, tenantId),
+      value: r.value,
+      updatedAt: r.updatedAt,
+      createdAt: r.createdAt,
+    }));
   };
 
   return Setting;

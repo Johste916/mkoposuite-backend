@@ -1,82 +1,97 @@
-// routes/supportRoutes.js
 'use strict';
+
 const express = require('express');
 const router = express.Router();
 
-const mem = { tickets: new Map(), nextId: 1 };
-const hasModels = (req) => req.app.get('models') || null;
+let auth = {};
+try { auth = require('../middleware/authMiddleware'); } catch {}
+const authenticateUser = auth.authenticateUser || ((_req, _res, next) => next());
+const requireAuth      = auth.requireAuth      || ((_req, _res, next) => next());
 
-// List (optionally by tenantId & status)
-router.get('/tickets', async (req, res) => {
-  const models = hasModels(req);
-  const where = {};
-  if (req.query.tenantId) where.tenantId = String(req.query.tenantId);
-  if (req.query.status) where.status = String(req.query.status).toLowerCase();
-  try {
-    if (models?.SupportTicket) {
-      const items = await models.SupportTicket.findAll({ where, order: [['updatedAt', 'DESC']], limit: 200 });
-      res.setHeader('X-Total-Count', String(items.length));
-      return res.ok(items);
-    }
-    const all = Array.from(mem.tickets.values()).filter(t => (!where.tenantId || t.tenantId === where.tenantId) && (!where.status || t.status === where.status));
-    res.setHeader('X-Total-Count', String(all.length));
-    return res.ok(all);
-  } catch (e) { return res.fail(500, e.message); }
+router.use(authenticateUser, requireAuth);
+
+/* In-memory store (simple + good enough for fallbacks) */
+const STORE = { TICKETS: new Map(), nextId: 1 };
+
+function nowISO() { return new Date().toISOString(); }
+
+/* List */
+router.get('/tickets', (req, res) => {
+  const tenantId = req.query.tenantId ? String(req.query.tenantId) : undefined;
+  const status   = req.query.status ? String(req.query.status).toLowerCase() : undefined;
+  const items = Array.from(STORE.TICKETS.values()).filter(t =>
+    (!tenantId || t.tenantId === tenantId) &&
+    (!status || t.status === status)
+  );
+  res.setHeader('X-Total-Count', String(items.length));
+  res.ok(items);
 });
 
-router.post('/tickets', async (req, res) => {
-  const models = hasModels(req);
+/* Create */
+router.post('/tickets', (req, res) => {
   const b = req.body || {};
-  try {
-    if (models?.SupportTicket) {
-      const created = await models.SupportTicket.create({
-        tenantId: b.tenantId || null, subject: b.subject || 'Support ticket', status: 'open', body: b.body || null,
-      });
-      return res.status(201).json(created);
-    }
-    const id = String(mem.nextId++), now = new Date().toISOString();
-    const t = { id, tenantId: b.tenantId || null, subject: b.subject || 'Support ticket', status: 'open', messages: b.body ? [{ from: 'requester', body: String(b.body), at: now }] : [], createdAt: now, updatedAt: now };
-    mem.tickets.set(id, t);
-    return res.status(201).json(t);
-  } catch (e) { return res.fail(500, e.message); }
+  const id = String(STORE.nextId++);
+  const ticket = {
+    id,
+    tenantId: b.tenantId || null,
+    subject: b.subject || 'Support ticket',
+    status: 'open',
+    messages: b.body ? [{ from: 'requester', body: String(b.body), at: nowISO() }] : [],
+    createdAt: nowISO(),
+    updatedAt: nowISO(),
+  };
+  STORE.TICKETS.set(id, ticket);
+  res.status(201).json(ticket);
 });
 
-router.post('/tickets/:id/messages', async (req, res) => {
-  const models = hasModels(req);
-  const id = String(req.params.id);
+/* Message add */
+router.post('/tickets/:id/messages', (req, res) => {
+  const t = STORE.TICKETS.get(String(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
   const b = req.body || {};
-  try {
-    if (models?.SupportMessage && models?.SupportTicket) {
-      const ticket = await models.SupportTicket.findByPk(id);
-      if (!ticket) return res.fail(404, 'Ticket not found');
-      await models.SupportMessage.create({ ticketId: ticket.id, from: b.from || 'support', body: String(b.body || '') });
-      const reload = await models.SupportTicket.findByPk(ticket.id, { include: [{ model: models.SupportMessage, as: 'messages' }] });
-      return res.ok(reload);
-    }
-    const t = mem.tickets.get(id);
-    if (!t) return res.fail(404, 'Ticket not found');
-    t.messages.push({ from: b.from || 'support', body: String(b.body || ''), at: new Date().toISOString() });
-    t.updatedAt = new Date().toISOString();
-    return res.ok(t);
-  } catch (e) { return res.fail(500, e.message); }
+  t.messages.push({ from: b.from || 'support', body: String(b.body || ''), at: nowISO() });
+  t.updatedAt = nowISO();
+  res.ok(t);
 });
 
-router.patch('/tickets/:id', async (req, res) => {
-  const models = hasModels(req);
-  const id = String(req.params.id);
+/* ---- Comment aliases expected by some clients ---- */
+router.get('/tickets/:id/comments', (req, res) => {
+  const t = STORE.TICKETS.get(String(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
+  res.ok({ items: t.messages || [] });
+});
+router.post('/tickets/:id/comments', (req, res) => {
+  const t = STORE.TICKETS.get(String(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
+  const b = req.body || {};
+  t.messages.push({ from: b.from || 'support', body: String(b.body || ''), at: nowISO() });
+  t.updatedAt = nowISO();
+  res.ok({ ok: true });
+});
+
+/* Status mutations */
+router.patch('/tickets/:id', (req, res) => {
+  const t = STORE.TICKETS.get(String(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
   const status = req.body?.status ? String(req.body.status).toLowerCase() : null;
-  if (!status || !['open','resolved','canceled'].includes(status)) return res.fail(400, 'Invalid status');
-  try {
-    if (models?.SupportTicket) {
-      const t = await models.SupportTicket.findByPk(id);
-      if (!t) return res.fail(404, 'Ticket not found');
-      await t.update({ status });
-      return res.ok(t);
-    }
-    const t = mem.tickets.get(id);
-    if (!t) return res.fail(404, 'Ticket not found');
-    t.status = status; t.updatedAt = new Date().toISOString(); return res.ok(t);
-  } catch (e) { return res.fail(500, e.message); }
+  if (status && ['open', 'resolved', 'canceled'].includes(status)) t.status = status;
+  t.updatedAt = nowISO();
+  res.ok(t);
+});
+router.post('/tickets/:id/resolve', (req, res) => {
+  const t = STORE.TICKETS.get(String(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
+  t.status = 'resolved'; t.updatedAt = nowISO(); res.ok(t);
+});
+router.post('/tickets/:id/cancel', (req, res) => {
+  const t = STORE.TICKETS.get(String(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
+  t.status = 'canceled'; t.updatedAt = nowISO(); res.ok(t);
+});
+router.post('/tickets/:id/reopen', (req, res) => {
+  const t = STORE.TICKETS.get(String(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
+  t.status = 'open'; t.updatedAt = nowISO(); res.ok(t);
 });
 
 module.exports = router;

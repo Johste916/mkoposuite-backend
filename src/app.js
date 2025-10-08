@@ -144,8 +144,18 @@ app.use((req, res, next) => {
 });
 
 /* --------------------------------- Parsers --------------------------------- */
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+/** 🔐 Raw body capture for gateway/webhook signature verification */
+function rawBodySaver(req, _res, buf) {
+  if (buf && buf.length) {
+    // Keep both Buffer and utf8 for flexibility
+    req.rawBody = buf;
+    try { req.rawBodyText = buf.toString('utf8'); } catch {}
+  }
+}
+
+// Use verify to preserve rawBody for JSON & urlencoded payloads
+app.use(express.json({ limit: '20mb', verify: rawBodySaver }));
+app.use(express.urlencoded({ extended: true, limit: '20mb', verify: rawBodySaver }));
 
 /* ----------------------------- Static /uploads ----------------------------- */
 const uploadsDir = path.resolve(__dirname, '../uploads');
@@ -230,6 +240,26 @@ function safeLoadFirst(paths, dummyRouter) {
 /* --------------------- Shared in-memory stores for fallbacks --------------- */
 const SUPPORT_STORE = { TICKETS: new Map(), nextId: 1 };
 const SMS_LOGS = [];
+
+/* Alias: /api/tickets/:id/comments → Support store */
+const ticketsCommentsAlias = express.Router();
+ticketsCommentsAlias.get('/:id/comments', (req, res) => {
+  const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
+  res.json({ items: t.messages || [] });
+});
+ticketsCommentsAlias.post('/:id/comments', (req, res) => {
+  const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Ticket not found' });
+  const b = req.body || {};
+  t.messages.push({
+    from: b.from || 'support',
+    body: String(b.body || ''),
+    at: new Date().toISOString(),
+  });
+  t.updatedAt = new Date().toISOString();
+  res.json({ ok: true });
+});
 
 /* ---------- Fallback tenants router (in-memory; keeps UI working) ---------- */
 function makeTenantsFallbackRouter() {
@@ -495,6 +525,26 @@ function makeSupportFallbackRouter() {
     t.status = 'open';
     t.updatedAt = new Date().toISOString();
     res.json(t);
+  });
+
+  // ---- Comments for a ticket (aliases) ----
+  r.get('/tickets/:id/comments', (req, res) => {
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
+    if (!t) return res.status(404).json({ error: 'Ticket not found' });
+    res.json({ items: t.messages || [] });
+  });
+
+  r.post('/tickets/:id/comments', (req, res) => {
+    const t = SUPPORT_STORE.TICKETS.get(String(req.params.id));
+    if (!t) return res.status(404).json({ error: 'Ticket not found' });
+    const b = req.body || {};
+    t.messages.push({
+      from: b.from || 'support',
+      body: String(b.body || ''),
+      at: new Date().toISOString(),
+    });
+    t.updatedAt = new Date().toISOString();
+    res.json({ ok: true });
   });
 
   return r;
@@ -1083,6 +1133,20 @@ if (PUBLIC_SIDEBAR_ENABLED) {
   });
 }
 
+/* ------------------------ 🔔 Register sync listeners (ONCE) ---------------- */
+try {
+  // Requires: ./services/syncBus.js and ./services/syncListeners.js
+  // These files set up the in-process event bus and listeners for auto-sync.
+  require('./services/syncListeners');
+  console.log('[sync] listeners registered]');
+} catch (e) {
+  if (e.code === 'MODULE_NOT_FOUND') {
+    console.warn('⚠️  Sync listeners not found (./services/syncListeners). Create it to enable auto-sync.');
+  } else {
+    console.warn('⚠️  Failed to register sync listeners:', e.message);
+  }
+}
+
 /* --------------------------------- Mounting -------------------------------- */
 app.use('/api/borrowers/search', borrowerSearchRoutes);
 
@@ -1105,6 +1169,8 @@ app.use('/api/tenants', ...auth, ...active, tenantFeatureRoutes);
 
 /* ✅ Single canonical tenants mount */
 app.use('/api/tenants', tenantRoutes);
+/* Singular alias to satisfy clients calling /api/tenant/* */
+app.use('/api/tenant',  tenantRoutes);
 
 /* ✅ NEW: Impersonation console (admin) */
 app.use('/api/admin/impersonation', ...auth, ...active, impersonationRoutes);
@@ -1135,6 +1201,8 @@ app.use('/api/plans', plansRoutes);
 
 /* ✅ NEW: Support endpoints (tickets, etc.) */
 app.use('/api/support', ...auth, ...active, supportRoutes);
+/* Admin alias for support (so /api/admin/support/tickets/* works) */
+app.use('/api/admin/support', ...auth, ...active, supportRoutes);
 
 /* Super-admin tenant console — mount REAL routes first */
 app.use('/api/admin/tenants', adminTenantsRoutes);
@@ -1143,6 +1211,9 @@ app.use('/api/admin/tenants', tenantsCompatRoutes);
 
 /* ✅ NEW: Banks (use initialized router to avoid double require) */
 app.use('/api/banks', ...auth, ...active, bankRoutes);
+
+/* Alias for clients calling /api/tickets/:id/comments directly */
+app.use('/api/tickets', ...auth, ...active, ticketsCommentsAlias);
 
 /* ✅ Repayments & Comments — REAL first, then COMPAT fallback (no duplicates) */
 const commentsCompatRoutes   = makeCommentsCompatRouter();
@@ -1229,6 +1300,9 @@ try {
       try { await sequelize2.authenticate(); res.json({ db: 'ok', ts: new Date().toISOString() }); }
       catch (e) { console.error('DB health error:', e); res.status(500).json({ db: 'down', error: e.message }); }
     });
+    const { router: eventsRouter, events: realtime } = require('./routes/eventsRoutes');
+    app.set('realtime', realtime);
+    app.use('/api/events', eventsRouter);
 
     app.get('/api/health/db/hr-tables', async (_req, res) => {
       const expected = [
@@ -1277,7 +1351,7 @@ try {
         'users',              // or "Users" depending on old migrations
         'user_branches',      // often a VIEW used for listing assignments
         'user_branches_rt',   // runtime relation used by assign-staff
-        'Borrowers',          // Sequelize default-cased table in some setups
+        'Borrowers',
         'Loans',
         'LoanPayments',
         'LoanRepayments',
@@ -1305,8 +1379,6 @@ try {
     });
   }
 } catch {}
-
-require("./services/syncListeners"); // just importing sets up listeners
 
 /* -------- Optional fallback for /auth/me if your authRoutes lacks it ------- */
 if (process.env.AUTH_ME_FALLBACK === '1') {
