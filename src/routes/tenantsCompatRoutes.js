@@ -1,97 +1,132 @@
 // routes/tenantsCompatRoutes.js
 'use strict';
+
 const express = require('express');
 const router = express.Router();
 
-/* Safe helpers (no-op if app already sets res.ok/res.fail) */
+/* ------------------------------------------------------------------ */
+/* Small helpers + safe res helpers (in case app.js didn't add them)  */
+/* ------------------------------------------------------------------ */
 router.use((req, res, next) => {
-  if (!res.ok)   res.ok   = (data, extra = {}) => {
-    if (typeof extra.total === 'number') res.setHeader('X-Total-Count', String(extra.total));
-    return res.json(data);
-  };
-  if (!res.fail) res.fail = (status, message, extra = {}) => res.status(status).json({ error: message, ...extra });
+  if (!res.ok) {
+    res.ok = (data, extra = {}) => {
+      if (typeof extra.total === 'number') {
+        res.setHeader('X-Total-Count', String(extra.total));
+      }
+      return res.json(data);
+    };
+  }
+  if (!res.fail) {
+    res.fail = (status, message, extra = {}) =>
+      res.status(status).json({ error: message, ...extra });
+  }
   next();
 });
 
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
-const qInt  = (v, d) => {
+const qInt = (v, d) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
 };
 
-// Minimal in-memory states for fallback
+// Minimal in-memory state for impersonation compatibility
 const IMP = { tenantId: null, startedAt: null, by: null };
 
-/** GET /stats — keep payload shape, add X-Total-Count */
+/* ------------------------------------------------------------------ */
+/* GET /stats  — DB-aware if possible, clean fallback if not           */
+/* ------------------------------------------------------------------ */
 router.get('/stats', async (req, res) => {
+  let items = [];
   try {
     const models = req.app.get('models');
-    if (models?.Tenant && typeof models.Tenant.count === 'function') {
-      const total = await models.Tenant.count();
-      res.setHeader('X-Total-Count', '1');
-      return res.ok({ items: [{ id: 'total', tenants: total }] });
+    if (models?.Tenant?.count) {
+      const total = await models.Tenant.count().catch(() => null);
+      if (Number.isFinite(total)) items = [{ id: 'total', tenants: total }];
     }
-    res.setHeader('X-Total-Count', '0');
-    return res.ok({ items: [] });
-  } catch (e) {
-    return res.fail(500, e.message);
+  } catch {
+    // swallow and fallback
   }
+  res.setHeader('X-Total-Count', String(items.length));
+  return res.ok({ items });
 });
 
-/** GET /:id/invoices  supports ?limit=&offset= ; keeps { invoices: [] } shape */
+/* ------------------------------------------------------------------ */
+/* GET /:id/invoices  — supports ?limit=&offset=; always returns 200  */
+/* ------------------------------------------------------------------ */
 router.get('/:id/invoices', async (req, res) => {
-  try {
-    const tenantId = String(req.params.id);
-    const limit = clamp(qInt(req.query.limit, 50), 1, 250);
-    const offset = clamp(qInt(req.query.offset, 0), 0, 50_000);
+  const tenantId = String(req.params.id);
+  const limit = clamp(qInt(req.query.limit, 50), 1, 250);
+  const offset = clamp(qInt(req.query.offset, 0), 0, 50_000);
 
+  let invoices = [];
+  let total = 0;
+
+  try {
     const models = req.app.get('models');
-    if (models?.Invoice) {
+    if (models?.Invoice?.findAndCountAll) {
       const { rows, count } = await models.Invoice.findAndCountAll({
         where: { tenantId },
         order: [['createdAt', 'DESC']],
-        limit, offset
+        limit,
+        offset,
       });
-      res.setHeader('X-Total-Count', String(count));
-      return res.ok({ invoices: rows });
+      invoices = rows || [];
+      total = Number.isFinite(count) ? count : invoices.length;
     }
-    res.setHeader('X-Total-Count', '0');
-    return res.ok({ invoices: [] });
-  } catch (e) {
-    return res.fail(500, e.message);
+  } catch {
+    // swallow and fallback: invoices = [], total = 0
   }
+
+  res.setHeader('X-Total-Count', String(total));
+  return res.ok({ invoices });
 });
 
-router.post('/:id/invoices/sync', async (_req, res) => {
-  // Hook your external provider sync here; currently a no-op
+/* ------------------------------------------------------------------ */
+/* POST /:id/invoices/sync — no-op hook (won't crash)                 */
+/* ------------------------------------------------------------------ */
+router.post('/:id/invoices/sync', (_req, res) => {
   return res.ok({ ok: true });
 });
 
-/** GET /:id/subscription — unchanged shape, real if possible, otherwise fallback */
+/* ------------------------------------------------------------------ */
+/* GET /:id/subscription — DB-aware if possible, clean fallback       */
+/* ------------------------------------------------------------------ */
 router.get('/:id/subscription', async (req, res) => {
+  const tenantId = String(req.params.id);
+  let payload = {
+    tenantId,
+    plan: 'basic',
+    status: 'trial',
+    seats: null,
+    renewsAt: null,
+    provider: 'fallback',
+  };
+
   try {
-    const tenantId = String(req.params.id);
     const models = req.app.get('models');
-    if (models?.Tenant) {
+    if (models?.Tenant?.findByPk) {
       const t = await models.Tenant.findByPk(tenantId);
       if (t) {
-        return res.ok({
+        payload = {
           tenantId,
           plan: (t.plan_code || 'basic').toLowerCase(),
           status: t.status || 'active',
           seats: t.seats ?? null,
           renewsAt: t.renews_at || null,
           provider: t.billing_provider || 'internal',
-        });
+        };
       }
     }
-    return res.ok({ tenantId, plan: 'basic', status: 'trial', seats: null, renewsAt: null, provider: 'fallback' });
-  } catch (e) {
-    return res.fail(500, e.message);
+  } catch {
+    // swallow and keep fallback payload
   }
+
+  return res.ok(payload);
 });
 
-/** POST /:id/impersonate — unchanged shape */
+/* ------------------------------------------------------------------ */
+/* POST /:id/impersonate — unchanged shape, in-memory context         */
+/* ------------------------------------------------------------------ */
 router.post('/:id/impersonate', (req, res) => {
   const tenantId = String(req.params.id);
   IMP.tenantId = tenantId;
