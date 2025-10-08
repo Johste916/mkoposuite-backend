@@ -1055,10 +1055,38 @@ const active = ensureTenantActive ? [ensureTenantActive] : [];
 const ent = (k) => (requireEntitlement ? [requireEntitlement(k)] : []);
 
 /* -------------------------- Automatic audit hooks -------------------------- */
+/* -------------------------- Automatic audit hooks -------------------------- */
 let AuditLog;
 try { ({ AuditLog } = require('./models')); } catch { try { ({ AuditLog } = require('../models')); } catch {} }
 
+function scrub(obj = {}) {
+  const HIDDEN = new Set(['password','password1','password2','token','secret','otp','pin','passcode']);
+  const out = {};
+  for (const [k,v] of Object.entries(obj)) {
+    out[k] = HIDDEN.has(String(k).toLowerCase()) ? '[redacted]' : v;
+  }
+  return out;
+}
+
+function deriveAction(req, ok) {
+  const p = req.path.toLowerCase();
+  const tail = p.split('/').filter(Boolean).slice(-1)[0] || '';
+  if (req.method === 'POST' && (p.includes('/api/login') || p.includes('/api/auth/login'))) {
+    return ok ? 'login:success' : 'login:failed';
+  }
+  if (req.method === 'POST' && (tail === 'approve' || tail === 'approved')) return 'status:approved';
+  if (req.method === 'POST' && (tail === 'disburse' || tail === 'disbursed')) return 'status:disbursed';
+  if (req.method === 'POST' && tail === 'reverse') return 'reverse';
+
+  if (req.method === 'POST')   return 'create';
+  if (req.method === 'PUT'
+   || req.method === 'PATCH')  return 'update';
+  if (req.method === 'DELETE') return 'delete';
+  return `${req.method.toLowerCase()}:${tail || 'other'}`;
+}
+
 app.use((req, res, next) => {
+  const started = Date.now();
   res.on('finish', () => {
     try {
       if (!AuditLog || typeof AuditLog.create !== 'function') return;
@@ -1068,15 +1096,27 @@ app.use((req, res, next) => {
       if (req.path.startsWith('/uploads')) return;
 
       const ok = res.statusCode >= 200 && res.statusCode < 400;
-      if (!ok) return;
-
       const category = (req.path.split('/')[2] || 'api').toLowerCase();
+      const action = deriveAction(req, ok);
+
+      const meta = {
+        method: req.method,
+        path: req.path,
+        statusCode: res.statusCode,
+        ms: Date.now() - started,
+        ua: req.headers['user-agent'],
+        ctx: req.context || null
+      };
+
+      const bodyPreview = scrub(req.body || {});
+      const message = JSON.stringify({ body: bodyPreview, meta });
+
       AuditLog.create({
         userId:   req.user?.id || null,
         branchId: req.user?.branchId || null,
         category,
-        action: `${req.method} ${req.path}`,
-        message: '',
+        action,
+        message,
         ip: req.ip,
         reversed: false,
       }).catch(() => {});
@@ -1084,7 +1124,6 @@ app.use((req, res, next) => {
   });
   next();
 });
-
 /* ----------------------------- Branch fallback ----------------------------- */
 let sequelize;
 try { ({ sequelize } = require('./models')); } catch { try { ({ sequelize } = require('../models')); } catch {} }
