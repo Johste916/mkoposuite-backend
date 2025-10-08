@@ -1,45 +1,62 @@
 'use strict';
 
-require('dotenv').config();
+// Load .env safely (won't crash if dotenv isn't installed on the server)
+try { require('dotenv').config(); } catch {}
 
 const app = require('./app');
 const db = require('./models');
 const { sequelize } = db;
 
-const cron = require('node-cron');
+/* ------------------------------ Optional deps ------------------------------ */
+let cron;
+try { cron = require('node-cron'); } catch { /* optional */ }
 
-// ✅ NEW: run migrations before serving traffic
-const runMigrations = require('./boot/runMigrations');
-
-// Optional auto-sync (creates/updates tables in Supabase when AUTO_SYNC=1)
+/* ---------------------------- Optional auto-sync --------------------------- */
+// Prefer migrations; autoSync is a legacy helper and optional
 let autoSync;
-try { autoSync = require('./bootstrap/autoSync'); } catch { /* optional */ }
+try {
+  autoSync = require('./bootstrap/autoSync');
+  if (autoSync && autoSync.default && typeof autoSync.default === 'function') {
+    autoSync = autoSync.default;
+  }
+} catch { /* optional */ }
 
-/* ------------------------------ Optional cron ------------------------------ */
+/* ----------------------------- Run migrations ------------------------------ */
+// Always attempt migrations first. If not present, continue without crashing.
+let runMigrations = async () => {
+  console.warn('⚠️  runMigrations not found; skipping DB migrations.');
+};
+try {
+  const m = require('./boot/runMigrations');
+  runMigrations = (m && m.default) ? m.default : m;
+} catch { /* handled by no-op above */ }
+
+/* --------------------------------- CRON ------------------------------------ */
 let penaltiesTask;
 try {
-  const { runPenaltiesJob } = require('./jobs/penaltiesJob');
-  penaltiesTask = cron.schedule('0 2 * * *', async () => {
-    console.log('[cron] penalties job started');
-    try {
-      await runPenaltiesJob();
-      console.log('[cron] penalties job finished');
-    } catch (e) {
-      console.error('[cron] penalties job failed:', e);
-    }
-  });
+  if (cron) {
+    const { runPenaltiesJob } = require('./jobs/penaltiesJob');
+    penaltiesTask = cron.schedule('0 2 * * *', async () => {
+      console.log('[cron] penalties job started');
+      try {
+        await runPenaltiesJob();
+        console.log('[cron] penalties job finished');
+      } catch (e) {
+        console.error('[cron] penalties job failed:', e);
+      }
+    });
+  } else {
+    console.warn('ℹ️ node-cron not installed; skipping penalties cron job.');
+  }
 } catch (e) {
   console.warn('⚠️ penaltiesJob not wired (optional):', e.message);
 }
 
-const PORT = process.env.PORT || 10000;
-let server;
-
-/* ------------------------------ One-off helpers ------------------------------ */
+/* ----------------------------- One-off helpers ----------------------------- */
 /** Only the `settings` table (rare; for first boot of config) */
 async function ensureSettingsOnly() {
   if (!db.Setting) {
-    console.log("ℹ️ Setting model not present; skipping.");
+    console.log('ℹ️ Setting model not present; skipping.');
     return;
   }
   console.log("🔧 Syncing ONLY 'settings' table…");
@@ -53,7 +70,7 @@ async function ensureAclTablesAndSeed() {
     console.log('ℹ️ ACL models missing; skipping ACL sync.');
     return;
   }
-  console.log('🔧 Syncing ACL tables and seeding defaults (Roles, Permissions, UserRoles)…');
+  console.log('🔧 Syncing ACL tables and seeding defaults…');
   await db.Role.sync({ alter: true });
   await db.Permission.sync({ alter: true });
   await db.UserRole.sync({ alter: true });
@@ -121,19 +138,22 @@ async function ensureCoreTables() {
 }
 
 /* --------------------------------- Startup --------------------------------- */
+const PORT = Number(process.env.PORT || 10000);
+let server;
+
 (async () => {
   try {
     await sequelize.authenticate();
     console.log('✅ Connected to the database');
 
-    // ✅ Always run migrations first (this creates columns like tenant_id, opening_balance, etc.)
+    // Migrations first (adds/updates columns like tenant_id, opening_balance, etc.)
     await runMigrations(sequelize);
 
     // One-switch bootstrap (optional legacy sync; prefer migrations)
     if (process.env.AUTO_SYNC === '1' && typeof autoSync === 'function') {
-      await autoSync(); // contains sequelize.sync({ alter: true })
+      await autoSync(); // typically does sequelize.sync({ alter: true })
     } else {
-      // Granular toggles (use only if you need to patch legacy tables)
+      // Granular toggles
       const syncSettingsOnly = process.env.SYNC_SETTINGS_ONLY === 'true';
       const syncACL          = process.env.SYNC_ACL === 'true';
       const syncAudit        = process.env.SYNC_AUDIT === 'true';
@@ -142,22 +162,22 @@ async function ensureCoreTables() {
       const syncCore         = process.env.SYNC_CORE === 'true';
 
       if (syncSettingsOnly) await ensureSettingsOnly();
-      else console.log('⏭  Skipping settings sync (set SYNC_SETTINGS_ONLY=true for one-off)');
+      else console.log('⏭️  Skipping settings sync (set SYNC_SETTINGS_ONLY=true for one-off)');
 
       if (syncACL) await ensureAclTablesAndSeed();
-      else console.log('⏭  Skipping ACL sync (set SYNC_ACL=true for first boot)');
+      else console.log('⏭️  Skipping ACL sync (set SYNC_ACL=true for first boot)');
 
       if (syncAudit) await ensureAuditTables();
-      else console.log('⏭  Skipping Audit sync (set SYNC_AUDIT=true to create/alter audit_logs)');
+      else console.log('⏭️  Skipping Audit sync (set SYNC_AUDIT=true to create/alter audit_logs)');
 
       if (syncSavings) await ensureSavingsTables();
-      else console.log('⏭  Skipping Savings sync (set SYNC_SAVINGS=true for one-off)');
+      else console.log('⏭️  Skipping Savings sync (set SYNC_SAVINGS=true for one-off)');
 
       if (syncExpenses) await ensureExpensesTables();
-      else console.log('⏭  Skipping Expense sync (set SYNC_EXPENSES=true for one-off)');
+      else console.log('⏭️  Skipping Expense sync (set SYNC_EXPENSES=true for one-off)');
 
       if (syncCore) await ensureCoreTables();
-      else console.log('⏭  Skipping CORE sync (set SYNC_CORE=true to create/alter core tables)');
+      else console.log('⏭️  Skipping CORE sync (set SYNC_CORE=true to create/alter core tables)');
     }
 
     server = app.listen(PORT, () => {
