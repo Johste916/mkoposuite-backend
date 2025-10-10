@@ -104,7 +104,6 @@ exports.listAssignments = async (req, res) => {
 
     const { roleId, userId } = await detectUserRoleFields();
 
-    // Raw list of userId values
     const rows = await UserRole.findAll({
       attributes: [userId],
       where: { [roleId]: role.id },
@@ -127,7 +126,7 @@ exports.listAssignments = async (req, res) => {
   }
 };
 
-/** DELETE /api/roles/:id/assignments  (bulk unassign all users from this role) */
+/** DELETE /api/roles/:id/assignments  — bulk unassign all users from this role */
 exports.clearAssignments = async (req, res) => {
   try {
     const role = await Role.findByPk(req.params.id);
@@ -143,7 +142,12 @@ exports.clearAssignments = async (req, res) => {
   }
 };
 
-/** DELETE /api/roles/:id  (?force=1) */
+/**
+ * DELETE /api/roles/:id
+ * - If role is assigned to users → 409 with assignedCount.
+ * - Add `?force=1` to automatically detach from users then delete.
+ * - System roles are protected unless you force.
+ */
 exports.deleteRole = async (req, res) => {
   try {
     const role = await Role.findByPk(req.params.id);
