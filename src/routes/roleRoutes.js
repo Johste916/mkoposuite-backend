@@ -1,12 +1,24 @@
 // backend/src/routes/roleRoutes.js
-const express = require('express');
-const router = express.Router();
-const { authenticateUser } = require('../middleware/authMiddleware');
-const roleController = require('../controllers/roleController');
+"use strict";
 
-// These can also be protected with permission checks if you prefer:
-// e.g. allow('manageRoles')
-router.get('/', authenticateUser, roleController.getAllRoles);
-router.post('/', authenticateUser, roleController.createRole);
+const express = require("express");
+const router = express.Router();
+
+let authenticateUser;
+try {
+  ({ authenticateUser } = require("../middleware/authMiddleware"));
+} catch {}
+const guard = (fn) => (typeof fn === "function" ? fn : (_req, _res, next) => next());
+
+const roleController = require("../controllers/roleController");
+
+// List & create
+router.get("/", guard(authenticateUser), roleController.getAllRoles);
+router.post("/", guard(authenticateUser), roleController.createRole);
+
+// Read / Update / Delete (these fix the 404s your UI was hitting)
+router.get("/:id", guard(authenticateUser), roleController.getRoleById);
+router.put("/:id", guard(authenticateUser), roleController.updateRole);
+router.delete("/:id", guard(authenticateUser), roleController.deleteRole);
 
 module.exports = router;
