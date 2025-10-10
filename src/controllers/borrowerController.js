@@ -5,6 +5,9 @@ const models = require("../models");
 const fs = require("fs");
 const path = require("path");
 
+// Default phone country code for normalization (matches front-end)
+const PHONE_CC = "+255";
+
 // Models (nullable-safe)
 const Borrower           = models.Borrower || null;
 const Loan               = models.Loan || null;
@@ -55,6 +58,18 @@ const toApi = (b) => {
 };
 
 const safeNum = (v) => Number(v || 0);
+
+/* Phone normalization: produce +CC######## (best-effort) */
+function normalizePhone(raw, cc = PHONE_CC) {
+  if (!raw) return raw;
+  let s = String(raw).trim();
+  // remove spaces/dashes
+  s = s.replace(/[\s-]/g, "");
+  if (s.startsWith("+")) return s;
+  if (cc && s.startsWith(cc.replace("+", ""))) return `+${s}`;
+  if (cc && s.startsWith("0")) return `${cc}${s.slice(1)}`;
+  return s.startsWith("+") ? s : `+${s}`;
+}
 
 /* helper: store an uploaded photo if the Borrower has a photoUrl column */
 async function maybePersistPhoto(borrowerId, file) {
@@ -107,7 +122,6 @@ async function computeBorrowerDerived(borrowerId) {
     // Overdue & PAR
     let totalOutstanding = 0;
     if (Loan) {
-      // Try to use existing outstanding fields if present
       const loanAttrs = await safeAttributes(Loan, [
         "id",
         "borrowerId",
@@ -132,13 +146,11 @@ async function computeBorrowerDerived(borrowerId) {
         if (out != null) {
           totalOutstanding += safeNum(out);
         } else {
-          // Fallback to principal if no outstanding column exists
           totalOutstanding += safeNum(l.amount);
         }
       }
     }
 
-    // Overdue: sum unpaid amounts of repayment rows due before today
     if (LoanRepayment && Loan) {
       const repayAttrs = await safeAttributes(LoanRepayment, [
         "amount",
@@ -149,7 +161,6 @@ async function computeBorrowerDerived(borrowerId) {
       ]);
 
       const today = new Date();
-      // Grab only this borrower's loans' repayments
       const rows = await LoanRepayment.findAll({
         attributes: repayAttrs,
         include: [{ model: Loan, where: { borrowerId }, attributes: [] }],
@@ -178,7 +189,6 @@ async function computeBorrowerDerived(borrowerId) {
       }
     }
   } catch (err) {
-    // Soft-fail — keep derived zeros if something is missing
     console.warn("computeBorrowerDerived failed:", err?.message || err);
   }
 
@@ -204,7 +214,6 @@ exports.getAllBorrowers = async (req, res) => {
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
 
-    // Select conservative, likely-to-exist attributes.
     const attributes = ["id", "name", "nationalId", "phone", "address", "createdAt", "updatedAt"]
       .filter((a) => Borrower.rawAttributes[a]);
 
@@ -216,7 +225,14 @@ exports.getAllBorrowers = async (req, res) => {
       offset,
     });
 
-    return res.json({ items: rows.map(toApi), total: count });
+    // Ensure phone formatting on output
+    const items = rows.map((b) => {
+      const j = toApi(b);
+      if (j.phone) j.phone = normalizePhone(j.phone);
+      return j;
+    });
+
+    return res.json({ items, total: count });
   } catch (error) {
     console.error("getAllBorrowers error:", error);
     res.status(500).json({ error: "Failed to fetch borrowers" });
@@ -229,7 +245,6 @@ exports.createBorrower = async (req, res) => {
 
     const existingCols = await getExistingColumns(Borrower);
 
-    // Accept both JSON and multipart/form-data (fields from AddBorrower)
     const b = req.body || {};
     const firstName = (b.firstName || "").trim();
     const lastName  = (b.lastName || "").trim();
@@ -237,7 +252,6 @@ exports.createBorrower = async (req, res) => {
 
     if (!displayName) return res.status(400).json({ error: "name is required" });
 
-    // Branch requirement if column exists and is NOT NULL
     const needsBranchId =
       !!Borrower.rawAttributes.branchId &&
       Borrower.rawAttributes.branchId.allowNull === false;
@@ -247,11 +261,10 @@ exports.createBorrower = async (req, res) => {
       return res.status(400).json({ error: "branchId is required" });
     }
 
-    // Build payload only with columns that exist in DB
     const payload = {};
     if (existingCols.includes("name"))        payload.name = displayName;
     if (existingCols.includes("nationalId"))  payload.nationalId = b.nationalId || b.idNumber || null;
-    if (existingCols.includes("phone"))       payload.phone = b.phone || null;
+    if (existingCols.includes("phone"))       payload.phone = normalizePhone(b.phone || null);
     if (existingCols.includes("email"))       payload.email = b.email || null;
     if (existingCols.includes("address"))     payload.address = b.addressLine || b.address || null;
     if (existingCols.includes("status"))      payload.status = "active";
@@ -259,7 +272,6 @@ exports.createBorrower = async (req, res) => {
       if (incomingBranchId) payload.branchId = incomingBranchId;
     }
 
-    // Optional extras (align with Add Borrower form)
     if (existingCols.includes("gender"))                  payload.gender = b.gender || null;
     if (existingCols.includes("birthDate"))               payload.birthDate = b.birthDate || null;
     if (existingCols.includes("employmentStatus"))        payload.employmentStatus = b.employmentStatus || null;
@@ -268,7 +280,7 @@ exports.createBorrower = async (req, res) => {
     if (existingCols.includes("idIssuedDate"))            payload.idIssuedDate = b.idIssuedDate || null;
     if (existingCols.includes("idExpiryDate"))            payload.idExpiryDate = b.idExpiryDate || null;
     if (existingCols.includes("nextKinName"))             payload.nextKinName = b.nextKinName || null;
-    if (existingCols.includes("nextKinPhone"))            payload.nextKinPhone = b.nextKinPhone || null;
+    if (existingCols.includes("nextKinPhone"))            payload.nextKinPhone = normalizePhone(b.nextKinPhone || null);
     if (existingCols.includes("nextOfKinRelationship"))   payload.nextOfKinRelationship = b.nextOfKinRelationship || b.kinRelationship || null;
     if (existingCols.includes("regDate"))                 payload.regDate = b.regDate || null;
     if (existingCols.includes("loanOfficerId"))           payload.loanOfficerId = b.loanOfficerId || b.officerId || null;
@@ -276,16 +288,16 @@ exports.createBorrower = async (req, res) => {
 
     const created = await Borrower.create(payload);
 
-    // If a photo file was posted and DB has photoUrl, persist it
     const file = Array.isArray(req.files) && req.files.find(f => f.fieldname === "photo");
     const photoUrl = await maybePersistPhoto(created.id, file);
     if (photoUrl && existingCols.includes("photoUrl")) {
       await created.update({ photoUrl });
     }
 
-    // include derived so Add→Details shows everything immediately
     const derived = await computeBorrowerDerived(created.id);
-    res.status(201).json({ ...toApi(created), ...derived });
+    const out = { ...toApi(created), ...derived };
+    if (out.phone) out.phone = normalizePhone(out.phone);
+    res.status(201).json(out);
   } catch (error) {
     console.error("createBorrower error:", error);
     res.status(500).json({ error: "Failed to create borrower" });
@@ -298,7 +310,9 @@ exports.getBorrowerById = async (req, res) => {
     const b = await Borrower.findByPk(req.params.id);
     if (!b) return res.status(404).json({ error: "Borrower not found" });
     const derived = await computeBorrowerDerived(b.id);
-    res.json({ ...toApi(b), ...derived });
+    const out = { ...toApi(b), ...derived };
+    if (out.phone) out.phone = normalizePhone(out.phone);
+    res.json(out);
   } catch (error) {
     console.error("getBorrowerById error:", error);
     res.status(500).json({ error: "Failed to fetch borrower" });
@@ -326,7 +340,6 @@ exports.updateBorrower = async (req, res) => {
       }
     }
 
-    // Only update columns that exist (keeps other environments safe)
     const cols = await getExistingColumns(Borrower);
     const body = req.body || {};
     const patch = {};
@@ -338,7 +351,7 @@ exports.updateBorrower = async (req, res) => {
     // Core fields
     setIf("name", body.name ?? body.fullName);
     setIf("nationalId", body.nationalId);
-    setIf("phone", body.phone);
+    setIf("phone", typeof body.phone !== "undefined" ? normalizePhone(body.phone) : undefined);
     setIf("email", body.email);
     setIf("address", body.address);
 
@@ -362,15 +375,16 @@ exports.updateBorrower = async (req, res) => {
     setIf("idIssuedDate", body.idIssuedDate || null);
     setIf("idExpiryDate", body.idExpiryDate || null);
     setIf("nextKinName", body.nextKinName);
-    setIf("nextKinPhone", body.nextKinPhone);
+    setIf("nextKinPhone", typeof body.nextKinPhone !== "undefined" ? normalizePhone(body.nextKinPhone) : undefined);
     setIf("nextOfKinRelationship", body.nextOfKinRelationship);
     setIf("groupId", body.groupId);
 
     await b.update(patch);
 
-    // Return canonical + fresh derived so UI reflects instantly
     const derived = await computeBorrowerDerived(b.id);
-    res.json({ ...toApi(b), ...derived });
+    const out = { ...toApi(b), ...derived };
+    if (out.phone) out.phone = normalizePhone(out.phone);
+    res.json(out);
   } catch (error) {
     console.error("updateBorrower error:", error);
     res.status(500).json({ error: "Failed to update borrower" });
@@ -562,13 +576,6 @@ exports.addComment = async (req, res) => {
 };
 
 /* ---------- Savings ---------- */
-/**
- * Aligns with /api/savings/borrower/:borrowerId logic:
- * - ignores reversed transactions in totals/balance
- * - supports deposit, withdrawal, charge, interest
- * - returns { balance, transactions, totals }
- * - selects only columns that actually exist in DB (avoids 42703)
- */
 exports.getSavingsByBorrower = async (req, res) => {
   try {
     if (!SavingsTransaction) {
@@ -671,7 +678,11 @@ exports.listBlacklisted = async (_req, res) => {
   try {
     if (!Borrower) return res.json([]);
     const borrowers = await Borrower.findAll({ where: { status: "blacklisted" } });
-    res.json(borrowers.map(toApi));
+    res.json(borrowers.map((b) => {
+      const j = toApi(b);
+      if (j.phone) j.phone = normalizePhone(j.phone);
+      return j;
+    }));
   } catch (error) {
     console.error("listBlacklisted error:", error);
     res.status(500).json({ error: "Failed to fetch blacklisted borrowers" });
@@ -911,6 +922,17 @@ exports.importGroupMembers = async (req, res) => {
 };
 
 /* ---------- Import Borrowers ---------- */
+function splitCSVLine(line) {
+  // Split by commas not inside quotes
+  return line.match(/(?<=^|,)(?:"[^"]*"|[^,]*)/g)?.map(s => {
+    const trimmed = s.trim();
+    if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+      return trimmed.slice(1, -1).replace(/""/g, '"');
+    }
+    return trimmed;
+  }) || [];
+}
+
 exports.importBorrowers = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
@@ -919,13 +941,16 @@ exports.importBorrowers = async (req, res) => {
     const buf = req.file.buffer;
     const text = buf.toString("utf8");
 
-    const lines = text.split(/\r?\n/).filter(Boolean);
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
     if (lines.length <= 1) return res.status(400).json({ error: "No rows" });
 
-    const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
+    const header = splitCSVLine(lines[0]).map((h) => h.trim().toLowerCase());
     const nameIdx = header.indexOf("name");
     const phoneIdx = header.indexOf("phone");
     const nidIdx = header.indexOf("nationalid");
+    const branchIdIdx = header.indexOf("branchid");
+    const officerIdIdx = header.indexOf("officerid");
+    const statusIdx = header.indexOf("status");
 
     if (nameIdx === -1)
       return res.status(400).json({ error: 'CSV must include a "name" column' });
@@ -934,23 +959,61 @@ exports.importBorrowers = async (req, res) => {
     const existingCols = await getExistingColumns(Borrower);
 
     for (let i = 1; i < lines.length; i++) {
-      const cols = lines[i].split(",").map((c) => c.trim());
+      const cols = splitCSVLine(lines[i]);
       const name = cols[nameIdx];
       if (!name) continue;
-      const phone = phoneIdx !== -1 ? cols[phoneIdx] : null;
-      const nationalId = nidIdx !== -1 ? cols[nidIdx] : null;
+
+      const phone = phoneIdx !== -1 ? normalizePhone(cols[phoneIdx]) : null;
+      const nationalId = nidIdx !== -1 ? (cols[nidIdx] || null) : null;
 
       const payload = { status: "active" };
       if (existingCols.includes("name")) payload.name = name;
       if (existingCols.includes("phone")) payload.phone = phone;
       if (existingCols.includes("nationalId")) payload.nationalId = nationalId;
 
-      const b = await Borrower.create(payload);
+      if (existingCols.includes("branch_id") || existingCols.includes("branchId")) {
+        const raw = branchIdIdx !== -1 ? cols[branchIdIdx] : null;
+        if (raw) payload.branchId = Number.isFinite(Number(raw)) ? Number(raw) : null;
+      }
+      if (existingCols.includes("loanOfficerId")) {
+        const raw = officerIdIdx !== -1 ? cols[officerIdIdx] : null;
+        if (raw) payload.loanOfficerId = Number.isFinite(Number(raw)) ? Number(raw) : null;
+      }
+      if (existingCols.includes("status") && statusIdx !== -1 && cols[statusIdx]) {
+        payload.status = String(cols[statusIdx]).toLowerCase();
+      }
+
+      // Prefer findOrCreate if nationalId column exists & may be unique
+      let b;
+      if (existingCols.includes("nationalId") && nationalId) {
+        const [row, createdFlag] = await Borrower.findOrCreate({
+          where: { nationalId },
+          defaults: payload,
+        });
+        if (!createdFlag) {
+          // Update missing phone or name if needed
+          const patch = {};
+          if (existingCols.includes("phone") && phone && !row.phone) patch.phone = phone;
+          if (existingCols.includes("name") && name && row.name !== name) patch.name = name;
+          if (Object.keys(patch).length) await row.update(patch);
+        }
+        b = row;
+      } else {
+        b = await Borrower.create(payload);
+      }
+
       created.push(toApi(b));
-      if (created.length >= 1000) break;
+      if (created.length >= 5000) break; // safety cap
     }
 
-    res.status(202).json({ received: true, count: created.length, items: created });
+    // Normalize phone in response
+    const items = created.map((j) => {
+      const x = { ...j };
+      if (x.phone) x.phone = normalizePhone(x.phone);
+      return x;
+    });
+
+    res.status(202).json({ received: true, count: items.length, items });
   } catch (error) {
     console.error("importBorrowers error:", error);
     res.status(500).json({ error: "Failed to import borrowers" });
