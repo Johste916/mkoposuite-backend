@@ -1,24 +1,24 @@
-// backend/src/routes/roleRoutes.js
 "use strict";
 
 const express = require("express");
 const router = express.Router();
-
-let authenticateUser;
-try {
-  ({ authenticateUser } = require("../middleware/authMiddleware"));
-} catch {}
-const guard = (fn) => (typeof fn === "function" ? fn : (_req, _res, next) => next());
-
+const { authenticateUser } = require("../middleware/authMiddleware");
 const roleController = require("../controllers/roleController");
 
-// List & create
-router.get("/", guard(authenticateUser), roleController.getAllRoles);
-router.post("/", guard(authenticateUser), roleController.createRole);
+// All protected
+router.use(authenticateUser);
 
-// Read / Update / Delete (these fix the 404s your UI was hitting)
-router.get("/:id", guard(authenticateUser), roleController.getRoleById);
-router.put("/:id", guard(authenticateUser), roleController.updateRole);
-router.delete("/:id", guard(authenticateUser), roleController.deleteRole);
+// List/create
+router.get("/", roleController.getAllRoles);
+router.post("/", roleController.createRole);
+
+// Read/update/delete
+router.get("/:id", roleController.getRoleById);
+router.put("/:id", roleController.updateRole);
+router.delete("/:id", roleController.deleteRole);
+
+// Assignment helpers
+router.get("/:id/assignments", roleController.listAssignments);
+router.delete("/:id/assignments", roleController.clearAssignments);
 
 module.exports = router;

@@ -4,25 +4,23 @@ const db = require("../models");
 const { Op } = require("sequelize");
 
 const Role = db.Role;
-const UserRole =
-  db.UserRole ||
-  db.UserRoles ||
-  (db.sequelize?.models && db.sequelize.models.UserRole);
+const User = db.User;
+const UserRole = db.UserRole || db.sequelize?.models?.UserRole;
 
+// ---- helpers ----
 const safeString = (v) => (typeof v === "string" ? v : v == null ? "" : String(v));
 
-/** tiny helper: detect the actual roleId column in UserRoles */
-async function detectUserRoleRoleIdField() {
+async function detectUserRoleFields() {
+  const defaults = { roleId: "roleId", userId: "userId" };
   try {
     const qi = db.sequelize.getQueryInterface();
     const desc = await qi.describeTable("UserRoles");
-    if (desc.roleId) return "roleId";
-    if (desc.role_id) return "role_id";
-  } catch (_) {}
-  // fallback to attribute names if available
-  if (UserRole?.rawAttributes?.roleId) return "roleId";
-  if (UserRole?.rawAttributes?.role_id) return "role_id";
-  return "roleId"; // sane default
+    const roleId = desc.roleId ? "roleId" : (desc.role_id ? "role_id" : defaults.roleId);
+    const userId = desc.userId ? "userId" : (desc.user_id ? "user_id" : defaults.userId);
+    return { roleId, userId };
+  } catch {
+    return defaults;
+  }
 }
 
 /** GET /api/roles */
@@ -48,7 +46,7 @@ exports.getRoleById = async (req, res) => {
   }
 };
 
-/** POST /api/roles  body: { name, description } */
+/** POST /api/roles */
 exports.createRole = async (req, res) => {
   try {
     const name = safeString(req.body?.name).trim();
@@ -59,9 +57,7 @@ exports.createRole = async (req, res) => {
     }
 
     const dupe = await Role.findOne({ where: { name } });
-    if (dupe) {
-      return res.status(409).json({ error: "A role with this name already exists" });
-    }
+    if (dupe) return res.status(409).json({ error: "A role with this name already exists" });
 
     const role = await Role.create({ name, description, isSystem: false });
     res.status(201).json(role);
@@ -71,24 +67,24 @@ exports.createRole = async (req, res) => {
   }
 };
 
-/** PUT /api/roles/:id  body: { name?, description? } */
+/** PUT /api/roles/:id */
 exports.updateRole = async (req, res) => {
   try {
     const role = await Role.findByPk(req.params.id);
     if (!role) return res.status(404).json({ error: "Role not found" });
     if (role.isSystem) return res.status(403).json({ error: "System roles cannot be edited" });
 
-    const nextName = req.body?.name != null ? safeString(req.body.name).trim() : undefined;
-    const nextDesc = req.body?.description != null ? safeString(req.body.description).trim() : undefined;
+    const name = req.body?.name != null ? safeString(req.body.name).trim() : undefined;
+    const description = req.body?.description != null ? safeString(req.body.description).trim() : undefined;
 
-    if (nextName && nextName !== role.name) {
-      const dupe = await Role.findOne({ where: { name: nextName, id: { [Op.ne]: role.id } } });
+    if (name && name !== role.name) {
+      const dupe = await Role.findOne({ where: { name, id: { [Op.ne]: role.id } } });
       if (dupe) return res.status(409).json({ error: "Another role with this name already exists" });
     }
 
     await role.update({
-      ...(typeof nextName !== "undefined" ? { name: nextName } : {}),
-      ...(typeof nextDesc !== "undefined" ? { description: nextDesc } : {}),
+      ...(typeof name !== "undefined" ? { name } : {}),
+      ...(typeof description !== "undefined" ? { description } : {}),
     });
 
     res.json(role);
@@ -98,7 +94,56 @@ exports.updateRole = async (req, res) => {
   }
 };
 
-/** DELETE /api/roles/:id  (?force=1 to remove even if assigned) */
+/** GET /api/roles/:id/assignments */
+exports.listAssignments = async (req, res) => {
+  try {
+    const role = await Role.findByPk(req.params.id);
+    if (!role) return res.status(404).json({ error: "Role not found" });
+
+    if (!UserRole) return res.json({ items: [], total: 0 });
+
+    const { roleId, userId } = await detectUserRoleFields();
+
+    // Raw list of userId values
+    const rows = await UserRole.findAll({
+      attributes: [userId],
+      where: { [roleId]: role.id },
+      raw: true,
+      limit: 10000,
+    });
+
+    const ids = rows.map((r) => r[userId]);
+    if (!ids.length) return res.json({ items: [], total: 0 });
+
+    const users = await User.findAll({
+      where: { id: ids },
+      attributes: ["id", "name", "email", "branchId", "role"],
+    });
+
+    res.json({ items: users, total: users.length });
+  } catch (err) {
+    console.error("listAssignments error:", err);
+    res.status(500).json({ error: "Failed to list role assignments" });
+  }
+};
+
+/** DELETE /api/roles/:id/assignments  (bulk unassign all users from this role) */
+exports.clearAssignments = async (req, res) => {
+  try {
+    const role = await Role.findByPk(req.params.id);
+    if (!role) return res.status(404).json({ error: "Role not found" });
+    if (!UserRole) return res.json({ ok: true, removed: 0 });
+
+    const { roleId } = await detectUserRoleFields();
+    const removed = await UserRole.destroy({ where: { [roleId]: role.id } });
+    res.json({ ok: true, removed });
+  } catch (err) {
+    console.error("clearAssignments error:", err);
+    res.status(500).json({ error: "Failed to clear role assignments" });
+  }
+};
+
+/** DELETE /api/roles/:id  (?force=1) */
 exports.deleteRole = async (req, res) => {
   try {
     const role = await Role.findByPk(req.params.id);
@@ -108,20 +153,19 @@ exports.deleteRole = async (req, res) => {
     const force = ["1", "true", "yes"].includes(String(req.query.force || "").toLowerCase());
 
     if (UserRole) {
-      const roleIdField = await detectUserRoleRoleIdField();
-
-      // Count assignments robustly across environments
-      const assignedCount = await UserRole.count({ where: { [roleIdField]: role.id } });
+      const { roleId } = await detectUserRoleFields();
+      const assignedCount = await UserRole.count({ where: { [roleId]: role.id } });
 
       if (assignedCount > 0 && !force) {
         return res.status(409).json({
           error: "Role is assigned to users",
           assignedCount,
-          hint: "Unassign from users or pass ?force=1 to delete anyway.",
+          hint: "Unassign from users (or call DELETE /api/roles/:id/assignments) or pass ?force=1 to delete anyway.",
         });
       }
+
       if (assignedCount > 0 && force) {
-        await UserRole.destroy({ where: { [roleIdField]: role.id } });
+        await UserRole.destroy({ where: { [roleId]: role.id } });
       }
     }
 
