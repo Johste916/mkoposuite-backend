@@ -1,3 +1,5 @@
+'use strict';
+
 module.exports = (sequelize, DataTypes) => {
   const Role = sequelize.define(
     'Role',
@@ -17,7 +19,6 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: '',
       },
-      // ✅ used by seeder; prevents “Unknown attributes (isSystem)” warning
       isSystem: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
@@ -30,6 +31,17 @@ module.exports = (sequelize, DataTypes) => {
       indexes: [{ unique: true, fields: ['name'] }],
     }
   );
+
+  Role.associate = (models) => {
+    if (models.Permission && models.RolePermission) {
+      Role.belongsToMany(models.Permission, {
+        through: models.RolePermission,
+        foreignKey: 'roleId',
+        otherKey: 'permissionId',
+        as: 'Permissions',
+      });
+    }
+  };
 
   return Role;
 };

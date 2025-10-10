@@ -9,8 +9,8 @@ module.exports = (sequelize, DataTypes) => {
       email: { type: DataTypes.STRING, allowNull: false, unique: true, validate: { isEmail: true } },
       password_hash: { type: DataTypes.STRING, allowNull: false },
       password: { type: DataTypes.VIRTUAL }, // write-time only
-      role: { type: DataTypes.STRING, defaultValue: 'user' },
-      branchId: { type: DataTypes.INTEGER, allowNull: true },
+      role: { type: DataTypes.STRING, defaultValue: 'user' }, // legacy single role alias
+      branchId: { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },
     },
     {
       tableName: 'Users',
@@ -29,7 +29,7 @@ module.exports = (sequelize, DataTypes) => {
   User.associate = (models) => {
     if (models.Role) {
       User.belongsToMany(models.Role, {
-        through: 'UserRoles',
+        through: models.UserRole || 'UserRoles',
         foreignKey: 'userId',
         otherKey: 'roleId',
         as: 'Roles',
@@ -52,6 +52,26 @@ module.exports = (sequelize, DataTypes) => {
         as: 'Branches',
       });
     }
+  };
+
+  // ---- helpers/scopes ----
+  User.addScope('withRoles', {
+    include: [{ model: sequelize.models.Role, as: 'Roles', through: { attributes: [] } }],
+  });
+
+  User.prototype.roleNames = function () {
+    const arr = (this.Roles || []).map(r => (r.name || '').toLowerCase());
+    const single = (this.role || '').toLowerCase();
+    return Array.from(new Set([...arr, single].filter(Boolean)));
+  };
+
+  User.prototype.isRole = function (name) {
+    const n = String(name || '').toLowerCase();
+    return this.roleNames().includes(n);
+  };
+
+  User.prototype.isLoanOfficer = function () {
+    return this.isRole('loan officer') || this.isRole('loan_officer') || this.isRole('officer');
   };
 
   return User;

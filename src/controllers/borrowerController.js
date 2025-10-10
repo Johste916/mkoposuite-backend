@@ -17,6 +17,8 @@ const Group              = models.BorrowerGroup || models.Group || null;
 const GroupMember        = models.BorrowerGroupMember || models.GroupMember || null;
 const BorrowerComment    = models.BorrowerComment || null;
 const KYCDocument        = models.KYCDocument || null;
+const User               = models.User || null;
+const Role               = models.Role || null;
 
 // Runtime column introspection (for DB ↔ model drift safety)
 const sequelize = models.sequelize || null;
@@ -58,6 +60,18 @@ const toApi = (b) => {
 };
 
 const safeNum = (v) => Number(v || 0);
+
+/* permissions helper — permissive if not wired */
+function hasAnyPermission(req, names = []) {
+  try {
+    const perms = (req.user?.permissions || []).map((p) => String(p).toLowerCase());
+    return names.some((n) => perms.includes(String(n).toLowerCase()));
+  } catch { return true; }
+}
+function canAssignLoanOfficer(req) {
+  // tweak the list to fit your policy
+  return hasAnyPermission(req, ["borrower.assign", "staff.update", "loan.assign", "borrower.create"]);
+}
 
 /* Phone normalization: produce +CC######## (best-effort) */
 function normalizePhone(raw, cc = PHONE_CC) {
@@ -204,10 +218,12 @@ exports.getAllBorrowers = async (req, res) => {
     const where = {};
     if (branchId) where.branchId = branchId;
     if (q) {
+      // Use iLike when available; fallback to like
+      const like = (sequelize?.getDialect?.() === 'postgres') ? Op.iLike : Op.like;
       where[Op.or] = [
-        { name: { [Op.iLike]: `%${q}%` } },
-        { phone: { [Op.iLike]: `%${q}%` } },
-        { nationalId: { [Op.iLike]: `%${q}%` } },
+        { name: { [like]: `%${q}%` } },
+        { phone: { [like]: `%${q}%` } },
+        { nationalId: { [like]: `%${q}%` } },
       ];
     }
 
@@ -255,10 +271,77 @@ exports.createBorrower = async (req, res) => {
     const needsBranchId =
       !!Borrower.rawAttributes.branchId &&
       Borrower.rawAttributes.branchId.allowNull === false;
+
+    // Resolve desired branch (explicit > header > user > null)
     const incomingBranchId =
       b.branchId || req.headers["x-branch-id"] || req.user?.branchId || null;
+
     if (needsBranchId && !incomingBranchId) {
       return res.status(400).json({ error: "branchId is required" });
+    }
+
+    // ----- role-aware loan officer assignment -----
+    let desiredOfficerId = b.loanOfficerId || b.officerId || null;
+
+    // If provided, validate permissions + role + branch compatibility
+    if (desiredOfficerId != null) {
+      if (!canAssignLoanOfficer(req)) {
+        return res.status(403).json({ error: "You are not allowed to assign a loan officer." });
+      }
+      if (!User) return res.status(500).json({ error: "User model not available for assignment" });
+
+      const officer = await User.findByPk(desiredOfficerId, {
+        include: [{ model: Role, as: "Roles", through: { attributes: [] } }],
+      });
+      if (!officer) return res.status(400).json({ error: "loanOfficerId not found" });
+
+      const isOfficer =
+        (String(officer.role || "").toLowerCase() === "loan officer") ||
+        (officer.Roles || []).some((r) => (String(r.name) || "").toLowerCase() === "loan officer");
+
+      if (!isOfficer) return res.status(400).json({ error: "Selected user is not a Loan Officer" });
+
+      if (incomingBranchId && officer.branchId && String(officer.branchId) !== String(incomingBranchId)) {
+        return res.status(400).json({ error: "Loan Officer not in selected branch" });
+      }
+    }
+
+    // If not provided, try auto-assign least-loaded officer in same branch (if any)
+    if (!desiredOfficerId && User && Role) {
+      const like = (sequelize?.getDialect?.() === 'postgres') ? Op.iLike : Op.like;
+
+      const candidates = await User.findAll({
+        where: incomingBranchId ? { branchId: incomingBranchId } : {},
+        include: [{
+          model: Role,
+          as: "Roles",
+          through: { attributes: [] },
+          where: { name: { [like]: "loan officer" } },
+          required: false,
+        }],
+        limit: 1000,
+      });
+
+      const onlyOfficers = candidates.filter((u) =>
+        (String(u.role || "").toLowerCase() === "loan officer") ||
+        (u.Roles || []).some((r) => (String(r.name) || "").toLowerCase() === "loan officer")
+      );
+
+      if (onlyOfficers.length) {
+        // Least-loaded by active loans
+        const counts = {};
+        for (const u of onlyOfficers) {
+          counts[u.id] = Loan
+            ? await Loan.count({
+                where: {
+                  loanOfficerId: u.id,
+                  status: { [Op.notIn]: ["closed", "rejected", "cancelled"] },
+                },
+              })
+            : 0;
+        }
+        desiredOfficerId = onlyOfficers.sort((a, b) => (counts[a.id] - counts[b.id]))[0]?.id ?? null;
+      }
     }
 
     const payload = {};
@@ -271,7 +354,6 @@ exports.createBorrower = async (req, res) => {
     if (existingCols.includes("branch_id") || existingCols.includes("branchId")) {
       if (incomingBranchId) payload.branchId = incomingBranchId;
     }
-
     if (existingCols.includes("gender"))                  payload.gender = b.gender || null;
     if (existingCols.includes("birthDate"))               payload.birthDate = b.birthDate || null;
     if (existingCols.includes("employmentStatus"))        payload.employmentStatus = b.employmentStatus || null;
@@ -283,7 +365,7 @@ exports.createBorrower = async (req, res) => {
     if (existingCols.includes("nextKinPhone"))            payload.nextKinPhone = normalizePhone(b.nextKinPhone || null);
     if (existingCols.includes("nextOfKinRelationship"))   payload.nextOfKinRelationship = b.nextOfKinRelationship || b.kinRelationship || null;
     if (existingCols.includes("regDate"))                 payload.regDate = b.regDate || null;
-    if (existingCols.includes("loanOfficerId"))           payload.loanOfficerId = b.loanOfficerId || b.officerId || null;
+    if (existingCols.includes("loanOfficerId"))           payload.loanOfficerId = desiredOfficerId || null;
     if (existingCols.includes("groupId"))                 payload.groupId = b.loanType === "group" ? (b.groupId || null) : null;
 
     const created = await Borrower.create(payload);
@@ -361,6 +443,7 @@ exports.updateBorrower = async (req, res) => {
         setIf("branchId", body.branchId);
       }
     }
+    // loan officer can be updated (trusting UI permission)
     setIf("loanOfficerId", body.officerId ?? body.loanOfficerId);
 
     // Status

@@ -1,3 +1,5 @@
+'use strict';
+
 module.exports = (sequelize, DataTypes) => {
   const JSON_TYPE =
     sequelize.getDialect && sequelize.getDialect() === 'postgres'
@@ -12,14 +14,11 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: DataTypes.UUIDV4,
         primaryKey: true,
       },
-      // action like "staff.read", "staff.create", etc.
       action: {
         type: DataTypes.STRING(120),
         allowNull: false,
         unique: true,
       },
-      // optional: list of role names that have this permission
-      // (works with your existing allow(...) middleware style)
       roles: {
         type: JSON_TYPE,
         allowNull: false,
@@ -30,7 +29,6 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: '',
       },
-      // ✅ used by seeder; prevents “Unknown attributes (isSystem)” warning
       isSystem: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
@@ -43,6 +41,17 @@ module.exports = (sequelize, DataTypes) => {
       indexes: [{ unique: true, fields: ['action'] }],
     }
   );
+
+  Permission.associate = (models) => {
+    if (models.Role && models.RolePermission) {
+      Permission.belongsToMany(models.Role, {
+        through: models.RolePermission,
+        foreignKey: 'permissionId',
+        otherKey: 'roleId',
+        as: 'Roles',
+      });
+    }
+  };
 
   return Permission;
 };

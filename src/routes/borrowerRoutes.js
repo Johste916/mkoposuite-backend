@@ -60,6 +60,7 @@ router.get('/',                          authenticateUser, ctrl.getAllBorrowers)
 /**
  * Frontend sends multipart/form-data (optional photo). We must parse it.
  * Using upload.any() keeps backward compatibility if no files are sent.
+ * Role-aware Loan Officer assignment is handled in controller.createBorrower.
  */
 router.post('/',                         authenticateUser, requireMulterAny, ctrl.createBorrower);
 

@@ -31,19 +31,43 @@ router.get('/', async (req, res, next) => {
   }
   try {
     const User = getModel('User');
+    const Role = getModel('Role');
+
     const where = {};
     const q = (req.query.q || '').trim();
+    const like = User.sequelize.getDialect() === 'postgres' ? Op.iLike : Op.like;
+
     if (q) {
       where[Op.or] = [
-        { name:      { [Op.iLike]: `%${q}%` } },
-        { email:     { [Op.iLike]: `%${q}%` } },
-        { firstName: { [Op.iLike]: `%${q}%` } },
-        { lastName:  { [Op.iLike]: `%${q}%` } },
+        { name:      { [like]: `%${q}%` } },
+        { email:     { [like]: `%${q}%` } },
+        { firstName: { [like]: `%${q}%` } },
+        { lastName:  { [like]: `%${q}%` } },
       ];
     }
-    const limit = Math.min(Number(req.query.limit) || 100, 1000);
-    const rows = await User.findAll({ where, order: [['name', 'ASC']], limit });
-    res.json({ items: rows });
+    if (req.query.branchId) where.branchId = req.query.branchId;
+
+    // Always include roles so we can filter by role name in-memory too
+    const include = [{ model: Role, as: 'Roles', through: { attributes: [] } }];
+    const limit = Math.min(Number(req.query.limit) || 1000, 2000);
+
+    const rows = await User.findAll({
+      where,
+      include,
+      order: [['name', 'ASC']],
+      limit,
+    });
+
+    // Role filter: role, roleName, or roles (case-insensitive)
+    const roleFilter = (req.query.role || req.query.roleName || req.query.roles || '').toLowerCase();
+    const items = roleFilter
+      ? rows.filter(u =>
+          (u.Roles || []).some(r => (String(r.name) || '').toLowerCase() === roleFilter) ||
+          (String(u.role) || '').toLowerCase() === roleFilter
+        )
+      : rows;
+
+    res.json({ items });
   } catch (e) { next(e); }
 });
 
@@ -72,10 +96,11 @@ router.patch('/:id/status', (req, res, next) => {
   return res.status(501).json({ error: 'toggleStatus not implemented' });
 });
 
+// tolerant inline assign (role/branch)
 router.post('/:id/assign', async (req, res) => {
-  const userId = Number(req.params.id);
-  const roleId = req.body?.roleId ? Number(req.body.roleId) : null;
-  const branchId = req.body?.branchId ? Number(req.body.branchId) : null;
+  const userId = req.params.id;
+  const roleId = req.body?.roleId || null;
+  const branchId = req.body?.branchId || null;
   const tenantId = tenantIdFrom(req);
 
   if (!sequelize) return res.status(500).json({ error: 'DB not initialized' });
@@ -106,7 +131,7 @@ router.post('/:id/assign', async (req, res) => {
             `
             insert into public.user_roles (user_id, role_id${tenantId ? ', tenant_id' : ''})
             values (:userId, :roleId${tenantId ? ', :tenantId' : ''})
-            on conflict (user_id) do update set role_id = excluded.role_id
+            on conflict (user_id, role_id) do nothing
             `,
             { replacements: { userId, roleId, tenantId }, transaction: t }
           );
@@ -122,6 +147,12 @@ router.post('/:id/assign', async (req, res) => {
             ${tenantId ? 'tenant_id = excluded.tenant_id' : 'branch_id = excluded.branch_id'}
           `,
           { replacements: { userId, branchId, tenantId }, transaction: t }
+        );
+
+        // Keep a primary branch_id on Users
+        await sequelize.query(
+          `update public.users set branch_id = :branchId where id = :userId`,
+          { replacements: { userId, branchId }, transaction: t }
         );
       }
     });
