@@ -3,6 +3,13 @@ module.exports = (sequelize, DataTypes) => {
   const Communication = sequelize.define(
     'Communication',
     {
+      // (Optional but explicit) keep INTEGER PK to match your existing table/migration
+      id: {
+        type: DataTypes.INTEGER,
+        primaryKey: true,
+        autoIncrement: true,
+      },
+
       title: {
         type: DataTypes.STRING,
         allowNull: false,
@@ -11,6 +18,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.TEXT,
         allowNull: false,
       },
+
       // Use ENUM if your DB supports it (Postgres). If using MySQL with older versions,
       // you can switch to STRING and validate allowed values in your service.
       type: {
@@ -63,13 +71,13 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: true,
       },
 
-      // Audit
+      // Audit (✅ switched to UUID to align with users.id and your DB)
       createdBy: {
-        type: DataTypes.INTEGER,
+        type: DataTypes.UUID,
         allowNull: true,
       },
       updatedBy: {
-        type: DataTypes.INTEGER,
+        type: DataTypes.UUID,
         allowNull: true,
       },
     },
