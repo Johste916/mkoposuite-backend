@@ -7,7 +7,7 @@ const Role = db.Role;
 const User = db.User;
 const UserRole = db.UserRole || db.sequelize?.models?.UserRole;
 
-// ---- helpers ----
+// ---------- small helpers ----------
 const safeString = (v) => (typeof v === "string" ? v : v == null ? "" : String(v));
 
 async function detectUserRoleFields() {
@@ -22,6 +22,77 @@ async function detectUserRoleFields() {
     return defaults;
   }
 }
+
+/** Try to find which "active" column your User model uses */
+function resolveActiveColumn() {
+  const attrs = (User && User.rawAttributes) || {};
+  const candidates = ["isActive", "active", "enabled", "status"];
+  for (const k of candidates) {
+    if (attrs[k]) return k;
+  }
+  return null; // none found
+}
+
+/** Build a where clause to select only active users (or not) */
+function buildActiveWhere(includeInactive) {
+  const activeCol = resolveActiveColumn();
+  if (!activeCol || includeInactive) return {}; // no filter if we can't detect or caller includes inactive
+  // boolean-style or status-style columns
+  if (["isActive", "active", "enabled"].includes(activeCol)) {
+    return { [activeCol]: true };
+  }
+  if (activeCol === "status") {
+    return { status: { [Op.in]: ["active", "enabled"] } };
+  }
+  return {};
+}
+
+/** Count assignments for existing users only; optionally only active users */
+async function countAssignedUsers(roleId, { includeInactive = false } = {}) {
+  if (!UserRole) return 0;
+  const { roleId: roleKey, userId: userKey } = await detectUserRoleFields();
+
+  // Join UserRoles -> Users; filter out orphaned rows automatically
+  const whereUser = buildActiveWhere(includeInactive);
+  const rows = await UserRole.findAll({
+    where: { [roleKey]: roleId },
+    attributes: [userKey],
+    raw: true,
+    limit: 10000,
+  });
+
+  const userIds = rows.map((r) => r[userKey]).filter(Boolean);
+  if (userIds.length === 0) return 0;
+  const existing = await User.count({
+    where: { id: userIds, ...whereUser },
+  });
+  return existing;
+}
+
+/** List assigned users (existing; optionally only active) */
+async function listAssignedUsers(roleId, { includeInactive = false } = {}) {
+  if (!UserRole) return [];
+  const { roleId: roleKey, userId: userKey } = await detectUserRoleFields();
+  const whereUser = buildActiveWhere(includeInactive);
+
+  const rows = await UserRole.findAll({
+    where: { [roleKey]: roleId },
+    attributes: [userKey],
+    raw: true,
+    limit: 10000,
+  });
+
+  const userIds = rows.map((r) => r[userKey]).filter(Boolean);
+  if (userIds.length === 0) return [];
+
+  const users = await User.findAll({
+    where: { id: userIds, ...whereUser },
+    attributes: ["id", "name", "email", "branchId", "role"],
+  });
+  return users;
+}
+
+// ---------- controllers ----------
 
 /** GET /api/roles */
 exports.getAllRoles = async (_req, res) => {
@@ -94,30 +165,16 @@ exports.updateRole = async (req, res) => {
   }
 };
 
-/** GET /api/roles/:id/assignments */
+/** GET /api/roles/:id/assignments
+ *  Optional: ?includeInactive=1 — include inactive users too
+ */
 exports.listAssignments = async (req, res) => {
   try {
     const role = await Role.findByPk(req.params.id);
     if (!role) return res.status(404).json({ error: "Role not found" });
 
-    if (!UserRole) return res.json({ items: [], total: 0 });
-
-    const { roleId, userId } = await detectUserRoleFields();
-
-    const rows = await UserRole.findAll({
-      attributes: [userId],
-      where: { [roleId]: role.id },
-      raw: true,
-      limit: 10000,
-    });
-
-    const ids = rows.map((r) => r[userId]);
-    if (!ids.length) return res.json({ items: [], total: 0 });
-
-    const users = await User.findAll({
-      where: { id: ids },
-      attributes: ["id", "name", "email", "branchId", "role"],
-    });
+    const includeInactive = ["1", "true", "yes"].includes(String(req.query.includeInactive || "").toLowerCase());
+    const users = await listAssignedUsers(role.id, { includeInactive });
 
     res.json({ items: users, total: users.length });
   } catch (err) {
@@ -126,7 +183,7 @@ exports.listAssignments = async (req, res) => {
   }
 };
 
-/** DELETE /api/roles/:id/assignments  — bulk unassign all users from this role */
+/** DELETE /api/roles/:id/assignments  (bulk unassign all users from this role) */
 exports.clearAssignments = async (req, res) => {
   try {
     const role = await Role.findByPk(req.params.id);
@@ -142,11 +199,10 @@ exports.clearAssignments = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/roles/:id
- * - If role is assigned to users → 409 with assignedCount.
- * - Add `?force=1` to automatically detach from users then delete.
- * - System roles are protected unless you force.
+/** DELETE /api/roles/:id  (?force=1, ?includeInactive=1)
+ *  - Counts only existing + active users by default
+ *  - includeInactive=1 -> also counts inactive users
+ *  - force=1 -> destroys UserRole rows (for those users counted) before deleting role
  */
 exports.deleteRole = async (req, res) => {
   try {
@@ -154,22 +210,30 @@ exports.deleteRole = async (req, res) => {
     if (!role) return res.status(404).json({ error: "Role not found" });
     if (role.isSystem) return res.status(403).json({ error: "System roles cannot be deleted" });
 
+    const includeInactive = ["1", "true", "yes"].includes(String(req.query.includeInactive || "").toLowerCase());
     const force = ["1", "true", "yes"].includes(String(req.query.force || "").toLowerCase());
 
-    if (UserRole) {
-      const { roleId } = await detectUserRoleFields();
-      const assignedCount = await UserRole.count({ where: { [roleId]: role.id } });
+    const assignedCount = await countAssignedUsers(role.id, { includeInactive });
 
-      if (assignedCount > 0 && !force) {
-        return res.status(409).json({
-          error: "Role is assigned to users",
-          assignedCount,
-          hint: "Unassign from users (or call DELETE /api/roles/:id/assignments) or pass ?force=1 to delete anyway.",
-        });
-      }
+    if (assignedCount > 0 && !force) {
+      return res.status(409).json({
+        error: includeInactive
+          ? "Role is assigned to users (including inactive)."
+          : "Role is assigned to active users.",
+        assignedCount,
+        hint: includeInactive
+          ? "Unassign from users (or call DELETE /api/roles/:id/assignments) or pass ?force=1 to delete anyway."
+          : "Unassign from active users (or pass ?force=1) to delete.",
+      });
+    }
 
-      if (assignedCount > 0 && force) {
-        await UserRole.destroy({ where: { [roleId]: role.id } });
+    // If forced, remove only rows that belong to *existing* users we counted
+    if (assignedCount > 0 && force && UserRole) {
+      const { roleId: roleKey, userId: userKey } = await detectUserRoleFields();
+      const users = await listAssignedUsers(role.id, { includeInactive });
+      const ids = users.map(u => u.id);
+      if (ids.length) {
+        await UserRole.destroy({ where: { [roleKey]: role.id, [userKey]: ids } });
       }
     }
 
