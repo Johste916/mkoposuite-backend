@@ -246,11 +246,3 @@ exports.getRolePermissions = async (req, res) => {
     res.status(500).json({ error: "Failed to fetch role permissions" });
   }
 };
-// backend/src/controllers/permissionsController.js (wrap save)
-await req.audit({
-  category: 'permissions', action: 'update',
-  entity:'Permission', entityId: action,
-  message:`Saved roles for ${action}`,
-  before: existing?.toJSON?.() || null,
-  after:  payload
-});
