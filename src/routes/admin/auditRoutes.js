@@ -29,7 +29,6 @@ const clamp  = (n, a, b) => Math.max(a, Math.min(b, n));
 const toDate = (v) => (v ? new Date(v) : null);
 const likeOp = (models?.sequelize?.getDialect?.() === 'postgres' ? Op.iLike : Op.like);
 
-// Build a Sequelize where that ONLY touches existing columns
 function buildWhere(qs = {}) {
   const { q, userId, branchId, category, action, from, to } = qs;
   const where = {};
@@ -45,7 +44,6 @@ function buildWhere(qs = {}) {
   const term = (q || '').toString().trim();
   if (term) {
     const pat = `%${term}%`;
-    // search in safe columns only
     where[Op.or] = [
       { category: { [likeOp]: pat } },
       { action:   { [likeOp]: pat } },
@@ -56,15 +54,12 @@ function buildWhere(qs = {}) {
   return where;
 }
 
-/** Try to discover the alias name used in AuditLog associations (if any). */
 function resolveAlias(sourceModel, targetModel, hints = []) {
   try {
     const assocs = sourceModel?.associations || {};
-    // 1) target equality
     for (const [key, a] of Object.entries(assocs)) {
       if (a?.target === targetModel) return a?.as || a?.options?.as || key;
     }
-    // 2) hint match
     for (const [key, a] of Object.entries(assocs)) {
       const nm = (a?.as || a?.options?.as || key || '').toString().toLowerCase();
       if (hints.some(h => nm === h.toLowerCase())) return a?.as || a?.options?.as || key;
@@ -77,20 +72,15 @@ function buildIncludesSafe() {
   const inc = [];
   if (!AuditLog) return inc;
 
-  const userAs   = (User   && resolveAlias(AuditLog, User,   ['User', 'user', 'Actor', 'CreatedBy'])) || null;
-  const branchAs = (Branch && resolveAlias(AuditLog, Branch, ['Branch', 'branch'])) || null;
+  const userAs   = (User   && resolveAlias(AuditLog, User,   ['User','user','Actor','CreatedBy'])) || null;
+  const branchAs = (Branch && resolveAlias(AuditLog, Branch, ['Branch','branch'])) || null;
 
-  if (User && userAs) {
-    inc.push({ model: User, as: userAs, attributes: ['id', 'name', 'email'], required: false });
-  }
-  if (Branch && branchAs) {
-    inc.push({ model: Branch, as: branchAs, attributes: ['id', 'name'], required: false });
-  }
+  if (User && userAs)   inc.push({ model: User,   as: userAs,   attributes: ['id','name','email'], required: false });
+  if (Branch && branchAs) inc.push({ model: Branch, as: branchAs, attributes: ['id','name'],       required: false });
   return inc;
 }
 
 /* ===================== LIST ===================== */
-/** GET /admin/audit?q=&userId=&branchId=&category=&action=&from=&to=&limit=&offset= */
 router.get('/', async (req, res) => {
   if (!AuditLog?.findAndCountAll) return res.json({ items: [], total: 0 });
 
@@ -103,36 +93,22 @@ router.get('/', async (req, res) => {
     order: [['createdAt', 'DESC']],
     limit,
     offset,
-    // Explicit attributes list — keep to existing columns only
-    attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'details', 'ip', 'reversed', 'createdAt', 'updatedAt'],
+    // only existing columns here
+    attributes: ['id','userId','branchId','category','action','message','ip','reversed','createdAt','updatedAt'],
   };
 
   try {
     const include = buildIncludesSafe();
     const out = await AuditLog.findAndCountAll(include.length ? { ...common, include } : common);
-    // Normalize: when includes exist, serialize minimal user/branch objects
     const items = out.rows.map(r => {
       const plain = r.get ? r.get({ plain: true }) : r;
-      const userAssoc   = include.find(i => i.model === User)?.as;
-      const branchAssoc = include.find(i => i.model === Branch)?.as;
-      const UserObj   = userAssoc   ? plain[userAssoc]   : undefined;
-      const BranchObj = branchAssoc ? plain[branchAssoc] : undefined;
-      return {
-        ...plain,
-        ...(UserObj   ? { User:   { id: UserObj.id, name: UserObj.name, email: UserObj.email } } : {}),
-        ...(BranchObj ? { Branch: { id: BranchObj.id, name: BranchObj.name } } : {}),
-      };
+      return plain; // already has User/Branch when aliased properly
     });
     return res.json({ items, total: out.count });
   } catch (e) {
-    // If include caused issues, retry without include
     try {
       const out = await AuditLog.findAndCountAll(common);
-      return res.json({
-        items: out.rows,
-        total: out.count,
-        note: 'Includes disabled due to association alias mismatch. Update aliases if you want joined user/branch.'
-      });
+      return res.json({ items: out.rows, total: out.count });
     } catch (err) {
       return res.status(500).json({ error: err.message || 'Failed to fetch audit logs' });
     }
@@ -140,10 +116,6 @@ router.get('/', async (req, res) => {
 });
 
 /* =================== SUMMARY ==================== */
-/**
- * GET /admin/audit/summary
- * Totals over last 30 days; only existing columns referenced.
- */
 router.get('/summary', async (_req, res) => {
   if (!AuditLog?.findAll) {
     return res.json({
@@ -222,7 +194,7 @@ router.get('/feed', async (req, res) => {
     const items = await AuditLog.findAll({
       order: [['createdAt', 'DESC']],
       limit,
-      attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'details', 'ip', 'reversed', 'createdAt'],
+      attributes: ['id','userId','branchId','category','action','message','ip','reversed','createdAt'],
       raw: true,
     });
     return res.json({ items });
@@ -251,7 +223,7 @@ router.get('/stream', async (req, res) => {
     const items = await AuditLog.findAll({
       order: [['createdAt', 'DESC']],
       limit: 20,
-      attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'details', 'ip', 'reversed', 'createdAt'],
+      attributes: ['id','userId','branchId','category','action','message','ip','reversed','createdAt'],
       raw: true,
     });
     send('init', { items });
@@ -267,7 +239,7 @@ router.get('/stream', async (req, res) => {
       const items = await AuditLog.findAll({
         where: { createdAt: { [Op.gt]: since } },
         order: [['createdAt', 'ASC']],
-        attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'details', 'ip', 'reversed', 'createdAt'],
+        attributes: ['id','userId','branchId','category','action','message','ip','reversed','createdAt'],
         raw: true,
       });
       if (items.length) {
