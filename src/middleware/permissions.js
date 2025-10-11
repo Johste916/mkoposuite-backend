@@ -1,56 +1,129 @@
 // backend/src/middleware/permissions.js
+"use strict";
+
 const { Permission, Role, User } = require("../models");
 
+/* ------------------------------- helpers ---------------------------------- */
+
+/** Return a lowercased primary role name for the current user (best-effort). */
+async function resolveUserRoleName(reqUser) {
+  if (!reqUser) return null;
+
+  // 1) Plain string role on the token/user object
+  if (typeof reqUser.role === "string" && reqUser.role.trim()) {
+    return String(reqUser.role).toLowerCase();
+  }
+
+  // 2) First associated role already attached on request
+  if (Array.isArray(reqUser.Roles) && reqUser.Roles[0]?.name) {
+    return String(reqUser.Roles[0].name).toLowerCase();
+  }
+
+  // 3) Load roles via DB if we have an id and no role yet
+  if (reqUser.id) {
+    const dbUser = await User.findByPk(reqUser.id, {
+      include: [{ model: Role, as: "Roles", attributes: ["name"], through: { attributes: [] } }],
+      attributes: ["id"],
+    });
+    const name = dbUser?.Roles?.[0]?.name || null;
+    if (name) return String(name).toLowerCase();
+  }
+
+  return null;
+}
+
+/** Check if an action matches a key (supports suffix wildcard: "module.sub.*"). */
+function actionMatchesKey(action, key) {
+  if (!action || !key) return false;
+  if (action === key) return true;
+  if (key.endsWith(".*")) {
+    const prefix = key.slice(0, -2);
+    return action.startsWith(prefix + ".");
+  }
+  return false;
+}
+
+/** Pick the most specific permission row for a given action (prefers exact). */
+function pickPermissionForAction(perms, action) {
+  // Exact match first
+  let best = perms.find((p) => p.action === action);
+  if (best) return best;
+
+  // Then the longest matching wildcard
+  const candidates = perms.filter((p) => typeof p.action === "string" && p.action.endsWith(".*") && actionMatchesKey(action, p.action));
+  candidates.sort((a, b) => (b.action?.length || 0) - (a.action?.length || 0));
+  return candidates[0] || null;
+}
+
+/** Normalize roles array on a permission row to lower-case strings. */
+function normalizePermRoles(perm) {
+  if (!perm) return [];
+  const arr = Array.isArray(perm.roles) ? perm.roles : [];
+  return arr.map((r) => String(r || "").toLowerCase()).filter(Boolean);
+}
+
+/* ------------------------------ main guards -------------------------------- */
+
 /**
- * allow('actionName') -> middleware that checks whether current user's role
- * is allowed for the given action (based on Permission table).
+ * allow(action | action[], opts) -> middleware
  *
- * - Accepts role from req.user.role (string), req.user.Roles[0].name,
- *   or loads Roles via a JOIN if not present on the request.
- * - Case-insensitive role matching; supports wildcard '*' in Permission.roles.
- * - If no Permission row exists for an action, default allow for 'admin' only.
+ * Options:
+ *   - mode: 'any' | 'all' (when passing an array of actions). Default: 'any'
+ *   - defaultToAdmin: boolean. If no Permission row matches an action, allow only admin by default (true).
+ *
+ * Examples:
+ *   router.get('/loans', allow('loans.view'), handler)
+ *   router.post('/loans/apply', allow(['loans.apply', 'loans.view'], { mode: 'all' }), handler)
  */
-function allow(action, { defaultToAdmin = true } = {}) {
+function allow(actionOrList, { mode = "any", defaultToAdmin = true } = {}) {
   return async (req, res, next) => {
     try {
-      const u = req.user;
-      if (!u) return res.status(401).json({ error: "Unauthorized" });
+      const user = req.user;
+      if (!user) return res.status(401).json({ error: "Unauthorized" });
 
-      let roleName =
-        (typeof u.role === "string" && u.role) ||
-        (Array.isArray(u.Roles) && u.Roles[0]?.name) ||
-        null;
+      const roleLc = await resolveUserRoleName(user);
+      if (!roleLc) return res.status(403).json({ error: "Forbidden" });
 
-      if (!roleName && u.id) {
-        const dbUser = await User.findByPk(u.id, {
-          include: [{ model: Role, as: "Roles", attributes: ["name"], through: { attributes: [] } }],
-          attributes: ["id"],
-        });
-        roleName = dbUser?.Roles?.[0]?.name || null;
+      // Normalize actions array
+      const actions = Array.isArray(actionOrList) ? actionOrList : [actionOrList];
+      const wanted = actions.filter(Boolean).map(String);
+
+      // Per-request cache to avoid duplicate Permission queries
+      if (!req._permCache) {
+        req._permCache = {
+          all: await Permission.findAll(), // one read per request
+        };
       }
-      if (!roleName) return res.status(403).json({ error: "Forbidden" });
+      const perms = req._permCache.all || [];
 
-      const roleLc = String(roleName).toLowerCase();
-      const perm = await Permission.findOne({ where: { action } });
+      // Evaluate each action
+      const results = wanted.map((act) => {
+        const perm = pickPermissionForAction(perms, act);
 
-      if (!perm) {
-        if (defaultToAdmin && roleLc === "admin") return next();
-        return res.status(403).json({ error: "Forbidden" });
-      }
+        // No row matched this action: admin-only if defaultToAdmin
+        if (!perm) {
+          return defaultToAdmin && roleLc === "admin";
+        }
 
-      const roles = Array.isArray(perm.roles) ? perm.roles.map((r) => String(r).toLowerCase()) : [];
-      const ok = roles.includes("*") || roles.includes(roleLc) || (roles.includes("admin") && roleLc === "admin");
+        const roles = normalizePermRoles(perm);
+        return roles.includes("*") || roles.includes(roleLc) || (roles.includes("admin") && roleLc === "admin");
+      });
 
+      const ok = mode === "all" ? results.every(Boolean) : results.some(Boolean);
       if (!ok) return res.status(403).json({ error: "Forbidden" });
-      next();
+
+      return next();
     } catch (e) {
       console.error("allow() error:", e);
-      res.status(500).json({ error: "Permission check failed" });
+      return res.status(500).json({ error: "Permission check failed" });
     }
   };
 }
 
-/** Simple role gate without hitting DB (useful for route-level quick checks). */
+/**
+ * Simple role gate without hitting DB.
+ * Usage: router.get('/admin', requireRole(['admin', 'director']), handler)
+ */
 function requireRole(allowed = []) {
   const set = new Set(allowed.map((r) => String(r).toLowerCase()));
   return (req, res, next) => {

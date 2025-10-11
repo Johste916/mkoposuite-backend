@@ -1,194 +1,317 @@
 // backend/src/controllers/permissionMatrixController.js
 "use strict";
 
-const { sequelize, Permission, Role } = require("../models");
+const db = require("../models"); // { Permission, Role }
+const { Op } = require("sequelize");
 
 /**
- * Canonical list of features -> actions we want to show in the matrix UI.
- * Feel free to extend/rename to match your app.
+ * CENTRAL CATALOG
+ * - One place to define all app actions grouped by feature.
+ * - Keys here should match the UI/route intent (from App.jsx + Sidebar).
+ * - You can add or rename items safely; existing mappings will still round-trip.
  */
-const REGISTRY = [
+const CATALOG = [
   {
-    group: "Staff & Users",
-    actions: [
-      { action: "staff.view",     label: "View staff",     verbs: ["read"] },
-      { action: "staff.create",   label: "Create staff",   verbs: ["create"] },
-      { action: "staff.update",   label: "Update staff",   verbs: ["update"] },
-      { action: "staff.delete",   label: "Delete staff",   verbs: ["delete"] },
-      { action: "staff.assign",   label: "Assign roles/branches", verbs: ["update"] },
-    ],
+    group: "Dashboard",
+    actions: [{ key: "dashboard.view", label: "View dashboard" }],
   },
+
   {
     group: "Borrowers",
     actions: [
-      { action: "borrowers.view",   label: "View borrowers",   verbs: ["read"] },
-      { action: "borrowers.create", label: "Create borrower",  verbs: ["create"] },
-      { action: "borrowers.update", label: "Update borrower",  verbs: ["update"] },
-      { action: "borrowers.delete", label: "Delete borrower",  verbs: ["delete"] },
+      { key: "borrowers.view", label: "View borrowers" },
+      { key: "borrowers.create", label: "Add borrower" },
+      { key: "borrowers.kyc", label: "KYC queue" },
+      { key: "borrowers.blacklist", label: "Blacklist" },
+      { key: "borrowers.import", label: "Imports" },
+      { key: "borrowers.reports", label: "Reports" },
+      { key: "borrowerGroups.view", label: "View groups" },
+      { key: "borrowerGroups.create", label: "Add group" },
+      { key: "borrowerGroups.reports", label: "Group reports" },
+      { key: "borrowerGroups.import", label: "Group imports" },
+      { key: "borrowers.bulkSms", label: "Send SMS" },
+      { key: "borrowers.bulkEmail", label: "Send Email" },
     ],
   },
+
   {
     group: "Loans",
     actions: [
-      { action: "loans.view",    label: "View loans",    verbs: ["read"] },
-      { action: "loans.create",  label: "Create loan",   verbs: ["create"] },
-      { action: "loans.update",  label: "Update loan",   verbs: ["update"] },
-      { action: "loans.approve", label: "Approve loan",  verbs: ["approve"] },
-      { action: "loans.disburse",label: "Disburse loan", verbs: ["disburse"] },
-      { action: "loans.writeoff",label: "Write-off",     verbs: ["writeoff"] },
+      { key: "loans.view", label: "View loans" },
+      { key: "loans.apply", label: "Create/apply" },
+      { key: "loans.reviewQueue", label: "Review queue" },
+      { key: "loans.disbursementQueue", label: "Disbursement queue" },
+      { key: "loans.status.disbursed", label: "List: Disbursed" },
+      { key: "loans.status.due", label: "List: Due" },
+      { key: "loans.status.missed", label: "List: Missed" },
+      { key: "loans.status.arrears", label: "List: Arrears" },
+      { key: "loans.status.noRepayments", label: "List: No repayments" },
+      { key: "loans.status.pastMaturity", label: "List: Past maturity" },
+      { key: "loans.status.principalOutstanding", label: "List: Principal outstanding" },
+      { key: "loans.status.1MonthLate", label: "List: 1 month late" },
+      { key: "loans.status.3MonthsLate", label: "List: 3 months late" },
+      { key: "loanProducts.manage", label: "Loan products: create/edit" },
+      { key: "loans.schedule", label: "Calculator / schedule" },
+      { key: "loans.disburse", label: "Disburse loan" },
     ],
   },
+
   {
-    group: "Repayments & Collections",
+    group: "Repayments",
     actions: [
-      { action: "repayments.createManual", label: "Post manual repayment", verbs: ["create"] },
-      { action: "collections.view",        label: "View collections",      verbs: ["read"] },
+      { key: "repayments.view", label: "View repayments" },
+      { key: "repayments.create", label: "Record repayment" },
+      { key: "repayments.receipts", label: "Receipts" },
+      { key: "repayments.bulk", label: "Bulk repayments" },
+      { key: "repayments.csv", label: "Upload CSV" },
+      { key: "repayments.charts", label: "Charts" },
+      { key: "repayments.approve", label: "Approve repayments" },
     ],
   },
+
+  {
+    group: "Collection Sheets",
+    actions: [
+      { key: "collections.view", label: "View sheets" },
+      { key: "collections.create", label: "Create sheet" },
+      { key: "collections.edit", label: "Edit sheet" },
+      { key: "collections.daily", label: "Daily sheet" },
+      { key: "collections.missed", label: "Missed sheet" },
+      { key: "collections.pastMaturity", label: "Past maturity sheet" },
+      { key: "collections.sms", label: "Send SMS" },
+      { key: "collections.email", label: "Send Email" },
+    ],
+  },
+
+  {
+    group: "Collateral",
+    actions: [
+      { key: "collateral.view", label: "View collateral" },
+      { key: "collateral.create", label: "Create collateral" },
+      { key: "collateral.edit", label: "Edit collateral" },
+    ],
+  },
+
   {
     group: "Savings",
     actions: [
-      { action: "savings.view",   label: "View savings",   verbs: ["read"] },
-      { action: "savings.post",   label: "Post deposit",   verbs: ["create"] },
-      { action: "savings.withdraw",label: "Withdraw",      verbs: ["create"] },
+      { key: "savings.view", label: "View savings" },
+      { key: "savings.transactions", label: "Transactions" },
+      { key: "savings.csv", label: "Upload CSV" },
+      { key: "savings.approve", label: "Approve transactions" },
+      { key: "savings.report", label: "Reports" },
     ],
   },
+
+  {
+    group: "Banking",
+    actions: [
+      { key: "banks.view", label: "View banks" },
+      { key: "banks.create", label: "Add bank" },
+      { key: "banks.transactions", label: "Transactions" },
+      { key: "banks.transfers", label: "Transfers" },
+      { key: "banks.reconciliation", label: "Reconciliation" },
+      { key: "banks.statements", label: "Statements" },
+      { key: "banks.import", label: "Import CSV" },
+      { key: "banks.approvals", label: "Approvals" },
+      { key: "banks.rules", label: "Rules & GL mapping" },
+      { key: "cash.accounts", label: "Cash: accounts" },
+      { key: "cash.createAccount", label: "Cash: add account" },
+      { key: "cash.transactions", label: "Cash: transactions" },
+      { key: "cash.createTransaction", label: "Cash: add transaction" },
+      { key: "cash.reconciliation", label: "Cash: reconciliation" },
+      { key: "cash.statements", label: "Cash: statements" },
+    ],
+  },
+
+  {
+    group: "HR & Payroll",
+    actions: [
+      { key: "payroll.view", label: "View payroll" },
+      { key: "payroll.create", label: "Add payroll" },
+      { key: "payroll.report", label: "Payroll report" },
+      { key: "hr.employees", label: "Employees" },
+      { key: "hr.attendance", label: "Attendance" },
+      { key: "hr.leave", label: "Leave management" },
+      { key: "hr.contracts", label: "Contracts" },
+    ],
+  },
+
+  {
+    group: "Expenses & Other Income",
+    actions: [
+      { key: "expenses.view", label: "View expenses" },
+      { key: "expenses.create", label: "Add expense" },
+      { key: "expenses.csv", label: "Upload CSV (expenses)" },
+      { key: "income.view", label: "View other income" },
+      { key: "income.create", label: "Add other income" },
+      { key: "income.csv", label: "Upload CSV (income)" },
+    ],
+  },
+
+  {
+    group: "Assets",
+    actions: [
+      { key: "assets.view", label: "View assets" },
+      { key: "assets.create", label: "Add asset" },
+    ],
+  },
+
   {
     group: "Accounting",
     actions: [
-      { action: "accounting.view",   label: "View accounting",   verbs: ["read"] },
-      { action: "accounting.journal",label: "Post journal",      verbs: ["create"] },
-      { action: "accounting.close",  label: "Close period",      verbs: ["update"] },
+      { key: "accounting.coa", label: "Chart of accounts" },
+      { key: "accounting.trialBalance", label: "Trial balance" },
+      { key: "accounting.pnl", label: "Profit & loss" },
+      { key: "accounting.cashflow", label: "Cashflow" },
+      { key: "accounting.manualJournal", label: "Manual journal" },
     ],
   },
-  {
-    group: "Branches & Org",
-    actions: [
-      { action: "branches.view",  label: "View branches",  verbs: ["read"] },
-      { action: "branches.edit",  label: "Edit branches",  verbs: ["update"] },
-      { action: "org.settings",   label: "Manage settings",verbs: ["update"] },
-    ],
-  },
-  {
-    group: "Messaging",
-    actions: [
-      { action: "sms.send",   label: "Send SMS",     verbs: ["create"] },
-      { action: "sms.view",   label: "View SMS logs",verbs: ["read"] },
-    ],
-  },
+
   {
     group: "Reports",
     actions: [
-      { action: "reports.view", label: "View reports", verbs: ["read"] },
+      { key: "reports.borrowers", label: "Borrowers report" },
+      { key: "reports.loans", label: "Loan report" },
+      { key: "reports.arrearsAging", label: "Loan arrears aging" },
+      { key: "reports.collections", label: "Collections report" },
+      { key: "reports.collector", label: "Collector report" },
+      { key: "reports.deferredIncome", label: "Deferred income" },
+      { key: "reports.deferredIncomeMonthly", label: "Deferred income monthly" },
+      { key: "reports.proRata", label: "Pro-rata collections" },
+      { key: "reports.disbursement", label: "Disbursement report" },
+      { key: "reports.fees", label: "Fees report" },
+      { key: "reports.loanProducts", label: "Loan products report" },
+      { key: "reports.mfrs", label: "MFRS ratios" },
+      { key: "reports.daily", label: "Daily report" },
+      { key: "reports.monthly", label: "Monthly report" },
+      { key: "reports.outstanding", label: "Outstanding report" },
+      { key: "reports.par", label: "Portfolio at risk (PAR)" },
+      { key: "reports.atAGlance", label: "At a glance" },
+      { key: "reports.allEntries", label: "All entries" },
+    ],
+  },
+
+  {
+    group: "User & Org Management",
+    actions: [
+      { key: "branches.view", label: "View branches" },
+      { key: "users.view", label: "View users/staff" },
+      { key: "roles.view", label: "View roles" },
+      { key: "roles.manage", label: "Create/Edit/Delete roles" },
+      { key: "permissions.manage", label: "Manage permissions" },
+      { key: "account.settings", label: "Account settings" },
+      { key: "account.organization", label: "Organization" },
+      { key: "admin.hub", label: "Admin hub" },
+      { key: "admin.tenants", label: "Admin: Tenants" },
+      { key: "tenantsAdmin.new", label: "Tenants (New)" },
+      { key: "impersonateTenant", label: "Impersonate tenant" },
+      { key: "subscription", label: "Subscription" },
+      { key: "supportTickets", label: "Support tickets" },
+      { key: "smsConsole", label: "SMS console" },
+      { key: "smsCenter", label: "SMS center" },
+      { key: "billingByPhone", label: "Billing by phone" },
     ],
   },
 ];
 
-/** Merge DB permissions (existing actions + role lists) into the registry. */
-async function buildMatrix() {
-  const rows = await Permission.findAll({ order: [["action", "ASC"]] });
+/* ------------------------------- Helpers ---------------------------------- */
 
-  // Map action -> roles[] from DB
-  const roleByAction = new Map();
-  for (const p of rows) {
-    roleByAction.set(p.action, Array.isArray(p.roles) ? p.roles : []);
-  }
-
-  // Also add "orphan" actions that exist in DB but not in our registry (so they still show up)
-  const extra = [];
-  for (const p of rows) {
-    const inRegistry = REGISTRY.some((g) => g.actions.some((a) => a.action === p.action));
-    if (!inRegistry) {
-      extra.push({ action: p.action, label: p.action, verbs: [] });
-    }
-  }
-
-  const registry = REGISTRY.map((g) => ({
-    group: g.group,
-    actions: g.actions.map((a) => ({ ...a, roles: roleByAction.get(a.action) || [] })),
+const normalize = (rows = []) =>
+  (Array.isArray(rows) ? rows : []).map(r => ({
+    id: r.id,
+    action: r.action,
+    roles: Array.isArray(r.roles) ? r.roles : [],
+    description: r.description || "",
+    isSystem: !!r.isSystem,
   }));
 
-  if (extra.length) {
-    registry.push({
-      group: "Other",
-      actions: extra.map((a) => ({ ...a, roles: roleByAction.get(a.action) || [] })),
-    });
-  }
+/* -------------------------------- Routes ---------------------------------- */
 
-  return registry;
-}
-
-/** GET /api/permissions/matrix */
+// GET /api/permissions/matrix
 exports.getMatrix = async (_req, res) => {
   try {
-    const roles = await Role.findAll({ attributes: ["id", "name"], order: [["name", "ASC"]] });
-    const matrix = await buildMatrix();
-    res.json({ roles, matrix });
+    const [roles, perms] = await Promise.all([
+      db.Role.findAll({ order: [["name", "ASC"]] }),
+      db.Permission.findAll({ order: [["action", "ASC"]] }),
+    ]);
+
+    const roleList = roles.map(r => ({ id: r.id, name: r.name, isSystem: !!r.isSystem }));
+    const byAction = new Map(normalize(perms).map(p => [p.action, p]));
+
+    // Produce matrix { [actionKey]: string[]roleNames }
+    const matrix = {};
+    for (const group of CATALOG) {
+      for (const act of group.actions) {
+        matrix[act.key] = byAction.get(act.key)?.roles || [];
+      }
+    }
+
+    res.json({
+      catalog: CATALOG,
+      roles: roleList,
+      matrix,
+    });
   } catch (e) {
     console.error("getMatrix error:", e);
-    res.status(500).json({ error: "Failed to load permission matrix" });
+    res.status(500).json({ error: "Failed to build permission matrix" });
   }
 };
 
-/**
- * PUT /api/permissions/role/:roleId
- * body: { actions: string[], mode?: "replace" | "merge" }
- * Updates the Permission.roles arrays so that the provided role has exactly (replace)
- * or at least (merge) the listed actions.
- */
+// PUT /api/permissions/role/:roleId  { actions: string[], mode?: "replace"|"merge" }
 exports.saveForRole = async (req, res) => {
-  const { roleId } = req.params;
-  const actions = Array.isArray(req.body?.actions) ? req.body.actions.map(String) : [];
-  const mode = (req.body?.mode || "replace").toLowerCase();
-
-  if (!roleId) return res.status(400).json({ error: "roleId required" });
-
-  const t = await sequelize.transaction();
   try {
-    const role = await Role.findByPk(roleId, { transaction: t });
-    if (!role) { await t.rollback(); return res.status(404).json({ error: "Role not found" }); }
-    const roleName = role.name;
+    const { roleId } = req.params;
+    const role = await db.Role.findByPk(roleId);
+    if (!role) return res.status(404).json({ error: "Role not found" });
 
-    const dbPerms = await Permission.findAll({ transaction: t });
+    const actions = Array.isArray(req.body?.actions)
+      ? req.body.actions.map(String)
+      : [];
+    const mode = (req.body?.mode || "replace").toLowerCase();
 
-    // Helper to persist a Permission row’s roles array
-    const saveRoles = async (p, newRoles) => {
-      const clean = Array.from(new Set(newRoles.map((r) => String(r))));
-      await p.update({ roles: clean }, { transaction: t });
-    };
+    // Fetch all existing permissions relevant to the provided actions
+    const existing = await db.Permission.findAll({
+      where: { action: { [Op.in]: actions } },
+    });
 
-    /** 1) Ensure rows exist for each requested action; grant role on them. */
+    const byAction = new Map(existing.map(p => [p.action, p]));
+
     for (const action of actions) {
-      let p = dbPerms.find((x) => x.action === action);
-      if (!p) {
-        p = await Permission.create(
-          { action, roles: [roleName], description: action, isSystem: false },
-          { transaction: t }
-        );
-        dbPerms.push(p);
+      const row = byAction.get(action);
+      if (!row) {
+        // create with ONLY this role
+        await db.Permission.create({
+          action,
+          roles: [role.name],
+          description: action,
+        });
+        continue;
+      }
+
+      const set = new Set((row.roles || []).map(String));
+      if (mode === "replace") {
+        row.roles = [role.name];
       } else {
-        const set = new Set(Array.isArray(p.roles) ? p.roles : []);
-        set.add(roleName);
-        await saveRoles(p, Array.from(set));
+        set.add(role.name);
+        row.roles = Array.from(set);
       }
+      await row.save();
     }
 
-    /** 2) If replace mode, remove role from any action NOT in the list. */
+    // If replace: remove this role from actions NOT included
     if (mode === "replace") {
-      for (const p of dbPerms) {
-        if (!actions.includes(p.action)) {
-          const set = new Set(Array.isArray(p.roles) ? p.roles : []);
-          if (set.delete(roleName)) {
-            await saveRoles(p, Array.from(set));
-          }
-        }
-      }
+      await db.Permission.update(
+        { roles: db.sequelize.literal(`CASE
+          WHEN roles @> '["${role.name}"]' THEN (SELECT jsonb_agg(x) FROM jsonb_array_elements_text(roles) x WHERE x <> '${role.name}')
+          ELSE roles END
+        `) },
+        { where: { action: { [Op.notIn]: actions } } }
+      ).catch(() => {}); // works on Postgres; on MySQL skip silently
     }
 
-    await t.commit();
-    res.json({ ok: true, roleId, actions, mode });
+    res.json({ ok: true });
   } catch (e) {
-    await t.rollback();
     console.error("saveForRole error:", e);
     res.status(500).json({ error: "Failed to save role permissions" });
   }
