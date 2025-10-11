@@ -1,4 +1,3 @@
-// backend/src/routes/admin/auditRoutes.js
 'use strict';
 
 const express = require('express');
@@ -51,7 +50,6 @@ function buildWhere(qs = {}) {
       { category: { [likeOp]: pat } },
       { action:   { [likeOp]: pat } },
       { ip:       { [likeOp]: pat } },
-      // message can be TEXT/JSON string; simple like match
       { message:  { [likeOp]: pat } },
     ];
   }
@@ -102,19 +100,32 @@ router.get('/', async (req, res) => {
 
   const common = {
     where,
-    order: [['createdAt', 'DESC']], // only existing column
+    order: [['createdAt', 'DESC']],
     limit,
     offset,
-    // Explicit attributes list — no "entity" here
-    attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'ip', 'reversed', 'createdAt', 'updatedAt'],
+    // Explicit attributes list — keep to existing columns only
+    attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'details', 'ip', 'reversed', 'createdAt', 'updatedAt'],
   };
 
   try {
     const include = buildIncludesSafe();
     const out = await AuditLog.findAndCountAll(include.length ? { ...common, include } : common);
-    return res.json({ items: out.rows, total: out.count });
+    // Normalize: when includes exist, serialize minimal user/branch objects
+    const items = out.rows.map(r => {
+      const plain = r.get ? r.get({ plain: true }) : r;
+      const userAssoc   = include.find(i => i.model === User)?.as;
+      const branchAssoc = include.find(i => i.model === Branch)?.as;
+      const UserObj   = userAssoc   ? plain[userAssoc]   : undefined;
+      const BranchObj = branchAssoc ? plain[branchAssoc] : undefined;
+      return {
+        ...plain,
+        ...(UserObj   ? { User:   { id: UserObj.id, name: UserObj.name, email: UserObj.email } } : {}),
+        ...(BranchObj ? { Branch: { id: BranchObj.id, name: BranchObj.name } } : {}),
+      };
+    });
+    return res.json({ items, total: out.count });
   } catch (e) {
-    // If include caused issues, retry without include; still NO entity references.
+    // If include caused issues, retry without include
     try {
       const out = await AuditLog.findAndCountAll(common);
       return res.json({
@@ -211,7 +222,7 @@ router.get('/feed', async (req, res) => {
     const items = await AuditLog.findAll({
       order: [['createdAt', 'DESC']],
       limit,
-      attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'ip', 'reversed', 'createdAt'],
+      attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'details', 'ip', 'reversed', 'createdAt'],
       raw: true,
     });
     return res.json({ items });
@@ -240,7 +251,7 @@ router.get('/stream', async (req, res) => {
     const items = await AuditLog.findAll({
       order: [['createdAt', 'DESC']],
       limit: 20,
-      attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'ip', 'reversed', 'createdAt'],
+      attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'details', 'ip', 'reversed', 'createdAt'],
       raw: true,
     });
     send('init', { items });
@@ -256,7 +267,7 @@ router.get('/stream', async (req, res) => {
       const items = await AuditLog.findAll({
         where: { createdAt: { [Op.gt]: since } },
         order: [['createdAt', 'ASC']],
-        attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'ip', 'reversed', 'createdAt'],
+        attributes: ['id', 'userId', 'branchId', 'category', 'action', 'message', 'details', 'ip', 'reversed', 'createdAt'],
         raw: true,
       });
       if (items.length) {

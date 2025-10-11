@@ -1,106 +1,76 @@
-'use strict';
-
+// backend/src/utils/audit.js
 let AuditLog;
 try { ({ AuditLog } = require('../models')); } catch {}
 
-/* ---------------------------- small helpers ---------------------------- */
-const DEFAULT_REDACTIONS = ['password', 'secret', 'token', 'accessToken', 'refreshToken', 'pin'];
+const MAX_MSG = 280;
 
-function redact(obj, keys = DEFAULT_REDACTIONS) {
+/** Make a short, human string and a structured details object. */
+function buildEvent({ req, category='system', action, message, entity=null, entityId=null, details=null }) {
+  const ctx = {
+    // Light context (safe to keep)
+    ip: req?.ip || null,
+    ua: req?.headers?.['user-agent'] || null,
+    method: req?.method || null,
+    path: req?.originalUrl || req?.url || null,
+    tenantId: req?.headers?.['x-tenant-id'] || req?.user?.tenantId || null,
+    branchId: req?.headers?.['x-branch-id'] || req?.user?.branchId || null,
+  };
+
+  // Prefer a clean one-line message; fall back to action + entity
+  let msg = (message || '').trim();
+  if (!msg) {
+    const ent = entity ? `${entity}${entityId ? `#${entityId}` : ''}` : '';
+    msg = [category, action, ent].filter(Boolean).join(' • ');
+  }
+  if (msg.length > MAX_MSG) msg = msg.slice(0, MAX_MSG - 1) + '…';
+
+  // Keep all “raw” bits in details (JSON), never in message
+  const safeDetails =
+    details && typeof details === 'object'
+      ? details
+      : details
+      ? { note: String(details) }
+      : {};
+
+  // Attach the request body in a tiny/filtered way (don’t log secrets)
+  const body = (() => {
+    const b = req?.body && typeof req.body === 'object' ? { ...req.body } : null;
+    if (!b) return null;
+    for (const k of Object.keys(b)) {
+      if (/pass(word)?|secret|token|otp/i.test(k)) b[k] = '***';
+    }
+    // If super large, truncate stringified body
+    try {
+      const s = JSON.stringify(b);
+      if (s.length > 4000) return { _truncated: true };
+    } catch {}
+    return b;
+  })();
+
+  const mergedDetails = { ...safeDetails, meta: ctx, ...(body ? { body } : {}) };
+
+  return {
+    userId: req?.user?.id || null,
+    branchId: req?.user?.branchId || null,
+    category,
+    action,
+    message: msg,
+    entity: entity || null,
+    entityId: entityId != null ? String(entityId) : null,
+    details: mergedDetails,
+    ip: ctx.ip,
+  };
+}
+
+async function writeAudit({ req, category='system', action, message='', entity=null, entityId=null, details=null }) {
   try {
-    if (obj == null || typeof obj !== 'object') return obj;
-    const lower = new Set(keys.map(k => String(k).toLowerCase()));
-    const walk = (v) => {
-      if (v == null || typeof v !== 'object') return v;
-      if (Array.isArray(v)) return v.map(walk);
-      const out = {};
-      for (const [k, val] of Object.entries(v)) {
-        out[k] = lower.has(k.toLowerCase()) ? '***' : walk(val);
-      }
-      return out;
-    };
-    return walk(obj);
-  } catch { return null; }
-}
-
-function pickBranchId(req, fallback) {
-  const hdr = req?.headers?.['x-branch-id'];
-  if (hdr != null && hdr !== '') return isNaN(Number(hdr)) ? String(hdr) : Number(hdr);
-  if (req?.user?.branchId != null) return req.user.branchId;
-  return fallback ?? null;
-}
-
-function pickIp(req) {
-  return (
-    req?.headers?.['x-forwarded-for']?.toString().split(',')[0]?.trim() ||
-    req?.ip ||
-    req?.connection?.remoteAddress ||
-    null
-  );
-}
-
-/**
- * logAudit – rich writer that only persists columns that exist on the model.
- * You can safely pass extra props; they'll be ignored if not in the schema.
- */
-async function logAudit({
-  req,
-  userId,
-  branchId,
-  category = 'system',
-  action,
-  message = '',
-  entity,
-  entityId,
-  meta,
-  before,
-  after,
-  redactions = DEFAULT_REDACTIONS,
-} = {}) {
-  try {
-    if (!AuditLog?.create) return; // soft no-op if model not available
-
-    const attrs = (AuditLog?.rawAttributes && Object.keys(AuditLog.rawAttributes)) || [];
-    const allow = new Set(attrs);
-
-    const data = {
-      userId:   userId ?? req?.user?.id ?? null,
-      branchId: branchId ?? pickBranchId(req, null),
-      category,
-      action,
-      message,
-      ip: pickIp(req),
-    };
-
-    // optional fields only if your model has them
-    if (allow.has('userAgent')) data.userAgent = (req?.headers?.['user-agent'] || '').toString();
-    if (allow.has('entity'))     data.entity = entity ?? null;
-    if (allow.has('entityId'))   data.entityId = entityId != null ? String(entityId) : null;
-    if (allow.has('meta'))       data.meta = meta ?? null;
-    if (allow.has('before'))     data.before = redact(before, redactions);
-    if (allow.has('after'))      data.after = redact(after, redactions);
-
-    // guard unknown keys (avoid SQL column errors)
-    const payload = {};
-    for (const k of Object.keys(data)) if (allow.has(k)) payload[k] = data[k];
-
-    // Always keep required basics even if rawAttributes missing (common keys)
-    if (allow.has('category')) payload.category = data.category;
-    if (allow.has('action'))   payload.action   = data.action;
-    if (allow.has('message'))  payload.message  = data.message;
-    if (allow.has('ip'))       payload.ip       = data.ip;
-    if (allow.has('userId'))   payload.userId   = data.userId ?? null;
-    if (allow.has('branchId')) payload.branchId = data.branchId ?? null;
-
-    await AuditLog.create(payload);
-  } catch {
-    // Never break primary flow for audit issues.
+    if (!AuditLog?.create || !req) return;
+    const row = buildEvent({ req, category, action, message, entity, entityId, details });
+    await AuditLog.create(row);
+  } catch (e) {
+    // do not crash business flow on audit failure
+    // console.error('writeAudit error:', e);
   }
 }
 
-/** Back-compat alias matching your existing calls. */
-async function writeAudit({ req, category = 'system', action, message = '' } = {}) {
-  return logAudit({ req, category, action, message });
-}
-
-module.exports = { logAudit, writeAudit, redact };
+module.exports = { writeAudit };
