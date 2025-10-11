@@ -1,3 +1,4 @@
+// backend/src/routes/admin/auditRoutes.js
 'use strict';
 
 const express = require('express');
@@ -18,10 +19,14 @@ const AuditLog = models?.AuditLog;
 const User     = models?.User;
 const Branch   = models?.Branch;
 
-router.use(authenticateUser, requireAuth, authorizeRoles('admin', 'director', 'super_admin', 'system_admin', 'developer'));
+router.use(
+  authenticateUser,
+  requireAuth,
+  authorizeRoles('admin', 'director', 'super_admin', 'system_admin', 'developer')
+);
 
 /* --------------- helpers --------------- */
-const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+const clamp  = (n, a, b) => Math.max(a, Math.min(b, n));
 const toDate = (v) => (v ? new Date(v) : null);
 const likeOp = (models?.sequelize?.getDialect?.() === 'postgres' ? Op.iLike : Op.like);
 
@@ -50,36 +55,93 @@ function buildWhere(qs = {}) {
   return where;
 }
 
+/** Find the correct `as` alias for a source→target association, if any. */
+function resolveAlias(sourceModel, targetModel, hints = []) {
+  try {
+    const assocs = sourceModel?.associations || {};
+    let found = null;
+
+    // 1) direct target match
+    for (const [key, a] of Object.entries(assocs)) {
+      if (a?.target === targetModel) {
+        found = a?.as || a?.options?.as || key;
+        break;
+      }
+    }
+    // 2) foreignKey heuristic
+    if (!found) {
+      for (const [key, a] of Object.entries(assocs)) {
+        const fk = a?.foreignKey || a?.identifier || a?.identifierField;
+        if (a?.target === targetModel && (fk === 'userId' || fk === 'branchId')) {
+          found = a?.as || a?.options?.as || key;
+          break;
+        }
+      }
+    }
+    // 3) name hints (e.g., 'User', 'Actor', 'CreatedBy', 'Branch')
+    if (!found && hints.length) {
+      for (const [key, a] of Object.entries(assocs)) {
+        const candidate = (a?.as || a?.options?.as || key || '').toString().toLowerCase();
+        if (hints.some(h => candidate === h.toLowerCase())) {
+          found = a?.as || a?.options?.as || key;
+          break;
+        }
+      }
+    }
+    return found;
+  } catch {
+    return null;
+  }
+}
+
+function buildIncludesSafe() {
+  const inc = [];
+  if (!AuditLog) return inc;
+
+  // Try to detect the alias names used in your associations.
+  const userAs   = (User   && resolveAlias(AuditLog, User,   ['User', 'user', 'Actor', 'CreatedBy'])) || null;
+  const branchAs = (Branch && resolveAlias(AuditLog, Branch, ['Branch', 'branch'])) || null;
+
+  if (User && userAs) {
+    inc.push({ model: User, as: userAs, attributes: ['id', 'name', 'email'], required: false });
+  }
+  if (Branch && branchAs) {
+    inc.push({ model: Branch, as: branchAs, attributes: ['id', 'name'], required: false });
+  }
+  return inc;
+}
+
 /* ---------------------- LIST ---------------------- */
 /** GET /admin/audit?q=&userId=&branchId=&category=&action=&from=&to=&limit=&offset= */
 router.get('/', async (req, res) => {
   if (!AuditLog?.findAndCountAll) return res.json({ items: [], total: 0 });
 
+  const limit  = clamp(Number(req.query.limit ?? 100), 1, 500);
+  const offset = clamp(Number(req.query.offset ?? 0), 0, 50_000);
+  const where  = buildWhere(req.query);
+  const common = { where, order: [['createdAt', 'DESC']], limit, offset };
+
   try {
-    const limit  = clamp(Number(req.query.limit ?? 100), 1, 500);
-    const offset = clamp(Number(req.query.offset ?? 0), 0, 50_000);
-
-    const where = buildWhere(req.query);
-
-    const rows = await AuditLog.findAndCountAll({
-      where,
-      include: [
-        User   ? { model: User,   attributes: ['id', 'name', 'email'], required: false } : null,
-        Branch ? { model: Branch, attributes: ['id', 'name'], required: false } : null,
-      ].filter(Boolean),
-      order: [['createdAt', 'DESC']],
-      limit,
-      offset,
-    });
-
-    return res.json({ items: rows.rows, total: rows.count });
+    // Prefer includes (with correct alias), but fall back if dialect/alias errors happen.
+    const include = buildIncludesSafe();
+    const out = await AuditLog.findAndCountAll(include.length ? { ...common, include } : common);
+    return res.json({ items: out.rows, total: out.count });
   } catch (e) {
-    return res.status(500).json({ error: e.message || 'Failed to fetch audit logs' });
+    // Alias mismatch or other include error — retry without include so the UI keeps working.
+    try {
+      const out = await AuditLog.findAndCountAll(common);
+      return res.json({
+        items: out.rows,
+        total: out.count,
+        note: 'Includes disabled due to association alias mismatch. Update model aliases to enable joins.'
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message || 'Failed to fetch audit logs' });
+    }
   }
 });
 
 /* -------------------- SUMMARY (portable) -------------------- */
-/** GET /admin/audit/summary */
 router.get('/summary', async (_req, res) => {
   if (!AuditLog?.findAll) {
     return res.json({
@@ -90,8 +152,6 @@ router.get('/summary', async (_req, res) => {
 
   try {
     const since = new Date(Date.now() - 30 * 24 * 3600 * 1000);
-
-    // totals by action
     const allRows = await AuditLog.findAll({ where: { createdAt: { [Op.gte]: since } }, attributes: ['action'] });
     const countBy = (a) => allRows.filter(r => (r.action || '') === a).length;
     const totals = {
@@ -103,7 +163,6 @@ router.get('/summary', async (_req, res) => {
       loginFailed: countBy('login:failed'),
     };
 
-    // last 7 days by day
     const seven = new Date(Date.now() - 6 * 24 * 3600 * 1000);
     const recent = await AuditLog.findAll({
       where: { createdAt: { [Op.gte]: seven } },
@@ -122,7 +181,6 @@ router.get('/summary', async (_req, res) => {
     });
     const byDay = [...byDayMap.entries()].map(([date, count]) => ({ date, count }));
 
-    // by category
     const cats = await AuditLog.findAll({
       where: { createdAt: { [Op.gte]: since } },
       attributes: ['category', [fn('COUNT', col('id')), 'count']],
@@ -133,7 +191,6 @@ router.get('/summary', async (_req, res) => {
     });
     const byCategory = cats.map(c => ({ category: c.category || '(none)', count: Number(c.count) || 0 }));
 
-    // top actors
     const actors = await AuditLog.findAll({
       where: { createdAt: { [Op.gte]: since } },
       attributes: ['userId', [fn('COUNT', col('id')), 'count']],
@@ -151,7 +208,6 @@ router.get('/summary', async (_req, res) => {
 });
 
 /* -------------------- FEED (latest N) -------------------- */
-/** GET /admin/audit/feed?limit=20 */
 router.get('/feed', async (req, res) => {
   if (!AuditLog?.findAll) return res.json({ items: [] });
 
@@ -169,11 +225,9 @@ router.get('/feed', async (req, res) => {
 });
 
 /* -------------------- STREAM (SSE) -------------------- */
-/** GET /admin/audit/stream – lightweight SSE that polls every 5s */
 router.get('/stream', async (req, res) => {
   if (!AuditLog?.findAll) return res.status(400).json({ error: 'AuditLog not available' });
 
-  // SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -186,7 +240,6 @@ router.get('/stream', async (req, res) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
-  // initial push
   try {
     const items = await AuditLog.findAll({
       order: [['createdAt', 'DESC']],
@@ -198,7 +251,6 @@ router.get('/stream', async (req, res) => {
     send('error', { message: 'init failed' });
   }
 
-  // poll every 5s for latest
   let lastTs = Date.now();
   const timer = setInterval(async () => {
     if (closed) { clearInterval(timer); return; }
@@ -213,7 +265,6 @@ router.get('/stream', async (req, res) => {
         lastTs = Date.now();
         send('append', { items });
       } else {
-        // heartbeat
         res.write(': keep-alive\n\n');
       }
     } catch {
