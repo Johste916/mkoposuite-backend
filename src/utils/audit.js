@@ -1,32 +1,9 @@
-// backend/src/utils/audit.js
 'use strict';
 
-/**
- * Rich, fault-tolerant audit helper.
- *
- * Backwards compatible with:
- *   writeAudit({ req, category?, action, message? })
- *
- * New, richer usage:
- *   logAudit({
- *     req,                       // Express req (for user, ip, ua, headers)
- *     userId?, branchId?,        // override if needed
- *     category = 'system',       // e.g. 'auth', 'users', 'loans', ...
- *     action,                    // e.g. 'create','update','delete','login:success'
- *     message = '',              // short human-readable message
- *     entity?, entityId?,        // what was acted on
- *     meta?,                     // any extra context (object)
- *     before?, after?,           // snapshots to store (auto-redacted)
- *     redactions?                // keys to redact (default common secrets)
- *   })
- */
-
 let AuditLog;
-try {
-  ({ AuditLog } = require('../models'));
-} catch { /* soft-no-op if models not wired */ }
+try { ({ AuditLog } = require('../models')); } catch {}
 
-/* ---------------------------- utilities ---------------------------- */
+/* ---------------------------- small helpers ---------------------------- */
 const DEFAULT_REDACTIONS = ['password', 'secret', 'token', 'accessToken', 'refreshToken', 'pin'];
 
 function redact(obj, keys = DEFAULT_REDACTIONS) {
@@ -43,26 +20,7 @@ function redact(obj, keys = DEFAULT_REDACTIONS) {
       return out;
     };
     return walk(obj);
-  } catch {
-    return null;
-  }
-}
-
-function jsonDiff(before, after) {
-  try {
-    const b = before || {};
-    const a = after || {};
-    const keys = Array.from(new Set([...Object.keys(b), ...Object.keys(a)]));
-    const changes = {};
-    for (const k of keys) {
-      const bv = JSON.stringify(b[k]);
-      const av = JSON.stringify(a[k]);
-      if (bv !== av) changes[k] = { from: b[k], to: a[k] };
-    }
-    return Object.keys(changes).length ? changes : null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 function pickBranchId(req, fallback) {
@@ -81,7 +39,10 @@ function pickIp(req) {
   );
 }
 
-/* ------------------------------ core ------------------------------ */
+/**
+ * logAudit – rich writer that only persists columns that exist on the model.
+ * You can safely pass extra props; they'll be ignored if not in the schema.
+ */
 async function logAudit({
   req,
   userId,
@@ -97,53 +58,49 @@ async function logAudit({
   redactions = DEFAULT_REDACTIONS,
 } = {}) {
   try {
-    if (!AuditLog?.create) return; // soft no-op
+    if (!AuditLog?.create) return; // soft no-op if model not available
 
-    // resolve ids & request info
-    const uid = userId ?? req?.user?.id ?? null;
-    const bid = branchId ?? pickBranchId(req, null);
-    const ip = pickIp(req);
-    const userAgent = (req?.headers?.['user-agent'] || '').toString();
+    const attrs = (AuditLog?.rawAttributes && Object.keys(AuditLog.rawAttributes)) || [];
+    const allow = new Set(attrs);
 
-    // safe snapshots
-    const safeBefore = redact(before, redactions);
-    const safeAfter  = redact(after,  redactions);
-
-    await AuditLog.create({
-      userId: uid,
-      branchId: bid,
+    const data = {
+      userId:   userId ?? req?.user?.id ?? null,
+      branchId: branchId ?? pickBranchId(req, null),
       category,
       action,
-      entity: entity ?? null,
-      entityId: entityId != null ? String(entityId) : null,
       message,
-      ip,
-      userAgent,
-      meta: meta ?? null,
-      before: safeBefore ?? null,
-      after: safeAfter ?? null,
-      // 'reversed' defaults handled by model
-    });
-  } catch (e) {
-    // Never break the main flow because of auditing
-    // console.error('logAudit error:', e?.message || e);
+      ip: pickIp(req),
+    };
+
+    // optional fields only if your model has them
+    if (allow.has('userAgent')) data.userAgent = (req?.headers?.['user-agent'] || '').toString();
+    if (allow.has('entity'))     data.entity = entity ?? null;
+    if (allow.has('entityId'))   data.entityId = entityId != null ? String(entityId) : null;
+    if (allow.has('meta'))       data.meta = meta ?? null;
+    if (allow.has('before'))     data.before = redact(before, redactions);
+    if (allow.has('after'))      data.after = redact(after, redactions);
+
+    // guard unknown keys (avoid SQL column errors)
+    const payload = {};
+    for (const k of Object.keys(data)) if (allow.has(k)) payload[k] = data[k];
+
+    // Always keep required basics even if rawAttributes missing (common keys)
+    if (allow.has('category')) payload.category = data.category;
+    if (allow.has('action'))   payload.action   = data.action;
+    if (allow.has('message'))  payload.message  = data.message;
+    if (allow.has('ip'))       payload.ip       = data.ip;
+    if (allow.has('userId'))   payload.userId   = data.userId ?? null;
+    if (allow.has('branchId')) payload.branchId = data.branchId ?? null;
+
+    await AuditLog.create(payload);
+  } catch {
+    // Never break primary flow for audit issues.
   }
 }
 
-/* ----------------------- backward-compat alias ---------------------- */
-/**
- * Minimal writer (keeps existing calls working).
- * Example kept from your code:
- *   await writeAudit({ req, category: 'system', action: 'something', message: '...' });
- */
+/** Back-compat alias matching your existing calls. */
 async function writeAudit({ req, category = 'system', action, message = '' } = {}) {
   return logAudit({ req, category, action, message });
 }
 
-/* ------------------------------ exports ---------------------------- */
-module.exports = {
-  logAudit,
-  writeAudit,     // alias (back-compat)
-  redact,
-  jsonDiff,
-};
+module.exports = { logAudit, writeAudit, redact };
