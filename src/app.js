@@ -1432,6 +1432,9 @@ if (process.env.AUTH_ME_FALLBACK === '1') {
 const auditTrail = require('./middleware/auditTrail');
 app.use(auditTrail());
 
+app.use(authenticateUser);      // sets req.user if token present
+app.use(ensureTenantActive);    // now can use req.user / default
+
 /* ----------------------------------- 404 ----------------------------------- */
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Not found' });
