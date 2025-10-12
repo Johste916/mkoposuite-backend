@@ -1,106 +1,164 @@
-// backend/src/utils/audit.js
-"use strict";
+'use strict';
 
 /**
- * Lightweight, safe audit writer.
- * - Never references non-existent columns.
- * - Produces a human readable message when one isn’t supplied.
- * - Stores small request meta (ua, method, path, status, tenant ctx if available).
- * - Accepts optional entity/entityId/before/after/meta (they’re ignored by DB if
- *   those columns don’t exist – code won’t crash).
+ * Safe audit logger: exports both { logAudit, writeAudit }.
+ *
+ * - If an AuditLog model/table exists, it writes there.
+ * - If models/table are missing, it becomes a NO-OP (never throws).
+ * - Accepts either:
+ *     logAudit({ req, action, details/meta, ... })
+ *   or
+ *     logAudit({ userId, tenantId, ip, ua, action, details/meta, ... })
+ *
+ * Compatible with existing code that does:
+ *   const { logAudit } = require('../utils/audit');
  */
 
-let models = null;
-try { models = require("../models"); } catch {}
-const AuditLog = models?.AuditLog;
+let db = null;
+try { db = require('../models'); } catch {}
+// try common naming variants
+const AuditLog =
+  db?.AuditLog ||
+  db?.Audit ||
+  db?.models?.AuditLog ||
+  null;
 
-/* ------- helpers ------- */
-const pick = (o, keys) => Object.fromEntries(keys.map(k => [k, o?.[k]]));
-const safeJson = (x) => {
-  try { return JSON.stringify(x); } catch { return String(x ?? ""); }
-};
-const guessCategory = (path = "") => {
-  const p = (path || "").toLowerCase();
-  if (p.startsWith("/api/auth")) return "auth";
-  if (p.startsWith("/api/users") || p.includes("/users")) return "users";
-  if (p.includes("/loans")) return "loans";
-  if (p.includes("/repay")) return "repayments";
-  if (p.includes("/roles") || p.includes("/permissions")) return "permissions";
-  if (p.includes("/branches")) return "branches";
-  return "system";
-};
-const guessAction = (method = "", statusCode = 200, path = "") => {
-  const m = (method || "").toUpperCase();
-  if (m === "POST")   return "create";
-  if (m === "PUT" || m === "PATCH") return "update";
-  if (m === "DELETE") return "delete";
-  if (m === "GET" && path.includes("/login") && statusCode >= 200 && statusCode < 300) return "login:success";
-  if (m === "GET" && path.includes("/login") && statusCode >= 400) return "login:failed";
-  return m.toLowerCase();
-};
-const humanFromReq = (req, fallback="") => {
-  const method = req?.method || "";
-  const path   = req?.originalUrl || req?.path || "";
-  const status = resStatusGuess(req);
-  return `${method} ${path} • ${status}`;
-};
-const resStatusGuess = (req) => {
-  // If you attach res.locals.status in a response middleware, use that.
+/* ----------------- helpers ----------------- */
+function pick(obj, ...keys) {
+  const out = {};
+  if (!obj) return out;
+  keys.forEach(k => { if (obj[k] !== undefined) out[k] = obj[k]; });
+  return out;
+}
+
+function safeJson(x) {
+  if (x == null) return null;
+  if (typeof x === 'string') return x;
+  try { return JSON.stringify(x); } catch { return String(x); }
+}
+
+function guessCategory(path = '') {
+  const p = (path || '').toLowerCase();
+  if (p.startsWith('/api/auth')) return 'auth';
+  if (p.includes('/users')) return 'users';
+  if (p.includes('/loans')) return 'loans';
+  if (p.includes('/repay')) return 'repayments';
+  if (p.includes('/roles') || p.includes('/permissions')) return 'permissions';
+  if (p.includes('/branches')) return 'branches';
+  return 'system';
+}
+
+function guessAction(method = '', statusCode = 200, path = '') {
+  const m = String(method || '').toUpperCase();
+  if (m === 'POST') return 'create';
+  if (m === 'PUT' || m === 'PATCH') return 'update';
+  if (m === 'DELETE') return 'delete';
+  if (m === 'GET' && path.includes('/login') && statusCode < 400) return 'login:success';
+  if (m === 'GET' && path.includes('/login') && statusCode >= 400) return 'login:failed';
+  return m.toLowerCase() || 'event';
+}
+
+function resStatusGuess(req) {
   return req?.res?.statusCode ?? 0;
-};
+}
 
-async function writeAudit({
-  req,
-  category,
-  action,
-  entity,
-  entityId,
-  message,
-  before = null,
-  after  = null,
-  meta   = null,
-}) {
+function ipFromReq(req) {
+  const xf = req?.headers?.['x-forwarded-for'];
+  if (typeof xf === 'string' && xf.length) {
+    const first = xf.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  return req?.socket?.remoteAddress || req?.ip || null;
+}
+
+/* --------------- core writer --------------- */
+async function writeAudit(input = {}) {
   try {
-    if (!AuditLog?.create) return;
+    if (!AuditLog || typeof AuditLog.create !== 'function') {
+      // Dev/no-table mode — noop
+      if (process.env.NODE_ENV !== 'production') {
+        // eslint-disable-next-line no-console
+        console.debug('[audit noop]', {
+          action: input.action,
+          userId: input.userId || input?.req?.user?.id || null,
+        });
+      }
+      return;
+    }
 
-    const method = req?.method;
-    const path   = req?.originalUrl || req?.path;
-    const status = resStatusGuess(req);
+    const req = input.req || null;
 
-    const final = {
-      userId:   req?.user?.id || null,
-      branchId: req?.user?.branchId || null,
-      ip:       req?.ip || null,
+    const method = input.method || req?.method || null;
+    const path   = input.path   || req?.originalUrl || req?.url || null;
+    const status = Number(input.statusCode ?? resStatusGuess(req));
 
-      category: category || guessCategory(path),
-      action:   action   || guessAction(method, status, path),
+    const userId =
+      input.userId ??
+      req?.user?.id ??
+      req?.user?.userId ??
+      null;
 
-      // Store a friendly, short message (keep original string if caller supplied).
-      message:  message || humanFromReq(req),
+    // Try common places for tenant/branch
+    const tenantId =
+      input.tenantId ??
+      req?.headers?.['x-tenant-id'] ??
+      req?.user?.tenantId ??
+      req?.tenant?.id ??
+      null;
 
-      // These keys will be silently ignored if the DB doesn’t have those columns.
-      entity:   entity   || null,
-      entityId: entityId || null,
+    const branchId =
+      input.branchId ??
+      req?.headers?.['x-branch-id'] ??
+      req?.user?.branchId ??
+      null;
 
-      // Persist small meta (as TEXT when JSONB isn’t available; model ignores extras)
-      // so the UI can render “Meta” panel even without before/after.
-      // When meta is object, stringify it; when string, keep it.
-      meta: typeof meta === "string" ? meta : safeJson(meta || {
-        method, path, statusCode: status,
-        ua: req?.headers?.["user-agent"],
-        ctx: req?.tenant || req?.context || pick(req?.user, ["tenantId","branchId"]),
-      }),
+    const ip  = input.ip  ?? ipFromReq(req);
+    const ua  = input.ua  ?? req?.headers?.['user-agent'] ?? null;
 
-      // Keep these in memory; DB will drop if no columns exist.
-      before: before ? safeJson(before) : null,
-      after:  after  ? safeJson(after)  : null,
+    const category = input.category || guessCategory(path || '');
+    const action   = String(input.action || guessAction(method, status, path)).slice(0, 128);
+
+    const message  = input.message || (method && path ? `${method} ${path} • ${status || ''}`.trim() : null);
+
+    // Prefer "details" if caller used it; alias to meta
+    const meta = input.meta ?? input.details ?? {
+      method, path, statusCode: status, ua,
+      ctx: req?.tenant || req?.context || pick(req?.user || {}, 'tenantId', 'branchId')
     };
 
-    await AuditLog.create(final);
+    const payload = {
+      // common columns (include only those that exist)
+      userId, tenantId, branchId,
+      ip, ua, path, method,
+      category, action, message,
+      meta: safeJson(meta),
+      before: safeJson(input.before ?? null),
+      after:  safeJson(input.after  ?? null),
+      entity: input.entity ?? null,
+      entityId: input.entityId ?? null,
+    };
+
+    // only keep attributes the model actually has
+    const attrs = AuditLog.rawAttributes ? Object.keys(AuditLog.rawAttributes) : Object.keys(payload);
+    const safePayload = pick(payload, ...attrs);
+
+    await AuditLog.create(safePayload);
   } catch (e) {
-    // Do not crash app on audit failure
-    console.warn("writeAudit() skipped:", e?.message || e);
+    // Never break request flow because of audit
+    if (process.env.NODE_ENV !== 'production') {
+      // eslint-disable-next-line no-console
+      console.warn('[audit error swallowed]', e?.message || e);
+    }
   }
 }
 
-module.exports = { writeAudit };
+/**
+ * Backward-compatible alias used throughout codebase.
+ * Example:
+ *   await logAudit({ req, action: 'login_success', details: {...} })
+ */
+async function logAudit(input = {}) {
+  return writeAudit(input);
+}
+
+module.exports = { logAudit, writeAudit };
