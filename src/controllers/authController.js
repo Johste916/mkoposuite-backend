@@ -314,17 +314,3 @@ exports.disableTwoFA = async (req, res) => {
     return res.status(500).json({ message: 'Failed to disable 2FA' });
   }
 };
-// backend/src/controllers/authController.js (example)
-const { logAudit } = require('../utils/audit');
-
-exports.login = async (req, res) => {
-  const { email } = req.body;
-  try {
-    // ... do auth
-    await logAudit({ req, category: 'auth', action: 'login:success', entity:'User', entityId: user.id, message: `Login OK for ${email}` });
-    res.json({ token });
-  } catch (e) {
-    await logAudit({ req, category: 'auth', action: 'login:failed', message: `Login failed for ${email}` });
-    res.status(401).json({ error:'Invalid credentials' });
-  }
-};

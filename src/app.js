@@ -1428,12 +1428,6 @@ if (process.env.AUTH_ME_FALLBACK === '1') {
     console.warn('AUTH_ME_FALLBACK enabled but middleware missing:', e.message);
   }
 }
-// backend/src/app.js (or wherever you mount middlewares)
-const auditTrail = require('./middleware/auditTrail');
-app.use(auditTrail());
-
-app.use(authenticateUser);      // sets req.user if token present
-app.use(ensureTenantActive);    // now can use req.user / default
 
 /* ----------------------------------- 404 ----------------------------------- */
 app.use((req, res) => {
