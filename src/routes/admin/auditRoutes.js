@@ -1,33 +1,33 @@
-// backend/src/routes/admin/auditRoutes.js
-"use strict";
+'use strict';
 
-const express = require("express");
+const express = require('express');
 const router = express.Router();
-const { Op, literal } = require("sequelize");
+const { Op, fn, col, literal } = require('sequelize');
 
-/* ---- Auth (soft) ---- */
+/* ---------------- Auth (soft) ---------------- */
 let auth = {};
-try { auth = require("../../middleware/authMiddleware"); } catch {}
+try { auth = require('../../middleware/authMiddleware'); } catch {}
 const authenticateUser = auth.authenticateUser || ((_req, _res, next) => next());
 const requireAuth      = auth.requireAuth      || ((_req, _res, next) => next());
 const authorizeRoles   = auth.authorizeRoles   || (() => ((_req, _res, next) => next()));
 
-/* ---- Models (soft) ---- */
+/* ---------------- Models (soft) -------------- */
 let models = null;
-try { models = require("../../models"); } catch {}
-const sequelize = models?.sequelize;
-const AuditLog  = models?.AuditLog;
+try { models = require('../../models'); } catch {}
+const AuditLog = models?.AuditLog;
+const User     = models?.User;
+const Branch   = models?.Branch;
 
 router.use(
   authenticateUser,
   requireAuth,
-  authorizeRoles("admin", "director", "super_admin", "system_admin", "developer")
+  authorizeRoles('admin', 'director', 'super_admin', 'system_admin', 'developer')
 );
 
-/* ---- helpers ---- */
+/* ---------------- Helpers ------------------- */
 const clamp  = (n, a, b) => Math.max(a, Math.min(b, n));
 const toDate = (v) => (v ? new Date(v) : null);
-const likeOp = (sequelize?.getDialect?.() === "postgres" ? Op.iLike : Op.like);
+const likeOp = (models?.sequelize?.getDialect?.() === 'postgres' ? Op.iLike : Op.like);
 
 function buildWhere(qs = {}) {
   const { q, userId, branchId, category, action, from, to } = qs;
@@ -41,7 +41,7 @@ function buildWhere(qs = {}) {
     if (from) where.createdAt[Op.gte] = toDate(from);
     if (to)   where.createdAt[Op.lte] = toDate(to);
   }
-  const term = (q || "").toString().trim();
+  const term = (q || '').toString().trim();
   if (term) {
     const pat = `%${term}%`;
     where[Op.or] = [
@@ -54,76 +54,69 @@ function buildWhere(qs = {}) {
   return where;
 }
 
-/* =========================================================
-   LIST — with computed user/branch names via SQL subqueries
-   (no fragile association aliases required)
-   ========================================================= */
-router.get("/", async (req, res) => {
-  if (!AuditLog?.findAndCountAll || !sequelize) return res.json({ items: [], total: 0 });
+function resolveAlias(sourceModel, targetModel, hints = []) {
+  try {
+    const assocs = sourceModel?.associations || {};
+    for (const [key, a] of Object.entries(assocs)) {
+      if (a?.target === targetModel) return a?.as || a?.options?.as || key;
+    }
+    for (const [key, a] of Object.entries(assocs)) {
+      const nm = (a?.as || a?.options?.as || key || '').toString().toLowerCase();
+      if (hints.some(h => nm === h.toLowerCase())) return a?.as || a?.options?.as || key;
+    }
+  } catch {}
+  return null;
+}
+
+function buildIncludesSafe() {
+  const inc = [];
+  if (!AuditLog) return inc;
+
+  const userAs   = (User   && resolveAlias(AuditLog, User,   ['User','user','Actor','CreatedBy'])) || null;
+  const branchAs = (Branch && resolveAlias(AuditLog, Branch, ['Branch','branch'])) || null;
+
+  if (User && userAs)   inc.push({ model: User,   as: userAs,   attributes: ['id','name','email'], required: false });
+  if (Branch && branchAs) inc.push({ model: Branch, as: branchAs, attributes: ['id','name'],       required: false });
+  return inc;
+}
+
+/* ===================== LIST ===================== */
+router.get('/', async (req, res) => {
+  if (!AuditLog?.findAndCountAll) return res.json({ items: [], total: 0 });
+
+  const limit  = clamp(Number(req.query.limit ?? 100), 1, 500);
+  const offset = clamp(Number(req.query.offset ?? 0), 0, 50_000);
+  const where  = buildWhere(req.query);
+
+  const common = {
+    where,
+    order: [['createdAt', 'DESC']],
+    limit,
+    offset,
+    // only existing columns here
+    attributes: ['id','userId','branchId','category','action','message','ip','reversed','createdAt','updatedAt'],
+  };
 
   try {
-    const limit  = clamp(Number(req.query.limit ?? 100), 1, 500);
-    const offset = clamp(Number(req.query.offset ?? 0), 0, 50_000);
-    const where  = buildWhere(req.query);
-
-    // Basic fetch first
-    const list = await AuditLog.findAndCountAll({
-      where,
-      order: [["createdAt", "DESC"]],
-      limit, offset,
-      raw: true,
-      attributes: [
-        "id", "userId", "branchId", "category", "action", "message", "ip", "reversed", "createdAt",
-        // optional columns if exist (ignored by Sequelize if not there)
-        "entity", "entityId", "meta"
-      ].filter(Boolean)
+    const include = buildIncludesSafe();
+    const out = await AuditLog.findAndCountAll(include.length ? { ...common, include } : common);
+    const items = out.rows.map(r => {
+      const plain = r.get ? r.get({ plain: true }) : r;
+      return plain; // already has User/Branch when aliased properly
     });
-
-    const rows = list.rows;
-
-    // Enrich names with one batched query to avoid N+1
-    const userIds   = [...new Set(rows.map(r => r.userId).filter(Boolean))];
-    const branchIds = [...new Set(rows.map(r => r.branchId).filter(Boolean))];
-
-    let usersById = new Map();
-    let branchesById = new Map();
-
-    try {
-      if (userIds.length) {
-        const [uRows] = await sequelize.query(`
-          SELECT id, COALESCE(name, '') AS name, COALESCE(email, '') AS email
-          FROM "Users"
-          WHERE id = ANY(:ids)
-        `, { replacements: { ids: userIds } });
-        usersById = new Map(uRows.map(u => [String(u.id), { name: u.name, email: u.email }]));
-      }
-    } catch {}
-    try {
-      if (branchIds.length) {
-        const [bRows] = await sequelize.query(`
-          SELECT id, name
-          FROM branches
-          WHERE id = ANY(:ids)
-        `, { replacements: { ids: branchIds } });
-        branchesById = new Map(bRows.map(b => [String(b.id), { name: b.name }]));
-      }
-    } catch {}
-
-    const enriched = rows.map(r => ({
-      ...r,
-      userName:   usersById.get(String(r.userId))?.name   || null,
-      userEmail:  usersById.get(String(r.userId))?.email  || null,
-      branchName: branchesById.get(String(r.branchId))?.name || null,
-    }));
-
-    return res.json({ items: enriched, total: list.count });
+    return res.json({ items, total: out.count });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "Failed to fetch audit logs" });
+    try {
+      const out = await AuditLog.findAndCountAll(common);
+      return res.json({ items: out.rows, total: out.count });
+    } catch (err) {
+      return res.status(500).json({ error: err.message || 'Failed to fetch audit logs' });
+    }
   }
 });
 
-/* ========= SUMMARY ========= */
-router.get("/summary", async (_req, res) => {
+/* =================== SUMMARY ==================== */
+router.get('/summary', async (_req, res) => {
   if (!AuditLog?.findAll) {
     return res.json({
       totals: { all: 0, create: 0, update: 0, delete: 0, loginSuccess: 0, loginFailed: 0 },
@@ -135,60 +128,91 @@ router.get("/summary", async (_req, res) => {
 
     const allRows = await AuditLog.findAll({
       where: { createdAt: { [Op.gte]: since } },
-      attributes: ["action"],
+      attributes: ['action'],
       raw: true,
     });
-    const count = (a) => allRows.filter(r => (r.action || "") === a).length;
+    const count = (a) => allRows.filter(r => (r.action || '') === a).length;
     const totals = {
       all: allRows.length,
-      create: count("create"),
-      update: count("update"),
-      delete: count("delete"),
-      loginSuccess: count("login:success"),
-      loginFailed: count("login:failed"),
+      create: count('create'),
+      update: count('update'),
+      delete: count('delete'),
+      loginSuccess: count('login:success'),
+      loginFailed: count('login:failed'),
     };
 
-    const byCategory = await AuditLog.findAll({
-      where: { createdAt: { [Op.gte]: since } },
-      attributes: ["category", [literal("COUNT(id)"), "count"]],
-      group: ["category"],
-      order: [[literal("count"), "DESC"]],
+    const seven = new Date(Date.now() - 6 * 24 * 3600 * 1000);
+    const recent = await AuditLog.findAll({
+      where: { createdAt: { [Op.gte]: seven } },
+      attributes: ['createdAt'],
+      order: [['createdAt', 'ASC']],
       raw: true,
-    }).then(rows => rows.map(r => ({ category: r.category || "(none)", count: Number(r.count) || 0 })));
+    });
+    const byDayMap = new Map();
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(seven.getFullYear(), seven.getMonth(), seven.getDate() + i);
+      const key = d.toISOString().slice(0, 10);
+      byDayMap.set(key, 0);
+    }
+    recent.forEach(r => {
+      const key = new Date(r.createdAt).toISOString().slice(0, 10);
+      byDayMap.set(key, (byDayMap.get(key) || 0) + 1);
+    });
+    const byDay = [...byDayMap.entries()].map(([date, count]) => ({ date, count }));
 
-    return res.json({ totals, byDay: [], byCategory, topActors: [] });
+    const cats = await AuditLog.findAll({
+      where: { createdAt: { [Op.gte]: since } },
+      attributes: ['category', [fn('COUNT', col('id')), 'count']],
+      group: ['category'],
+      order: [[literal('count'), 'DESC']],
+      limit: 12,
+      raw: true,
+    });
+    const byCategory = cats.map(c => ({ category: c.category || '(none)', count: Number(c.count) || 0 }));
+
+    const actors = await AuditLog.findAll({
+      where: { createdAt: { [Op.gte]: since } },
+      attributes: ['userId', [fn('COUNT', col('id')), 'count']],
+      group: ['userId'],
+      order: [[literal('count'), 'DESC']],
+      limit: 10,
+      raw: true,
+    });
+    const topActors = actors.map(a => ({ userId: a.userId, count: Number(a.count) || 0 }));
+
+    return res.json({ totals, byDay, byCategory, topActors });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "Failed to build summary" });
+    return res.status(500).json({ error: e.message || 'Failed to build summary' });
   }
 });
 
-/* ========= FEED ========= */
-router.get("/feed", async (req, res) => {
+/* ==================== FEED ====================== */
+router.get('/feed', async (req, res) => {
   if (!AuditLog?.findAll) return res.json({ items: [] });
   try {
     const limit = clamp(Number(req.query.limit ?? 20), 1, 100);
     const items = await AuditLog.findAll({
-      order: [["createdAt", "DESC"]],
+      order: [['createdAt', 'DESC']],
       limit,
-      attributes: ["id","userId","branchId","category","action","message","ip","reversed","createdAt"],
+      attributes: ['id','userId','branchId','category','action','message','ip','reversed','createdAt'],
       raw: true,
     });
     return res.json({ items });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "Failed to load feed" });
+    return res.status(500).json({ error: e.message || 'Failed to load feed' });
   }
 });
 
-/* ========= STREAM (SSE) ========= */
-router.get("/stream", async (req, res) => {
-  if (!AuditLog?.findAll) return res.status(400).json({ error: "AuditLog not available" });
+/* =================== STREAM (SSE) ============== */
+router.get('/stream', async (req, res) => {
+  if (!AuditLog?.findAll) return res.status(400).json({ error: 'AuditLog not available' });
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
 
   let closed = false;
-  req.on("close", () => { closed = true; });
+  req.on('close', () => { closed = true; });
 
   const send = (event, data) => {
     res.write(`event: ${event}\n`);
@@ -197,14 +221,14 @@ router.get("/stream", async (req, res) => {
 
   try {
     const items = await AuditLog.findAll({
-      order: [["createdAt", "DESC"]],
+      order: [['createdAt', 'DESC']],
       limit: 20,
-      attributes: ["id","userId","branchId","category","action","message","ip","reversed","createdAt"],
+      attributes: ['id','userId','branchId','category','action','message','ip','reversed','createdAt'],
       raw: true,
     });
-    send("init", { items });
+    send('init', { items });
   } catch {
-    send("error", { message: "init failed" });
+    send('error', { message: 'init failed' });
   }
 
   let lastTs = Date.now();
@@ -214,17 +238,19 @@ router.get("/stream", async (req, res) => {
       const since = new Date(lastTs - 1000);
       const items = await AuditLog.findAll({
         where: { createdAt: { [Op.gt]: since } },
-        order: [["createdAt", "ASC"]],
-        attributes: ["id","userId","branchId","category","action","message","ip","reversed","createdAt"],
+        order: [['createdAt', 'ASC']],
+        attributes: ['id','userId','branchId','category','action','message','ip','reversed','createdAt'],
         raw: true,
       });
       if (items.length) {
         lastTs = Date.now();
-        send("append", { items });
+        send('append', { items });
       } else {
-        res.write(": keep-alive\n\n");
+        res.write(': keep-alive\n\n');
       }
-    } catch {}
+    } catch {
+      // silent
+    }
   }, 5000);
 });
 

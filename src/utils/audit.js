@@ -1,105 +1,75 @@
 // backend/src/utils/audit.js
-"use strict";
+let AuditLog;
+try { ({ AuditLog } = require('../models')); } catch {}
 
-/**
- * Lightweight, safe audit writer.
- * - Never references non-existent columns.
- * - Produces a human readable message when one isn’t supplied.
- * - Stores small request meta (ua, method, path, status, tenant ctx if available).
- * - Accepts optional entity/entityId/before/after/meta (they’re ignored by DB if
- *   those columns don’t exist – code won’t crash).
- */
+const MAX_MSG = 280;
 
-let models = null;
-try { models = require("../models"); } catch {}
-const AuditLog = models?.AuditLog;
+/** Make a short, human string and a structured details object. */
+function buildEvent({ req, category='system', action, message, entity=null, entityId=null, details=null }) {
+  const ctx = {
+    // Light context (safe to keep)
+    ip: req?.ip || null,
+    ua: req?.headers?.['user-agent'] || null,
+    method: req?.method || null,
+    path: req?.originalUrl || req?.url || null,
+    tenantId: req?.headers?.['x-tenant-id'] || req?.user?.tenantId || null,
+    branchId: req?.headers?.['x-branch-id'] || req?.user?.branchId || null,
+  };
 
-/* ------- helpers ------- */
-const pick = (o, keys) => Object.fromEntries(keys.map(k => [k, o?.[k]]));
-const safeJson = (x) => {
-  try { return JSON.stringify(x); } catch { return String(x ?? ""); }
-};
-const guessCategory = (path = "") => {
-  const p = (path || "").toLowerCase();
-  if (p.startsWith("/api/auth")) return "auth";
-  if (p.startsWith("/api/users") || p.includes("/users")) return "users";
-  if (p.includes("/loans")) return "loans";
-  if (p.includes("/repay")) return "repayments";
-  if (p.includes("/roles") || p.includes("/permissions")) return "permissions";
-  if (p.includes("/branches")) return "branches";
-  return "system";
-};
-const guessAction = (method = "", statusCode = 200, path = "") => {
-  const m = (method || "").toUpperCase();
-  if (m === "POST")   return "create";
-  if (m === "PUT" || m === "PATCH") return "update";
-  if (m === "DELETE") return "delete";
-  if (m === "GET" && path.includes("/login") && statusCode >= 200 && statusCode < 300) return "login:success";
-  if (m === "GET" && path.includes("/login") && statusCode >= 400) return "login:failed";
-  return m.toLowerCase();
-};
-const humanFromReq = (req, fallback="") => {
-  const method = req?.method || "";
-  const path   = req?.originalUrl || req?.path || "";
-  const status = resStatusGuess(req);
-  return `${method} ${path} • ${status}`;
-};
-const resStatusGuess = (req) => {
-  // If you attach res.locals.status in a response middleware, use that.
-  return req?.res?.statusCode ?? 0;
-};
+  // Prefer a clean one-line message; fall back to action + entity
+  let msg = (message || '').trim();
+  if (!msg) {
+    const ent = entity ? `${entity}${entityId ? `#${entityId}` : ''}` : '';
+    msg = [category, action, ent].filter(Boolean).join(' • ');
+  }
+  if (msg.length > MAX_MSG) msg = msg.slice(0, MAX_MSG - 1) + '…';
 
-async function writeAudit({
-  req,
-  category,
-  action,
-  entity,
-  entityId,
-  message,
-  before = null,
-  after  = null,
-  meta   = null,
-}) {
+  // Keep all “raw” bits in details (JSON), never in message
+  const safeDetails =
+    details && typeof details === 'object'
+      ? details
+      : details
+      ? { note: String(details) }
+      : {};
+
+  // Attach the request body in a tiny/filtered way (don’t log secrets)
+  const body = (() => {
+    const b = req?.body && typeof req.body === 'object' ? { ...req.body } : null;
+    if (!b) return null;
+    for (const k of Object.keys(b)) {
+      if (/pass(word)?|secret|token|otp/i.test(k)) b[k] = '***';
+    }
+    // If super large, truncate stringified body
+    try {
+      const s = JSON.stringify(b);
+      if (s.length > 4000) return { _truncated: true };
+    } catch {}
+    return b;
+  })();
+
+  const mergedDetails = { ...safeDetails, meta: ctx, ...(body ? { body } : {}) };
+
+  return {
+    userId: req?.user?.id || null,
+    branchId: req?.user?.branchId || null,
+    category,
+    action,
+    message: msg,
+    entity: entity || null,
+    entityId: entityId != null ? String(entityId) : null,
+    details: mergedDetails,
+    ip: ctx.ip,
+  };
+}
+
+async function writeAudit({ req, category='system', action, message='', entity=null, entityId=null, details=null }) {
   try {
-    if (!AuditLog?.create) return;
-
-    const method = req?.method;
-    const path   = req?.originalUrl || req?.path;
-    const status = resStatusGuess(req);
-
-    const final = {
-      userId:   req?.user?.id || null,
-      branchId: req?.user?.branchId || null,
-      ip:       req?.ip || null,
-
-      category: category || guessCategory(path),
-      action:   action   || guessAction(method, status, path),
-
-      // Store a friendly, short message (keep original string if caller supplied).
-      message:  message || humanFromReq(req),
-
-      // These keys will be silently ignored if the DB doesn’t have those columns.
-      entity:   entity   || null,
-      entityId: entityId || null,
-
-      // Persist small meta (as TEXT when JSONB isn’t available; model ignores extras)
-      // so the UI can render “Meta” panel even without before/after.
-      // When meta is object, stringify it; when string, keep it.
-      meta: typeof meta === "string" ? meta : safeJson(meta || {
-        method, path, statusCode: status,
-        ua: req?.headers?.["user-agent"],
-        ctx: req?.tenant || req?.context || pick(req?.user, ["tenantId","branchId"]),
-      }),
-
-      // Keep these in memory; DB will drop if no columns exist.
-      before: before ? safeJson(before) : null,
-      after:  after  ? safeJson(after)  : null,
-    };
-
-    await AuditLog.create(final);
+    if (!AuditLog?.create || !req) return;
+    const row = buildEvent({ req, category, action, message, entity, entityId, details });
+    await AuditLog.create(row);
   } catch (e) {
-    // Do not crash app on audit failure
-    console.warn("writeAudit() skipped:", e?.message || e);
+    // do not crash business flow on audit failure
+    // console.error('writeAudit error:', e);
   }
 }
 
