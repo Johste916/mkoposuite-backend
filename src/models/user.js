@@ -1,5 +1,7 @@
 'use strict';
 
+const bcrypt = require('bcryptjs');
+
 module.exports = (sequelize, DataTypes) => {
   const User = sequelize.define(
     'User',
@@ -12,32 +14,55 @@ module.exports = (sequelize, DataTypes) => {
         unique: true,
         validate: { isEmail: true },
       },
+      // DB column is TEXT; STRING works fine here
       password_hash: { type: DataTypes.STRING, allowNull: false },
-      password: { type: DataTypes.VIRTUAL }, // write-time only
-      role: { type: DataTypes.STRING, defaultValue: 'user' }, // legacy single role alias
 
-      // IMPORTANT: your DB column is camelCase "branchId", not "branch_id"
-      // Map the attribute to the actual column name, and keep underscored: false below.
+      // write-time only (not stored)
+      password: {
+        type: DataTypes.VIRTUAL,
+        set(value) {
+          this.setDataValue('password', value);
+        },
+        validate: {
+          len: {
+            args: [6, 100],
+            msg: 'Password must be at least 6 characters long.',
+          },
+        },
+      },
+
+      role: { type: DataTypes.STRING, defaultValue: 'user' },
       branchId: { type: DataTypes.INTEGER, allowNull: true, field: 'branchId' },
+
+      // Add because controller supports toggleStatus() via "status"
+      status: {
+        type: DataTypes.ENUM('active', 'inactive'),
+        defaultValue: 'active',
+      },
     },
     {
       tableName: 'Users',
       timestamps: true,
-
-      // Prevent Sequelize from auto-using snake_case columns like "branch_id"
       underscored: false,
 
-      defaultScope: { attributes: { exclude: ['password_hash'] } },
-      scopes: { withSensitive: {} },
+      defaultScope: {
+        attributes: { exclude: ['password_hash'] },
+      },
+
+      hooks: {
+        async beforeSave(user) {
+          // Hash only when a plain password is provided
+          const plain = user.getDataValue('password');
+          if (plain) {
+            const salt = await bcrypt.genSalt(10);
+            user.password_hash = await bcrypt.hash(plain, salt);
+          }
+        },
+      },
     }
   );
 
-  User.prototype.toJSON = function () {
-    const obj = { ...this.get() };
-    delete obj.password_hash;
-    return obj;
-  };
-
+  // Associations
   User.associate = (models) => {
     if (models.Role) {
       User.belongsToMany(models.Role, {
@@ -66,24 +91,14 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  // ---- helpers/scopes ----
-  User.addScope('withRoles', {
-    include: [{ model: sequelize.models.Role, as: 'Roles', through: { attributes: [] } }],
-  });
-
-  User.prototype.roleNames = function () {
-    const arr = (this.Roles || []).map((r) => (r.name || '').toLowerCase());
-    const single = (this.role || '').toLowerCase();
-    return Array.from(new Set([...arr, single].filter(Boolean)));
+  User.prototype.toJSON = function () {
+    const obj = { ...this.get() };
+    delete obj.password_hash;
+    return obj;
   };
 
-  User.prototype.isRole = function (name) {
-    const n = String(name || '').toLowerCase();
-    return this.roleNames().includes(n);
-    };
-
-  User.prototype.isLoanOfficer = function () {
-    return this.isRole('loan officer') || this.isRole('loan_officer') || this.isRole('officer');
+  User.prototype.checkPassword = async function (password) {
+    return bcrypt.compare(password, this.password_hash);
   };
 
   return User;

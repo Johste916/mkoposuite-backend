@@ -96,16 +96,22 @@ const setUserBranches = async (user, branchIds, t) => {
   }
 };
 
+// SAFE: avoid double-hash & re-hash of an already-hashed value
 const hashAndAssignPassword = async (payload) => {
   const pwCol = resolvePasswordHashColumn();
   if (!pwCol) return payload;
-  if (!payload.password && !payload[pwCol]) return payload;
-  const raw = payload.password ?? payload[pwCol];
-  const hash = await bcrypt.hash(String(raw), 10);
-  const clean = { ...payload };
-  delete clean.password; delete clean.password_hash; delete clean.passwordHash;
-  clean[pwCol] = hash;
-  return clean;
+
+  // if already has password_hash, assume trusted (do NOT rehash)
+  if (payload[pwCol]) return payload;
+
+  if (payload.password) {
+    const clean = { ...payload };
+    const hash = await bcrypt.hash(String(payload.password), 10);
+    clean[pwCol] = hash;
+    delete clean.password;
+    return clean;
+  }
+  return payload;
 };
 
 const asArray = (v) =>
@@ -153,7 +159,7 @@ exports.getUsers = async (req, res) => {
     const limitNum = Math.min(1000, Math.max(1, Number(limit) || 200));
     const offset = (pageNum - 1) * limitNum;
 
-    const { rows, count } = await User.findAndCountAll({
+    const { rows } = await User.findAndCountAll({
       where,
       include,
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
@@ -189,11 +195,19 @@ exports.createUser = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
     const { roleIds = [], branchIds = [], ...rest } = req.body || {};
+
+    // Enforce password at creation (local auth)
+    if (!rest.password) {
+      await t.rollback();
+      return res.status(400).json({ error: 'Password is required.' });
+    }
+
     const payload = await hashAndAssignPassword(rest);
     const user = await User.create(payload, { transaction: t });
     await setUserRoles(user, roleIds, t);
     await setUserBranches(user, branchIds, t);
     await t.commit();
+
     const fresh = await User.findByPk(user.id, {
       include: buildIncludes({}),
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
@@ -213,11 +227,14 @@ exports.updateUser = async (req, res) => {
     const { roleIds, branchIds, password, ...rest } = req.body || {};
     const user = await User.findByPk(id);
     if (!user) { await t.rollback(); return res.status(404).json({ error: 'User not found' }); }
+
     const payload = password ? await hashAndAssignPassword({ ...rest, password }) : rest;
+
     await user.update(payload, { transaction: t });
     if (Array.isArray(roleIds)) await setUserRoles(user, roleIds, t);
     if (Array.isArray(branchIds) || typeof branchIds === 'number') await setUserBranches(user, branchIds, t);
     await t.commit();
+
     const fresh = await User.findByPk(id, {
       include: buildIncludes({}),
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
@@ -251,11 +268,16 @@ exports.resetPassword = async (req, res) => {
 exports.toggleStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const activeCol = resolveActiveColumn();
+    const activeCol = resolveActiveColumn(); // should resolve to 'status' now
     if (!activeCol) return res.status(400).json({ error: 'Active/status column not found on User model' });
+
     const user = await User.findByPk(id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    const next = typeof req.body[activeCol] === 'boolean' ? req.body[activeCol] : !user[activeCol];
+
+    const next = typeof req.body[activeCol] === 'string'
+      ? req.body[activeCol]
+      : (user[activeCol] === 'active' ? 'inactive' : 'active');
+
     await user.update({ [activeCol]: next });
     res.json({ id: user.id, [activeCol]: next });
   } catch (err) {
@@ -264,14 +286,7 @@ exports.toggleStatus = async (req, res) => {
   }
 };
 
-/* ------------------------- NEW: assignRoles ------------------------- */
-/**
- * PUT /api/users/:id/assign
- * Body options:
- * - { roleIds: ["...","..."] }  // replace exact set
- * - { add: ["..."], remove: ["..."] }  // incremental change
- * - { branchIds: [...] }  // optionally update branches in same call
- */
+/* ------------------------- assignRoles ------------------------- */
 exports.assignRoles = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
@@ -286,7 +301,6 @@ exports.assignRoles = async (req, res) => {
     const toAdd = new Set(asArray(add));
     const toRemove = new Set(asArray(remove));
 
-    // Validate roles exist if any ids provided
     const allIds = new Set([...(asArray(roleIds)), ...toAdd, ...toRemove].filter(Boolean));
     if (allIds.size) {
       const found = await Role.findAll({ where: { id: Array.from(allIds) } });
@@ -296,10 +310,8 @@ exports.assignRoles = async (req, res) => {
     }
 
     if (Array.isArray(roleIds)) {
-      // Replace entire set
       await setUserRoles(user, roleIds, t);
     } else if (toAdd.size || toRemove.size) {
-      // Incremental modify
       if (typeof user.addRoles === 'function' && typeof user.removeRoles === 'function') {
         if (toAdd.size)    await user.addRoles(Array.from(toAdd),    { transaction: t });
         if (toRemove.size) await user.removeRoles(Array.from(toRemove), { transaction: t });
@@ -317,7 +329,6 @@ exports.assignRoles = async (req, res) => {
       }
     }
 
-    // Optional branch update in same call
     if (typeof branchIds !== 'undefined') {
       await setUserBranches(user, branchIds, t);
     }
@@ -335,12 +346,7 @@ exports.assignRoles = async (req, res) => {
   }
 };
 
-/* ------------------------- NEW: deleteUser ------------------------- */
-/**
- * DELETE /api/users/:id?force=1&hard=1
- * - force=1: remove UserRole links before delete
- * - hard=1: hard delete (if paranoid enabled on model, this forces)
- */
+/* ------------------------- deleteUser ------------------------- */
 exports.deleteUser = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
