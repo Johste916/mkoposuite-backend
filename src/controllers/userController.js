@@ -21,6 +21,25 @@ const sanitizeUser = (u) => {
   delete json.passwordHash; delete json.password_hash; delete json.password;
   return json;
 };
+
+const normalizeUserInput = (body = {}) => {
+  const clean = { ...body };
+
+  // Map possible frontend fields to what DB expects
+  clean.name = clean.name || clean.fullName || clean.username || '';
+  if (!clean.name && clean.email && typeof clean.email === 'string') {
+    // fallback: use email local part as name
+    clean.name = clean.email.split('@')[0];
+  }
+
+  // trim strings
+  ['name', 'email', 'password', 'role'].forEach((k) => {
+    if (clean[k] && typeof clean[k] === 'string') clean[k] = clean[k].trim();
+  });
+
+  return clean;
+};
+
 const buildIncludes = ({ roleId, branchId }) => {
   const asns = User.associations || {};
   const includes = [];
@@ -117,18 +136,18 @@ const hashAndAssignPassword = async (payload) => {
 const asArray = (v) =>
   Array.isArray(v) ? v : v == null ? [] : typeof v === 'string' ? [v] : [v];
 
-/* Some DBs might have snake_case linking columns; detect gracefully */
-const detectUserRoleFields = async () => {
-  const defaults = { roleId: 'roleId', userId: 'userId' };
-  try {
-    const qi = sequelize.getQueryInterface();
-    const desc = await qi.describeTable('UserRoles');
-    const roleId = desc.roleId ? 'roleId' : (desc.role_id ? 'role_id' : defaults.roleId);
-    const userId = desc.userId ? 'userId' : (desc.user_id ? 'user_id' : defaults.userId);
-    return { roleId, userId };
-  } catch {
-    return defaults;
-  }
+/* ------------------------------- Validators ------------------------------- */
+const validateCreate = (data) => {
+  const errors = [];
+
+  if (!data.name) errors.push('Name is required.');
+  if (!data.email) errors.push('Email is required.');
+  else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) errors.push('Email is invalid.');
+
+  if (!data.password) errors.push('Password is required.');
+  else if (String(data.password).length < 6) errors.push('Password must be at least 6 characters.');
+
+  return errors;
 };
 
 /* --------------------------------- GET /api/users --------------------------------- */
@@ -148,7 +167,7 @@ exports.getUsers = async (req, res) => {
     }
     const activeCol = resolveActiveColumn();
     if (activeCol && typeof isActive !== 'undefined') {
-      where[activeCol] = String(isActive) === 'true';
+      where[activeCol] = String(isActive) === 'true' ? 'active' : 'inactive';
     }
 
     if (role && !roleId) where.role = role;
@@ -194,15 +213,25 @@ exports.getUserById = async (req, res) => {
 exports.createUser = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
-    const { roleIds = [], branchIds = [], ...rest } = req.body || {};
+    const { roleIds = [], branchIds = [], ...restRaw } = req.body || {};
+    const rest = normalizeUserInput(restRaw);
 
-    // Enforce password at creation (local auth)
-    if (!rest.password) {
+    const errors = validateCreate(rest);
+    if (errors.length) {
       await t.rollback();
-      return res.status(400).json({ error: 'Password is required.' });
+      return res.status(400).json({ error: errors[0], errors });
     }
 
+    // pre-hash if "password" provided; model hook will also hash if needed
     const payload = await hashAndAssignPassword(rest);
+
+    // Unique email guard (cleaner 409 vs generic 400)
+    const existing = await User.findOne({ where: { email: payload.email } });
+    if (existing) {
+      await t.rollback();
+      return res.status(409).json({ error: 'Email already in use.' });
+    }
+
     const user = await User.create(payload, { transaction: t });
     await setUserRoles(user, roleIds, t);
     await setUserBranches(user, branchIds, t);
@@ -216,6 +245,13 @@ exports.createUser = async (req, res) => {
   } catch (err) {
     await t.rollback();
     console.error('createUser error:', err);
+
+    if (err.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({ error: 'Email already in use.' });
+    }
+    if (err.name === 'SequelizeValidationError') {
+      return res.status(400).json({ error: err.errors?.[0]?.message || 'Validation error', details: err.errors });
+    }
     res.status(400).json({ error: 'Failed to create user' });
   }
 };
@@ -224,11 +260,19 @@ exports.updateUser = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
     const { id } = req.params;
-    const { roleIds, branchIds, password, ...rest } = req.body || {};
+    const { roleIds, branchIds, password, ...restRaw } = req.body || {};
+    const rest = normalizeUserInput(restRaw);
+
     const user = await User.findByPk(id);
     if (!user) { await t.rollback(); return res.status(404).json({ error: 'User not found' }); }
 
     const payload = password ? await hashAndAssignPassword({ ...rest, password }) : rest;
+
+    // prevent accidental email collision
+    if (payload.email && payload.email !== user.email) {
+      const dup = await User.findOne({ where: { email: payload.email } });
+      if (dup) { await t.rollback(); return res.status(409).json({ error: 'Email already in use.' }); }
+    }
 
     await user.update(payload, { transaction: t });
     if (Array.isArray(roleIds)) await setUserRoles(user, roleIds, t);
@@ -243,6 +287,9 @@ exports.updateUser = async (req, res) => {
   } catch (err) {
     await t.rollback();
     console.error('updateUser error:', err);
+    if (err.name === 'SequelizeValidationError') {
+      return res.status(400).json({ error: err.errors?.[0]?.message || 'Validation error', details: err.errors });
+    }
     res.status(400).json({ error: 'Failed to update user' });
   }
 };
@@ -268,15 +315,14 @@ exports.resetPassword = async (req, res) => {
 exports.toggleStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const activeCol = resolveActiveColumn(); // should resolve to 'status' now
-    if (!activeCol) return res.status(400).json({ error: 'Active/status column not found on User model' });
-
+    const activeCol = resolveActiveColumn() || 'status'; // should resolve to 'status'
     const user = await User.findByPk(id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    const current = user[activeCol] || 'active';
     const next = typeof req.body[activeCol] === 'string'
       ? req.body[activeCol]
-      : (user[activeCol] === 'active' ? 'inactive' : 'active');
+      : (current === 'active' ? 'inactive' : 'active');
 
     await user.update({ [activeCol]: next });
     res.json({ id: user.id, [activeCol]: next });
@@ -298,6 +344,7 @@ exports.assignRoles = async (req, res) => {
     }
 
     const { roleIds, add, remove, branchIds } = req.body || {};
+    const asArray = (v) => Array.isArray(v) ? v : v == null ? [] : typeof v === 'string' ? [v] : [v];
     const toAdd = new Set(asArray(add));
     const toRemove = new Set(asArray(remove));
 
@@ -316,7 +363,19 @@ exports.assignRoles = async (req, res) => {
         if (toAdd.size)    await user.addRoles(Array.from(toAdd),    { transaction: t });
         if (toRemove.size) await user.removeRoles(Array.from(toRemove), { transaction: t });
       } else if (UserRole) {
-        const { roleId, userId } = await detectUserRoleFields();
+        const { roleId, userId } = await (async () => {
+          const defaults = { roleId: 'roleId', userId: 'userId' };
+          try {
+            const qi = sequelize.getQueryInterface();
+            const desc = await qi.describeTable('UserRoles');
+            const roleId = desc.roleId ? 'roleId' : (desc.role_id ? 'role_id' : defaults.roleId);
+            const userId = desc.userId ? 'userId' : (desc.user_id ? 'user_id' : defaults.userId);
+            return { roleId, userId };
+          } catch {
+            return defaults;
+          }
+        })();
+
         if (toAdd.size) {
           await UserRole.bulkCreate(
             Array.from(toAdd).map(rid => ({ [userId]: user.id, [roleId]: rid })),
@@ -358,7 +417,12 @@ exports.deleteUser = async (req, res) => {
 
     if (force) {
       if (UserRole) {
-        const { userId } = await detectUserRoleFields();
+        const qi = sequelize.getQueryInterface();
+        let userId = 'userId';
+        try {
+          const desc = await qi.describeTable('UserRoles');
+          userId = desc.userId ? 'userId' : (desc.user_id ? 'user_id' : 'userId');
+        } catch {}
         await UserRole.destroy({ where: { [userId]: user.id }, transaction: t });
       } else if (typeof user.setRoles === 'function') {
         await user.setRoles([], { transaction: t });

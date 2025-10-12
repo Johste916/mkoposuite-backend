@@ -14,44 +14,23 @@ module.exports = (sequelize, DataTypes) => {
         unique: true,
         validate: { isEmail: true },
       },
-      // DB column is TEXT; STRING works fine here
       password_hash: { type: DataTypes.STRING, allowNull: false },
-
-      // write-time only (not stored)
       password: {
         type: DataTypes.VIRTUAL,
-        set(value) {
-          this.setDataValue('password', value);
-        },
-        validate: {
-          len: {
-            args: [6, 100],
-            msg: 'Password must be at least 6 characters long.',
-          },
-        },
+        set(value) { this.setDataValue('password', value); },
+        validate: { len: { args: [6, 100], msg: 'Password must be at least 6 characters long.' } },
       },
-
       role: { type: DataTypes.STRING, defaultValue: 'user' },
       branchId: { type: DataTypes.INTEGER, allowNull: true, field: 'branchId' },
-
-      // Add because controller supports toggleStatus() via "status"
-      status: {
-        type: DataTypes.ENUM('active', 'inactive'),
-        defaultValue: 'active',
-      },
+      status: { type: DataTypes.ENUM('active', 'inactive'), defaultValue: 'active' },
     },
     {
       tableName: 'Users',
       timestamps: true,
       underscored: false,
-
-      defaultScope: {
-        attributes: { exclude: ['password_hash'] },
-      },
-
+      defaultScope: { attributes: { exclude: ['password_hash'] } },
       hooks: {
         async beforeSave(user) {
-          // Hash only when a plain password is provided
           const plain = user.getDataValue('password');
           if (plain) {
             const salt = await bcrypt.genSalt(10);
@@ -62,7 +41,6 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Associations
   User.associate = (models) => {
     if (models.Role) {
       User.belongsToMany(models.Role, {
@@ -72,7 +50,6 @@ module.exports = (sequelize, DataTypes) => {
         as: 'Roles',
       });
     }
-
     if (models.Branch) {
       User.belongsTo(models.Branch, {
         foreignKey: 'branchId',
@@ -80,7 +57,6 @@ module.exports = (sequelize, DataTypes) => {
         onUpdate: 'CASCADE',
         onDelete: 'SET NULL',
       });
-
       const through = models.UserBranch || models.UserBranches || 'UserBranches';
       User.belongsToMany(models.Branch, {
         through,
