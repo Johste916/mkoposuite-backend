@@ -136,6 +136,15 @@ const hashAndAssignPassword = async (payload) => {
 const asArray = (v) =>
   Array.isArray(v) ? v : v == null ? [] : typeof v === 'string' ? [v] : [v];
 
+/* --------- NEW: safe rollback helper to avoid "finished with state: commit" --------- */
+const safeRollback = async (t) => {
+  try {
+    if (t && typeof t.rollback === 'function' && !t.finished) {
+      await t.rollback();
+    }
+  } catch {}
+};
+
 /* ------------------------------- Validators ------------------------------- */
 const validateCreate = (data) => {
   const errors = [];
@@ -218,7 +227,7 @@ exports.createUser = async (req, res) => {
 
     const errors = validateCreate(rest);
     if (errors.length) {
-      await t.rollback();
+      await safeRollback(t);
       return res.status(400).json({ error: errors[0], errors });
     }
 
@@ -228,7 +237,7 @@ exports.createUser = async (req, res) => {
     // Unique email guard (cleaner 409 vs generic 400)
     const existing = await User.findOne({ where: { email: payload.email } });
     if (existing) {
-      await t.rollback();
+      await safeRollback(t);
       return res.status(409).json({ error: 'Email already in use.' });
     }
 
@@ -236,6 +245,12 @@ exports.createUser = async (req, res) => {
     await setUserRoles(user, roleIds, t);
     await setUserBranches(user, branchIds, t);
     await t.commit();
+    // prevent rollback in catch after successful commit
+    // (and consistent with other places)
+    // eslint-disable-next-line require-atomic-updates
+    t.finished = t.finished || 'commit'; // defensive (Sequelize sets this internally)
+    // eslint-disable-next-line no-param-reassign
+    // NOTE: cannot reassign const; just rely on finished flag instead
 
     const fresh = await User.findByPk(user.id, {
       include: buildIncludes({}),
@@ -243,7 +258,7 @@ exports.createUser = async (req, res) => {
     });
     res.status(201).json(sanitizeUser(fresh));
   } catch (err) {
-    await t.rollback();
+    await safeRollback(t);
     console.error('createUser error:', err);
 
     if (err.name === 'SequelizeUniqueConstraintError') {
@@ -264,20 +279,21 @@ exports.updateUser = async (req, res) => {
     const rest = normalizeUserInput(restRaw);
 
     const user = await User.findByPk(id);
-    if (!user) { await t.rollback(); return res.status(404).json({ error: 'User not found' }); }
+    if (!user) { await safeRollback(t); return res.status(404).json({ error: 'User not found' }); }
 
     const payload = password ? await hashAndAssignPassword({ ...rest, password }) : rest;
 
     // prevent accidental email collision
     if (payload.email && payload.email !== user.email) {
       const dup = await User.findOne({ where: { email: payload.email } });
-      if (dup) { await t.rollback(); return res.status(409).json({ error: 'Email already in use.' }); }
+      if (dup) { await safeRollback(t); return res.status(409).json({ error: 'Email already in use.' }); }
     }
 
     await user.update(payload, { transaction: t });
     if (Array.isArray(roleIds)) await setUserRoles(user, roleIds, t);
     if (Array.isArray(branchIds) || typeof branchIds === 'number') await setUserBranches(user, branchIds, t);
     await t.commit();
+    t.finished = t.finished || 'commit';
 
     const fresh = await User.findByPk(id, {
       include: buildIncludes({}),
@@ -285,7 +301,7 @@ exports.updateUser = async (req, res) => {
     });
     res.json(sanitizeUser(fresh));
   } catch (err) {
-    await t.rollback();
+    await safeRollback(t);
     console.error('updateUser error:', err);
     if (err.name === 'SequelizeValidationError') {
       return res.status(400).json({ error: err.errors?.[0]?.message || 'Validation error', details: err.errors });
@@ -337,14 +353,13 @@ exports.assignRoles = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
     const user = await User.findByPk(req.params.id);
-    if (!user) { await t.rollback(); return res.status(404).json({ error: 'User not found' }); }
+    if (!user) { await safeRollback(t); return res.status(404).json({ error: 'User not found' }); }
     if (!UserRole && typeof user.setRoles !== 'function') {
-      await t.rollback();
+      await safeRollback(t);
       return res.status(501).json({ error: 'Role assignment not available' });
     }
 
     const { roleIds, add, remove, branchIds } = req.body || {};
-    const asArray = (v) => Array.isArray(v) ? v : v == null ? [] : typeof v === 'string' ? [v] : [v];
     const toAdd = new Set(asArray(add));
     const toRemove = new Set(asArray(remove));
 
@@ -353,7 +368,7 @@ exports.assignRoles = async (req, res) => {
       const found = await Role.findAll({ where: { id: Array.from(allIds) } });
       const foundIds = new Set(found.map(r => r.id));
       const missing = Array.from(allIds).filter(id => !foundIds.has(id));
-      if (missing.length) { await t.rollback(); return res.status(400).json({ error: 'Unknown role(s)', missing }); }
+      if (missing.length) { await safeRollback(t); return res.status(400).json({ error: 'Unknown role(s)', missing }); }
     }
 
     if (Array.isArray(roleIds)) {
@@ -393,13 +408,14 @@ exports.assignRoles = async (req, res) => {
     }
 
     await t.commit();
+    t.finished = t.finished || 'commit';
 
     const fresh = await User.findByPk(user.id, {
       include: [{ model: Role, as: 'Roles', through: { attributes: [] } }],
     });
     res.json(sanitizeUser(fresh));
   } catch (err) {
-    await t.rollback();
+    await safeRollback(t);
     console.error('assignRoles error:', err);
     res.status(500).json({ error: 'Failed to assign roles' });
   }
@@ -410,7 +426,7 @@ exports.deleteUser = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
     const user = await User.findByPk(req.params.id);
-    if (!user) { await t.rollback(); return res.status(404).json({ error: 'User not found' }); }
+    if (!user) { await safeRollback(t); return res.status(404).json({ error: 'User not found' }); }
 
     const force = ['1','true','yes'].includes(String(req.query.force||'').toLowerCase());
     const hard  = ['1','true','yes'].includes(String(req.query.hard ||'').toLowerCase());
@@ -431,9 +447,10 @@ exports.deleteUser = async (req, res) => {
 
     await user.destroy({ force: hard, transaction: t });
     await t.commit();
+    t.finished = t.finished || 'commit';
     res.json({ ok: true });
   } catch (err) {
-    await t.rollback();
+    await safeRollback(t);
     console.error('deleteUser error:', err);
     res.status(500).json({ error: 'Failed to delete user' });
   }
