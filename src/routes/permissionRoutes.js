@@ -1,41 +1,72 @@
-// backend/src/routes/permissionRoutes.js
-"use strict";
+'use strict';
 
-const express = require("express");
-const router = express.Router();
+const router = require('express').Router();
 
-const matrixCtl = require("../controllers/permissionMatrixController");
-let permsCtl = null;
-try { permsCtl = require("../controllers/permissionsController"); } catch {}
+let db = {};
+try { db = require('../models'); } catch {}
 
-/**
- * All routes here are relative to /api/permissions
- * e.g. GET /matrix => /api/permissions/matrix
- */
+let authenticateUser = (_req, _res, next) => next();
+try { ({ authenticateUser } = require('../middleware/authMiddleware')); } catch {}
 
-// Matrix used by the UI
-router.get("/matrix", matrixCtl.getMatrix);
-router.put("/role/:roleId", matrixCtl.saveForRole);
+// Optional controllers (loaded if present)
+let basicCtl = {};
+try { basicCtl = require('../controllers/permissionsController'); } catch {}
 
-// Optional: bulk save if you implemented saveEntireMatrix
-if (typeof matrixCtl.saveEntireMatrix === "function") {
-  router.put("/matrix", matrixCtl.saveEntireMatrix);
+let matrixCtl = {};
+try { matrixCtl = require('../controllers/permissionMatrixController'); } catch {}
+
+router.use(authenticateUser);
+
+/* ---------------------- Permission Matrix (for UI) ---------------------- */
+// GET /api/permissions/matrix  -> { roles, matrix }
+if (typeof matrixCtl.getMatrix === 'function') {
+  router.get('/matrix', matrixCtl.getMatrix);
 } else {
-  router.put("/matrix", (_req, res) =>
-    res.status(501).json({ error: "Bulk save not implemented. Use PUT /api/permissions/role/:roleId" })
+  router.get('/matrix', (_req, res) =>
+    res.status(501).json({ error: 'permissionMatrixController.getMatrix not available' })
   );
 }
 
-// Utilities / legacy (optional)
-if (permsCtl) {
-  router.get("/", permsCtl.getPermissions);
-  router.post("/", permsCtl.createPermission);
-  router.put("/:action", permsCtl.updatePermission);
-  router.delete("/:id", permsCtl.deletePermission);
-  if (permsCtl.getRolePermissions) router.get("/role/:roleId", permsCtl.getRolePermissions);
+// PUT /api/permissions/role/:roleId  body: { actions: string[], mode?: "replace"|"merge" }
+if (typeof matrixCtl.saveForRole === 'function') {
+  router.put('/role/:roleId', matrixCtl.saveForRole);
+} else {
+  router.put('/role/:roleId', (_req, res) =>
+    res.status(501).json({ error: 'permissionMatrixController.saveForRole not available' })
+  );
 }
 
-// Tiny ping to confirm mount quickly
-router.get("/ping", (_req, res) => res.json({ ok: true }));
+/* --------------------------- Simple list/create/delete --------------------------- */
+// List (keeps your original response shape: {id, name, description})
+router.get('/', async (_req, res, next) => {
+  try {
+    const items = await db.Permission.findAll({ order: [['action', 'ASC']] });
+    res.json(items.map(p => ({ id: p.id, name: p.action, description: p.description })));
+  } catch (e) { next(e); }
+});
+
+// Create (name -> action)
+router.post('/', async (req, res, next) => {
+  try {
+    const name = (req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name required' });
+    const p = await db.Permission.create({ action: name, roles: [], description: name });
+    res.json({ id: p.id, name: p.action, description: p.description });
+  } catch (e) { next(e); }
+});
+
+// Delete by id
+router.delete('/:id', async (req, res, next) => {
+  try {
+    await db.Permission.destroy({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+/* --------------------- (Optional) upsert-by-action endpoint --------------------- */
+// PUT /api/permissions/:action  body: { roles: string[], description? }
+if (typeof basicCtl.updatePermission === 'function') {
+  router.put('/:action', basicCtl.updatePermission);
+}
 
 module.exports = router;

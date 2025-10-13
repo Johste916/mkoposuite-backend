@@ -261,7 +261,6 @@ ticketsCommentsAlias.post('/:id/comments', (req, res) => {
   res.json({ ok: true });
 });
 
-
 /* ---------- Fallback tenants router (in-memory; keeps UI working) ---------- */
 function makeTenantsFallbackRouter() {
   const r = express.Router();
