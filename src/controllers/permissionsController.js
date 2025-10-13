@@ -1,86 +1,44 @@
-// backend/src/controllers/permissionsController.js
 "use strict";
 
 const { Op } = require("sequelize");
-const { Permission, Role } = require("../models");
+const { Permission, Role, sequelize } = require("../models");
+const CATALOG = require("../permissions/catalog");
 
-// ---- Catalog: list all features/actions you want to govern ----
-// You can expand/rename freely. These keys are what you'll check in `allow("<action>")`.
-const PERMISSION_CATALOG = [
-  {
-    group: "Users & Staff",
-    actions: [
-      { action: "staff.view",    label: "View staff",    verbs: ["view"] },
-      { action: "staff.create",  label: "Create staff",  verbs: ["create"] },
-      { action: "staff.update",  label: "Update staff",  verbs: ["update"] },
-      { action: "staff.delete",  label: "Delete staff",  verbs: ["delete"] },
-      { action: "roles.view",    label: "View roles",    verbs: ["view"] },
-      { action: "roles.manage",  label: "Manage roles",  verbs: ["create","update","delete"] },
-      { action: "permissions.manage", label: "Manage permissions", verbs: ["update"] },
-    ],
-  },
-  {
-    group: "Loans",
-    actions: [
-      { action: "loans.view",    label: "View loans",    verbs: ["view"] },
-      { action: "loans.create",  label: "Create loans",  verbs: ["create"] },
-      { action: "loans.update",  label: "Update loans",  verbs: ["update"] },
-      { action: "loans.approve", label: "Approve loans", verbs: ["approve"] },
-      { action: "repayments.createManual", label: "Create manual repayment", verbs: ["create"] },
-    ],
-  },
-  {
-    group: "Accounting",
-    actions: [
-      { action: "accounting.view",   label: "View accounting",  verbs: ["view"] },
-      { action: "accounting.post",   label: "Post entries",     verbs: ["create"] },
-    ],
-  },
-  {
-    group: "Branches",
-    actions: [
-      { action: "branches.view",   label: "View branches",   verbs: ["view"] },
-      { action: "branches.create", label: "Create branches", verbs: ["create"] },
-      { action: "branches.update", label: "Update branches", verbs: ["update"] },
-      { action: "branches.delete", label: "Delete branches", verbs: ["delete"] },
-    ],
-  },
-  {
-    group: "SMS",
-    actions: [
-      { action: "sms.send",      label: "Send SMS",     verbs: ["create"] },
-      { action: "sms.viewLogs",  label: "View SMS logs", verbs: ["view"] },
-    ],
-  },
-  {
-    group: "Reports",
-    actions: [
-      { action: "reports.view", label: "View reports", verbs: ["view"] },
-    ],
-  },
-  {
-    group: "Settings",
-    actions: [
-      { action: "settings.manage", label: "Manage settings", verbs: ["update"] },
-    ],
-  },
-];
-
-// ---------- helpers ----------
 const safeString = v => (typeof v === "string" ? v : v == null ? "" : String(v).trim());
-const asLower = a => (Array.isArray(a) ? a.map(x => String(x).toLowerCase()) : []);
 
-async function ensurePermissionRow(action, description = "") {
-  const [row] = await Permission.findOrCreate({
-    where: { action },
-    defaults: { action, description, roles: [] },
-  });
-  return row;
+async function ensureCatalogRows() {
+  const actions = [];
+  for (const g of CATALOG) for (const a of g.actions) actions.push({ key: a.key, label: a.label });
+
+  const existing = await Permission.findAll({ where: { action: { [Op.in]: actions.map(a => a.key) } } });
+  const existingSet = new Set(existing.map((p) => p.action));
+
+  const toCreate = actions.filter(a => !existingSet.has(a.key));
+  if (toCreate.length) {
+    await Permission.bulkCreate(
+      toCreate.map(a => ({
+        action: a.key,
+        description: a.label,
+        roles: [],
+        isSystem: true,
+      })),
+      { ignoreDuplicates: true }
+    );
+  }
+
+  // backfill empty descriptions only
+  for (const a of actions) {
+    await Permission.update(
+      { description: a.label },
+      { where: { action: a.key, [Op.or]: [{ description: null }, { description: "" }] } }
+    ).catch(() => {});
+  }
 }
 
 // ---------- basic list ----------
 exports.getPermissions = async (_req, res) => {
   try {
+    await ensureCatalogRows();
     const rows = await Permission.findAll({ order: [["action", "ASC"]] });
     res.json(rows);
   } catch (err) {
@@ -89,7 +47,7 @@ exports.getPermissions = async (_req, res) => {
   }
 };
 
-// ---------- upsert add/update one ----------
+// ---------- upsert one ----------
 exports.updatePermission = async (req, res) => {
   try {
     const action = safeString(req.params.action);
@@ -99,7 +57,12 @@ exports.updatePermission = async (req, res) => {
     if (!action) return res.status(400).json({ error: "Invalid action" });
     if (!roles) return res.status(400).json({ error: "roles must be an array" });
 
-    const row = await ensurePermissionRow(action, description);
+    await ensureCatalogRows();
+
+    const [row] = await Permission.findOrCreate({
+      where: { action },
+      defaults: { action, description: description || action, roles: [] },
+    });
     row.roles = roles;
     if (description) row.description = description;
     await row.save();
@@ -111,7 +74,7 @@ exports.updatePermission = async (req, res) => {
   }
 };
 
-// ---------- create & delete plain rows (optional) ----------
+// ---------- create & delete ----------
 exports.createPermission = async (req, res) => {
   try {
     const name = safeString(req.body?.name);
@@ -138,25 +101,21 @@ exports.deletePermission = async (req, res) => {
   }
 };
 
-// ---------- matrix: grouped actions + roles ----------
+// ---------- grouped matrix ----------
 exports.getMatrix = async (_req, res) => {
   try {
-    // ensure catalog rows exist
-    for (const g of PERMISSION_CATALOG) {
-      for (const a of g.actions) await ensurePermissionRow(a.action, a.label);
-    }
+    await ensureCatalogRows();
 
     const roles = await Role.findAll({ order: [["name", "ASC"]] });
     const perms = await Permission.findAll();
-
     const byAction = new Map(perms.map(p => [p.action, p]));
-    const matrix = PERMISSION_CATALOG.map(group => ({
+
+    const matrix = CATALOG.map(group => ({
       group: group.group,
       actions: group.actions.map(a => ({
-        action: a.action,
+        action: a.key,
         label: a.label,
-        verbs: a.verbs,
-        roles: (byAction.get(a.action)?.roles || []), // array of role names
+        roles: (byAction.get(a.key)?.roles || []),
       })),
     }));
 
@@ -167,7 +126,7 @@ exports.getMatrix = async (_req, res) => {
   }
 };
 
-// ---------- set permissions for one role (replace/add/remove) ----------
+// ---------- role-based (replace/add/remove) ----------
 exports.setRolePermissions = async (req, res) => {
   try {
     const roleId = safeString(req.params.roleId);
@@ -178,42 +137,35 @@ exports.setRolePermissions = async (req, res) => {
     const mode = safeString(req.body?.mode || "replace"); // replace | add | remove
     if (!actions) return res.status(400).json({ error: "actions must be an array of action strings" });
 
-    // make sure all actions exist
-    for (const a of actions) await ensurePermissionRow(a);
+    await ensureCatalogRows();
 
-    const allPerms = await Permission.findAll({
-      where: { action: { [Op.in]: actions } },
-    });
+    const allPerms = await Permission.findAll({ where: { action: { [Op.in]: actions } } });
 
     if (mode === "replace") {
-      // remove role from ALL actions first, then add to specified ones
-      const everyPerm = await Permission.findAll();
-      await Promise.all(
-        everyPerm.map(async (p) => {
-          const set = new Set(asLower(p.roles));
-          set.delete(role.name.toLowerCase());
-          p.roles = Array.from(set);
-          await p.save();
-        })
-      );
-      // then add to actions
+      const every = await Permission.findAll();
+      for (const p of every) {
+        const set = new Set((p.roles || []).map(String));
+        set.delete(role.name);
+        p.roles = Array.from(set);
+        await p.save();
+      }
       for (const p of allPerms) {
-        const set = new Set(asLower(p.roles));
-        set.add(role.name.toLowerCase());
+        const set = new Set((p.roles || []).map(String));
+        set.add(role.name);
         p.roles = Array.from(set);
         await p.save();
       }
     } else if (mode === "add") {
       for (const p of allPerms) {
-        const set = new Set(asLower(p.roles));
-        set.add(role.name.toLowerCase());
+        const set = new Set((p.roles || []).map(String));
+        set.add(role.name);
         p.roles = Array.from(set);
         await p.save();
       }
     } else if (mode === "remove") {
       for (const p of allPerms) {
-        const set = new Set(asLower(p.roles));
-        set.delete(role.name.toLowerCase());
+        const set = new Set((p.roles || []).map(String));
+        set.delete(role.name);
         p.roles = Array.from(set);
         await p.save();
       }
@@ -235,12 +187,14 @@ exports.getRolePermissions = async (req, res) => {
     const role = await Role.findByPk(roleId);
     if (!role) return res.status(404).json({ error: "Role not found" });
 
+    await ensureCatalogRows();
+
     const rows = await Permission.findAll();
-    const a = rows
-      .filter(p => asLower(p.roles).includes(role.name.toLowerCase()))
+    const actions = rows
+      .filter(p => (p.roles || []).map(String).includes(role.name))
       .map(p => p.action);
 
-    res.json({ role: { id: role.id, name: role.name }, actions: a });
+    res.json({ role: { id: role.id, name: role.name }, actions });
   } catch (e) {
     console.error("getRolePermissions error:", e);
     res.status(500).json({ error: "Failed to fetch role permissions" });

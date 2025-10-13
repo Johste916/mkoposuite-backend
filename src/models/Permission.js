@@ -1,57 +1,43 @@
-'use strict';
+"use strict";
 
 module.exports = (sequelize, DataTypes) => {
-  const JSON_TYPE =
-    sequelize.getDialect && sequelize.getDialect() === 'postgres'
-      ? DataTypes.JSONB
-      : DataTypes.JSON;
-
   const Permission = sequelize.define(
-    'Permission',
+    "Permission",
     {
       id: {
         type: DataTypes.UUID,
-        defaultValue: DataTypes.UUIDV4,
+        defaultValue: DataTypes.UUIDV4, // DB also has a default; either works
         primaryKey: true,
       },
       action: {
-        type: DataTypes.STRING(120),
+        type: DataTypes.STRING(190),
         allowNull: false,
         unique: true,
       },
+      description: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+      },
       roles: {
-        type: JSON_TYPE,
+        // <-- match your DB: text[] (Postgres array of strings)
+        type: DataTypes.ARRAY(DataTypes.STRING),
         allowNull: false,
         defaultValue: [],
       },
-      description: {
-        type: DataTypes.STRING(255),
-        allowNull: false,
-        defaultValue: '',
-      },
       isSystem: {
+        field: "is_system", // <-- map to snake_case column
         type: DataTypes.BOOLEAN,
         allowNull: false,
-        defaultValue: false,
+        defaultValue: true,
       },
     },
     {
-      tableName: 'Permissions',
+      tableName: "permissions",
+      underscored: true, // maps created_at / updated_at
       timestamps: true,
-      indexes: [{ unique: true, fields: ['action'] }],
+      indexes: [{ unique: true, fields: ["action"] }],
     }
   );
-
-  Permission.associate = (models) => {
-    if (models.Role && models.RolePermission) {
-      Permission.belongsToMany(models.Role, {
-        through: models.RolePermission,
-        foreignKey: 'permissionId',
-        otherKey: 'roleId',
-        as: 'Roles',
-      });
-    }
-  };
 
   return Permission;
 };
