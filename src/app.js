@@ -1184,6 +1184,22 @@ try {
 }
 
 /* --------------------------------- Mounting -------------------------------- */
+
+// 🔓 Public entitlements shim must come BEFORE any '/api/tenants' mounts,
+// so unauthenticated first loads don't 401-loop and block the UI.
+app.get('/api/tenants/me/entitlements', (_req, res) => {
+  res.json({
+    modules: {
+      savings: true, loans: true, collections: true, accounting: true,
+      sms: true, esignatures: false, payroll: false,
+      investors: true, assets: true, collateral: true,
+      support: true, impersonation: true, billingByPhone: true, enrichment: true,
+    },
+    planCode: 'basic',
+    status: 'trial',
+  });
+});
+
 app.use('/api/borrowers/search', borrowerSearchRoutes);
 
 /* 🆕 Public self-service signup (no auth) */
