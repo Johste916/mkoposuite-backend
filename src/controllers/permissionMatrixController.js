@@ -215,7 +215,7 @@ const CATALOG = [
 const safeString = (v) => (typeof v === "string" ? v : v == null ? "" : String(v)).trim();
 const asLower = (a) => (Array.isArray(a) ? a : []).map((x) => String(x || "").toLowerCase()).filter(Boolean);
 
-/** build list of keys and a key->label map */
+/** build list of keys and label map */
 function flattenCatalog() {
   const keys = [];
   const labelByKey = new Map();
@@ -228,23 +228,34 @@ function flattenCatalog() {
   return { keys, labelByKey };
 }
 
-/** convert permission.roles (names) into role IDs using a name->id map */
-function toRoleIds(rolesField, rolesByName) {
-  const names = asLower(rolesField);
-  if (names.includes("*")) return Array.from(rolesByName.values());
-  const ids = [];
-  for (const n of names) {
-    const id = rolesByName.get(n);
-    if (id) ids.push(id);
+async function ensurePermissionRows(keys) {
+  if (!db.Permission?.findAll) return [];
+  const existing = await db.Permission.findAll({ where: { action: { [Op.in]: keys } } });
+  const existingSet = new Set(existing.map((p) => p.action));
+  const missing = keys.filter((k) => !existingSet.has(k));
+  if (missing.length) {
+    const creations = missing.map((k) =>
+      db.Permission.create({ action: k, roles: [], description: k, isSystem: false })
+    );
+    const newRows = await Promise.all(creations);
+    return existing.concat(newRows);
   }
-  return ids;
+  return existing;
+}
+
+function expandWildcardToNames(rolesField, roleNamesLower) {
+  const names = asLower(rolesField);
+  if (names.includes("*")) return roleNamesLower.slice();
+  return names;
 }
 
 /* ----------------------------------- GET ---------------------------------- */
 /**
  * GET /api/permissions/matrix
- * - READ-ONLY, no DB writes or bootstrapping here (prevents lockups).
- * - If DB is unavailable, returns catalog with empty roles/matrix so UI renders.
+ * Returns:
+ *  { catalog, roles, matrix }
+ * where matrix is { [actionKey]: string[] } -> role **names** (lowercase),
+ * so the frontend can map names → ids.
  */
 exports.getMatrix = async (_req, res) => {
   try {
@@ -271,13 +282,13 @@ exports.getMatrix = async (_req, res) => {
     }
 
     const roleList = (roles || []).map((r) => ({ id: r.id, name: r.name, isSystem: !!r.isSystem }));
-    const rolesByName = new Map(roleList.map((r) => [String(r.name || "").toLowerCase(), r.id]));
+    const roleNamesLower = roleList.map((r) => String(r.name || "").toLowerCase());
     const byAction = new Map((perms || []).map((p) => [p.action, p]));
 
     const matrix = {};
     for (const k of keys) {
       const row = byAction.get(k);
-      matrix[k] = toRoleIds(row?.roles || [], rolesByName);
+      matrix[k] = expandWildcardToNames(row?.roles || [], roleNamesLower);
     }
 
     return res.json({ catalog: CATALOG, roles: roleList, matrix });
@@ -291,8 +302,10 @@ exports.getMatrix = async (_req, res) => {
 /**
  * PUT /api/permissions/role/:roleId
  * body: { actions: string[], mode?: "replace" | "add" | "remove" | "merge" }
+ * - Bootstraps missing Permission rows to ensure changes persist.
+ * - Stores role names (lowercase) in Permission.roles.
  */
-exports.saveForRole = async (req, res) => {
+async function setRolePermissionsImpl(req, res) {
   try {
     const roleId = safeString(req.params.roleId);
     const role = await db.Role.findByPk(roleId);
@@ -308,6 +321,12 @@ exports.saveForRole = async (req, res) => {
     }
 
     const roleNameLc = String(role.name || "").toLowerCase();
+
+    // Ensure all catalog rows exist so saving always persists
+    const { keys } = flattenCatalog();
+    await ensurePermissionRows(keys);
+
+    // Now update
     const allPerms = await db.Permission.findAll();
 
     if (mode === "replace") {
@@ -318,22 +337,32 @@ exports.saveForRole = async (req, res) => {
         p.roles = Array.from(set);
         await p.save();
       }
-      // then add where requested
-      for (const p of allPerms.filter((p) => actions.includes(p.action))) {
+      // then add where requested (create any missing rows too)
+      const byAction = new Map(allPerms.map((p) => [p.action, p]));
+      for (const action of actions) {
+        let p = byAction.get(action);
+        if (!p) {
+          p = await db.Permission.create({ action, roles: [], description: action });
+          byAction.set(action, p);
+        }
         const set = new Set(asLower(p.roles));
         set.add(roleNameLc);
         p.roles = Array.from(set);
         await p.save();
       }
     } else if (mode === "add") {
-      for (const p of allPerms.filter((p) => actions.includes(p.action))) {
+      for (const action of actions) {
+        let p = allPerms.find((x) => x.action === action);
+        if (!p) p = await db.Permission.create({ action, roles: [], description: action });
         const set = new Set(asLower(p.roles));
         set.add(roleNameLc);
         p.roles = Array.from(set);
         await p.save();
       }
     } else if (mode === "remove") {
-      for (const p of allPerms.filter((p) => actions.includes(p.action))) {
+      for (const action of actions) {
+        const p = allPerms.find((x) => x.action === action);
+        if (!p) continue;
         const set = new Set(asLower(p.roles));
         set.delete(roleNameLc);
         p.roles = Array.from(set);
@@ -343,7 +372,39 @@ exports.saveForRole = async (req, res) => {
 
     return res.json({ ok: true });
   } catch (e) {
-    console.error("saveForRole error:", e);
+    console.error("setRolePermissions error:", e);
     return res.status(500).json({ error: "Failed to save role permissions" });
+  }
+}
+
+exports.setRolePermissions = setRolePermissionsImpl;
+// Back-compat with older router code
+exports.saveForRole = setRolePermissionsImpl;
+
+/* ------------------------ Upsert-by-action (optional) ---------------------- */
+// PUT /api/permissions/:action  body: { roles: string[], description? }
+exports.updatePermission = async (req, res) => {
+  try {
+    const action = safeString(req.params.action);
+    if (!action) return res.status(400).json({ error: "action required in URL" });
+
+    const roles = asLower(req.body?.roles || []);
+    const description = safeString(req.body?.description || action);
+
+    const [row, created] = await db.Permission.findOrCreate({
+      where: { action },
+      defaults: { action, roles, description, isSystem: false },
+    });
+
+    if (!created) {
+      row.roles = roles;
+      row.description = description;
+      await row.save();
+    }
+
+    return res.json({ ok: true, action, roles, created });
+  } catch (e) {
+    console.error("updatePermission error:", e);
+    return res.status(500).json({ error: "Failed to update permission" });
   }
 };

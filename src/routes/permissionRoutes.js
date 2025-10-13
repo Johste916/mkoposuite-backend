@@ -8,21 +8,28 @@ try { db = require('../models'); } catch {}
 let authenticateUser = (_req, _res, next) => next();
 try { ({ authenticateUser } = require('../middleware/authMiddleware')); } catch {}
 
-// Controllers
-let permissionsCtl = {};
-try { permissionsCtl = require('../controllers/permissionsController'); } catch {}
+// Try both possible controller filenames and normalize method names
+let ctl = null;
+try { ctl = require('../controllers/permissionsController'); } catch {}
+if (!ctl) {
+  try { ctl = require('../controllers/permissionMatrixController'); } catch {}
+}
+
+const getMatrix          = ctl?.getMatrix;
+const setRolePermissions = ctl?.setRolePermissions || ctl?.saveForRole; // alias supported
+const updatePermission   = ctl?.updatePermission;
 
 router.use(authenticateUser);
 
 /* ---------------------- Permission Matrix (for UI) ---------------------- */
 // GET /api/permissions/matrix  -> { roles, catalog, matrix }
-if (typeof permissionsCtl.getMatrix === 'function') {
-  router.get('/matrix', permissionsCtl.getMatrix);
+if (typeof getMatrix === 'function') {
+  router.get('/matrix', getMatrix);
 }
 
 // PUT /api/permissions/role/:roleId  body: { actions: string[], mode?: "replace"|"add"|"remove" }
-if (typeof permissionsCtl.setRolePermissions === 'function') {
-  router.put('/role/:roleId', permissionsCtl.setRolePermissions);
+if (typeof setRolePermissions === 'function') {
+  router.put('/role/:roleId', setRolePermissions);
 }
 
 /* --------------------------- Simple list/create/delete --------------------------- */
@@ -54,8 +61,8 @@ router.delete('/:id', async (req, res, next) => {
 
 /* --------------------- Upsert-by-action endpoint --------------------- */
 // PUT /api/permissions/:action  body: { roles: string[], description? }
-if (typeof permissionsCtl.updatePermission === 'function') {
-  router.put('/:action', permissionsCtl.updatePermission);
+if (typeof updatePermission === 'function') {
+  router.put('/:action', updatePermission);
 }
 
 module.exports = router;
