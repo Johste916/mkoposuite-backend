@@ -15,11 +15,12 @@ try {
 } catch {}
 
 /* ------------------------------ Optional deps ------------------------------ */
-let helmet, compression, morgan, rateLimit;
+let helmet, compression, morgan, rateLimit, cors;
 try { helmet = require('helmet'); } catch {}
 try { compression = require('compression'); } catch {}
 try { morgan = require('morgan'); } catch {}
 try { rateLimit = require('express-rate-limit'); } catch {}
+try { cors = require('cors'); } catch {}
 
 /* ---------------------------- App base settings ---------------------------- */
 app.disable('x-powered-by');
@@ -119,30 +120,53 @@ function isAllowedOrigin(origin) {
 }
 
 const DEFAULT_ALLOWED_HEADERS = [
-  'Content-Type', 'Authorization', 'X-Requested-With', 'X-User-Id',
-  'x-tenant-id', 'x-branch-id', 'x-timezone', 'x-tz-offset', 'x-request-id', 'Accept',
+  'Accept', 'Content-Type', 'Authorization', 'authorization', 'X-Requested-With', 'X-User-Id', 'x-user-id',
+  'X-Tenant-Id', 'x-tenant-id', 'X-Branch-Id', 'x-branch-id',
+  'X-Timezone', 'x-timezone', 'X-Tz-Offset', 'x-tz-offset',
+  'X-Request-Id', 'x-request-id',
 ];
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && isAllowedOrigin(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  }
-  res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+const EXPOSED_HEADERS = ['Content-Disposition','X-Total-Count','X-Request-Id'];
 
-  const requested = req.headers['access-control-request-headers'];
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    requested && String(requested).trim().length ? requested : DEFAULT_ALLOWED_HEADERS.join(', ')
-  );
+if (cors) {
+  // Preferred path when `cors` is installed
+  app.use(cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // same-origin / curl
+      if (isAllowedOrigin(origin)) return cb(null, true);
+      return cb(new Error(`CORS: origin ${origin} not allowed`));
+    },
+    credentials: true, // harmless if you don't use cookies
+    methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+    allowedHeaders: DEFAULT_ALLOWED_HEADERS,
+    exposedHeaders: EXPOSED_HEADERS,
+    maxAge: 86400,
+    optionsSuccessStatus: 204,
+  }));
+  app.options('*', cors());
+} else {
+  // Fallback manual headers if `cors` package isn't installed
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && isAllowedOrigin(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+    res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
 
-  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition,X-Total-Count,X-Request-Id');
+    const requested = req.headers['access-control-request-headers'];
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      requested && String(requested).trim().length ? requested : DEFAULT_ALLOWED_HEADERS.join(', ')
+    );
 
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
+    res.setHeader('Access-Control-Expose-Headers', EXPOSED_HEADERS.join(', '));
+
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
+}
 
 /* --------------------------------- Parsers --------------------------------- */
 /** 🔐 Raw body capture for gateway/webhook signature verification */
@@ -678,7 +702,6 @@ function makeEnrichmentFallbackRouter() {
 }
 
 /* -------------------- Compat: Comments & Repayments (in-memory) ------------ */
-/* These keep the UI working even if DB routes are missing/broken. */
 const COMMENTS_MEM = [];
 let COMMENTS_NEXT_ID = 1;
 function makeCommentsCompatRouter() {
@@ -913,6 +936,61 @@ function makeOrgFallbackRouter() {
   return r;
 }
 
+/* ---------------------- Permissions FALLBACK (matrix) ---------------------- */
+function makePermissionsFallbackRouter() {
+  const r = express.Router();
+
+  // Sample in-memory state to keep UI working if real routes are absent.
+  const roles = [
+    { id: 'admin',   name: 'Admin' },
+    { id: 'manager', name: 'Manager' },
+    { id: 'teller',  name: 'Teller' },
+  ];
+
+  const actions = [
+    { id: 1, feature: 'borrowers', key: 'view',    label: 'Borrowers: View' },
+    { id: 2, feature: 'borrowers', key: 'create',  label: 'Borrowers: Create' },
+    { id: 3, feature: 'loans',     key: 'view',    label: 'Loans: View' },
+    { id: 4, feature: 'loans',     key: 'approve', label: 'Loans: Approve' },
+    { id: 5, feature: 'collections', key: 'view',  label: 'Collections: View' },
+    { id: 6, feature: 'settings',  key: 'manage',  label: 'Settings: Manage' },
+    { id: 7, feature: 'permissions', key: 'manage', label: 'Permissions: Manage' },
+  ];
+
+  // Default permissions: admin = all, manager = most, teller = view-only
+  const allowed = new Set();
+  const allow = (roleId, actionId) => allowed.add(`${roleId}:${actionId}`);
+  actions.forEach(a => allow('admin', a.id));
+  [1,2,3,5].forEach(id => allow('manager', id)); // manager: view/create borrowers, view loans, view collections
+  [1,3,5].forEach(id => allow('teller', id));    // teller: view-only
+
+  r.get('/matrix', (_req, res) => {
+    const matrix = actions.map(a => ({
+      actionId: a.id,
+      feature: a.feature,
+      key: a.key,
+      label: a.label,
+      perms: roles.map(r => allowed.has(`${r.id}:${a.id}`)),
+    }));
+    res.json({ roles, actions, matrix });
+  });
+
+  // Optional: accept updates from UI
+  r.post('/matrix', (req, res) => {
+    const updates = Array.isArray(req.body?.updates) ? req.body.updates : [];
+    for (const u of updates) {
+      const roleId = String(u.roleId || '');
+      const actionId = Number(u.actionId);
+      const val = !!u.value;
+      const k = `${roleId}:${actionId}`;
+      if (val) allowed.add(k); else allowed.delete(k);
+    }
+    res.json({ ok: true });
+  });
+
+  return r;
+}
+
 /* --------------------------------- Routes ---------------------------------- */
 // Auth must exist
 let authRoutes;
@@ -951,7 +1029,7 @@ const loanProductRoutes     = safeLoadRoutes('./routes/loanProductRoutes', makeD
 
 /* Admin modules */
 const adminStaffRoutes      = safeLoadRoutes('./routes/staffRoutes', makeDummyRouter([]));
-const permissionRoutes      = safeLoadRoutes('./routes/permissionRoutes', makeDummyRouter([]));
+const permissionRoutes      = safeLoadRoutes('./routes/permissionRoutes', makePermissionsFallbackRouter());
 const adminAuditRoutes      = safeLoadRoutes('./routes/admin/auditRoutes', makeDummyRouter([]));
 const adminReportSubRoutes  = safeLoadRoutes('./routes/admin/reportSubscriptionRoutes', makeDummyRouter([]));
 
@@ -1171,8 +1249,6 @@ if (PUBLIC_SIDEBAR_ENABLED) {
 
 /* ------------------------ 🔔 Register sync listeners (ONCE) ---------------- */
 try {
-  // Requires: ./services/syncBus.js and ./services/syncListeners.js
-  // These files set up the in-process event bus and listeners for auto-sync.
   require('./services/syncListeners');
   console.log('[sync] listeners registered]');
 } catch (e) {
@@ -1185,8 +1261,7 @@ try {
 
 /* --------------------------------- Mounting -------------------------------- */
 
-// 🔓 Public entitlements shim must come BEFORE any '/api/tenants' mounts,
-// so unauthenticated first loads don't 401-loop and block the UI.
+// 🔓 Public entitlements shim must come BEFORE any '/api/tenants' mounts
 app.get('/api/tenants/me/entitlements', (_req, res) => {
   res.json({
     modules: {
@@ -1234,8 +1309,8 @@ app.use('/api/admin/subscription', ...auth, ...active, subscriptionRoutes);
 
 /* ✅ NEW: SMS (canonical + legacy aliases for older UIs) */
 app.use('/api/sms',            ...auth, ...active, smsRoutes);
-app.use('/api/communications', ...auth, ...active, smsRoutes); // exposes /api/communications/sms/send
-app.use('/api/notifications',  ...auth, ...active, smsRoutes); // exposes /api/notifications/sms
+app.use('/api/communications', ...auth, ...active, smsRoutes);
+app.use('/api/notifications',  ...auth, ...active, smsRoutes);
 
 /* ✅ NEW: Billing by phone (global; mount BEFORE generic /api/billing) */
 app.use('/api/billing/phone', ...auth, ...active, billingPhoneRoutes);
@@ -1253,7 +1328,6 @@ app.use('/api/plans', plansRoutes);
 
 /* ✅ NEW: Support endpoints (tickets, etc.) */
 app.use('/api/support', ...auth, ...active, supportRoutes);
-/* Admin alias for support (so /api/admin/support/tickets/* works) */
 app.use('/api/admin/support', ...auth, ...active, supportRoutes);
 
 /* Super-admin tenant console — mount REAL routes first */
@@ -1396,12 +1470,11 @@ try {
 
     /* ✅ NEW: Branches-related tables/views presence check */
     app.get('/api/health/db/branches-tables', async (_req, res) => {
-      // These are the tables/views your Branch UI & routes commonly rely on.
       const expected = [
-        'branches',           // core table
-        'users',              // or "Users" depending on old migrations
-        'user_branches',      // often a VIEW used for listing assignments
-        'user_branches_rt',   // runtime relation used by assign-staff
+        'branches',
+        'users',
+        'user_branches',
+        'user_branches_rt',
         'Borrowers',
         'Loans',
         'LoanPayments',
