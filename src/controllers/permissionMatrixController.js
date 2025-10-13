@@ -2,7 +2,7 @@
 "use strict";
 
 const { Op } = require("sequelize");
-const db = require("../models"); // { Permission, Role }
+const db = require("../models"); // { Permission, Role, sequelize }
 
 /**
  * CENTRAL CATALOG
@@ -210,11 +210,7 @@ const CATALOG = [
 /* ------------------------------- helpers ---------------------------------- */
 
 const safeString = (v) => (typeof v === "string" ? v : v == null ? "" : String(v)).trim();
-
-const asLower = (a) =>
-  (Array.isArray(a) ? a : [])
-    .map((x) => String(x || "").toLowerCase())
-    .filter(Boolean);
+const asLower = (a) => (Array.isArray(a) ? a : []).map((x) => String(x || "").toLowerCase()).filter(Boolean);
 
 async function ensurePermissionRow(action, description = "") {
   const [row] = await db.Permission.findOrCreate({
@@ -236,48 +232,59 @@ function toRoleIds(rolesField, rolesByName) {
   return ids;
 }
 
+function flattenCatalog() {
+  const keys = [];
+  const labelByKey = new Map();
+  for (const g of CATALOG) {
+    for (const a of g.actions) {
+      keys.push(a.key);
+      labelByKey.set(a.key, a.label || a.key);
+    }
+  }
+  return { keys, labelByKey };
+}
+
 /* ----------------------------------- GET ---------------------------------- */
 // GET /api/permissions/matrix
 // Returns: { roles, catalog, matrix }
 exports.getMatrix = async (_req, res) => {
+  const started = Date.now();
   try {
-    // 1) Build flattened action list + label map
-    const keys = [];
-    const labelByKey = new Map();
-    for (const g of CATALOG) {
-      for (const a of g.actions) {
-        keys.push(a.key);
-        labelByKey.set(a.key, a.label || a.key);
-      }
+    const { keys, labelByKey } = flattenCatalog();
+
+    // Attempt DB calls (roles + existing perms)
+    let roles = [];
+    let existing = [];
+
+    try {
+      [roles, existing] = await Promise.all([
+        db.Role.findAll({ order: [["name", "ASC"]] }),
+        db.Permission.findAll({ where: { action: { [Op.in]: keys } }, attributes: ["action", "roles"] }),
+      ]);
+    } catch (dbErr) {
+      console.warn("[permissions/matrix] DB fetch failed (roles/perms). Returning empty matrix.", dbErr.message);
+      return res.json({ roles: [], catalog: CATALOG, matrix: {} });
     }
 
-    // 2) Fetch existing rows for those actions
-    let existing = await db.Permission.findAll({
-      where: { action: { [Op.in]: keys } },
-      attributes: ["action", "roles"],
-    });
-
-    // 3) Bulk-create any missing (single round-trip)
+    // Bulk-create any missing actions in ONE shot (if DB is available)
     const present = new Set(existing.map((p) => p.action));
     const toCreate = keys
       .filter((k) => !present.has(k))
       .map((k) => ({ action: k, roles: [], description: labelByKey.get(k) || k }));
-
     if (toCreate.length) {
-      await db.Permission.bulkCreate(toCreate, { ignoreDuplicates: true });
-      // Re-read after insert to have a complete in-memory list
-      existing = await db.Permission.findAll({
-        where: { action: { [Op.in]: keys } },
-        attributes: ["action", "roles"],
-      });
+      try {
+        await db.Permission.bulkCreate(toCreate, { ignoreDuplicates: true });
+        existing = await db.Permission.findAll({
+          where: { action: { [Op.in]: keys } },
+          attributes: ["action", "roles"],
+        });
+      } catch (e) {
+        console.warn("[permissions/matrix] bulkCreate/readback skipped due to DB error:", e.message);
+      }
     }
 
-    // 4) Roles + matrix (translate names -> IDs)
-    const roles = await db.Role.findAll({ order: [["name", "ASC"]] });
     const rolesList = roles.map((r) => ({ id: r.id, name: r.name, isSystem: !!r.isSystem }));
-    const rolesByName = new Map(
-      rolesList.map((r) => [String(r.name || "").toLowerCase(), r.id])
-    );
+    const rolesByName = new Map(rolesList.map((r) => [String(r.name || "").toLowerCase(), r.id]));
 
     const byAction = new Map(existing.map((p) => [p.action, p]));
     const matrix = {};
@@ -286,6 +293,8 @@ exports.getMatrix = async (_req, res) => {
       matrix[key] = toRoleIds(row?.roles || [], rolesByName);
     }
 
+    const ms = Date.now() - started;
+    if (ms > 500) console.log(`[permissions/matrix] completed in ${ms}ms (created: ${toCreate.length})`);
     return res.json({ roles: rolesList, catalog: CATALOG, matrix });
   } catch (e) {
     console.error("getMatrix error:", e);
@@ -294,7 +303,8 @@ exports.getMatrix = async (_req, res) => {
 };
 
 /* ----------------------------------- PUT ---------------------------------- */
-// PUT /api/permissions/role/:roleId  Body: { actions: string[], mode?: "replace"|"add"|"remove"|"merge" }
+// PUT /api/permissions/role/:roleId
+// Body: { actions: string[], mode?: "replace"|"add"|"remove"|"merge" }
 exports.saveForRole = async (req, res) => {
   try {
     const roleId = safeString(req.params.roleId);
@@ -308,19 +318,20 @@ exports.saveForRole = async (req, res) => {
 
     let mode = safeString(req.body?.mode || "replace").toLowerCase();
     if (mode === "merge") mode = "add";
-    if (!["replace", "add", "remove"].includes(mode))
+    if (!["replace", "add", "remove"].includes(mode)) {
       return res.status(400).json({ error: "Invalid mode" });
+    }
 
     const roleNameLc = String(role.name || "").toLowerCase();
 
     // Ensure requested actions exist (small N)
     for (const a of actions) await ensurePermissionRow(a, a);
 
-    // Load all permissions once (safe for small table sizes)
+    // Load all permissions once
     const allPerms = await db.Permission.findAll();
 
     if (mode === "replace") {
-      // Remove from all
+      // Remove from ALL actions first
       await Promise.all(
         allPerms.map(async (p) => {
           const set = new Set(asLower(p.roles));
@@ -329,7 +340,7 @@ exports.saveForRole = async (req, res) => {
           await p.save();
         })
       );
-      // Add to specified
+      // Then add to specified
       await Promise.all(
         allPerms
           .filter((p) => actions.includes(p.action))
