@@ -1,3 +1,4 @@
+// backend/src/app.js
 'use strict';
 
 const express = require('express');
@@ -1055,7 +1056,6 @@ const active = ensureTenantActive ? [ensureTenantActive] : [];
 const ent = (k) => (requireEntitlement ? [requireEntitlement(k)] : []);
 
 /* -------------------------- Automatic audit hooks -------------------------- */
-/* -------------------------- Automatic audit hooks -------------------------- */
 let AuditLog;
 try { ({ AuditLog } = require('./models')); } catch { try { ({ AuditLog } = require('../models')); } catch {} }
 
@@ -1124,6 +1124,7 @@ app.use((req, res, next) => {
   });
   next();
 });
+
 /* ----------------------------- Branch fallback ----------------------------- */
 let sequelize;
 try { ({ sequelize } = require('./models')); } catch { try { ({ sequelize } = require('../models')); } catch {} }
@@ -1137,10 +1138,6 @@ if (sequelize && !FORCE_REAL) {
 }
 
 /* -------------------- PUBLIC SETTINGS: sidebar (no auth) ------------------- */
-/**
- * Many UIs hit /api/settings/sidebar before auth. Make it optionally public.
- * If a real controller exists, you can swap the fallback to call it.
- */
 const PUBLIC_SIDEBAR_ENABLED = process.env.PUBLIC_SIDEBAR !== '0'; // default on
 const DEFAULT_PUBLIC_SIDEBAR = {
   app: {
@@ -1274,7 +1271,6 @@ app.use('/api/dashboard',      ...auth, ...active, dashboardRoutes);
 app.use('/api/savings',        ...auth, ...active, ...ent('savings'),     savingsRoutes);
 app.use('/api/savings/transactions', ...auth, ...active, ...ent('savings'), savingsTransactionsRoutes);
 app.use('/api/disbursements',  ...auth, ...active, ...ent('loans'),       disbursementRoutes);
-/* ⛳ removed duplicate /api/repayments mounts here to avoid shadowing */
 app.use('/api/reports',        ...auth, ...active, reportRoutes);
 app.use('/api/settings',       ...auth, ...active, settingRoutes);
 

@@ -8,36 +8,25 @@ try { db = require('../models'); } catch {}
 let authenticateUser = (_req, _res, next) => next();
 try { ({ authenticateUser } = require('../middleware/authMiddleware')); } catch {}
 
-// Optional controllers (loaded if present)
-let basicCtl = {};
-try { basicCtl = require('../controllers/permissionsController'); } catch {}
-
-let matrixCtl = {};
-try { matrixCtl = require('../controllers/permissionMatrixController'); } catch {}
+// Controllers
+let permissionsCtl = {};
+try { permissionsCtl = require('../controllers/permissionsController'); } catch {}
 
 router.use(authenticateUser);
 
 /* ---------------------- Permission Matrix (for UI) ---------------------- */
-// GET /api/permissions/matrix  -> { roles, matrix }
-if (typeof matrixCtl.getMatrix === 'function') {
-  router.get('/matrix', matrixCtl.getMatrix);
-} else {
-  router.get('/matrix', (_req, res) =>
-    res.status(501).json({ error: 'permissionMatrixController.getMatrix not available' })
-  );
+// GET /api/permissions/matrix  -> { roles, catalog, matrix }
+if (typeof permissionsCtl.getMatrix === 'function') {
+  router.get('/matrix', permissionsCtl.getMatrix);
 }
 
-// PUT /api/permissions/role/:roleId  body: { actions: string[], mode?: "replace"|"merge" }
-if (typeof matrixCtl.saveForRole === 'function') {
-  router.put('/role/:roleId', matrixCtl.saveForRole);
-} else {
-  router.put('/role/:roleId', (_req, res) =>
-    res.status(501).json({ error: 'permissionMatrixController.saveForRole not available' })
-  );
+// PUT /api/permissions/role/:roleId  body: { actions: string[], mode?: "replace"|"add"|"remove" }
+if (typeof permissionsCtl.setRolePermissions === 'function') {
+  router.put('/role/:roleId', permissionsCtl.setRolePermissions);
 }
 
 /* --------------------------- Simple list/create/delete --------------------------- */
-// List (keeps your original response shape: {id, name, description})
+// List (legacy shape: {id, name, description})
 router.get('/', async (_req, res, next) => {
   try {
     const items = await db.Permission.findAll({ order: [['action', 'ASC']] });
@@ -63,10 +52,10 @@ router.delete('/:id', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-/* --------------------- (Optional) upsert-by-action endpoint --------------------- */
+/* --------------------- Upsert-by-action endpoint --------------------- */
 // PUT /api/permissions/:action  body: { roles: string[], description? }
-if (typeof basicCtl.updatePermission === 'function') {
-  router.put('/:action', basicCtl.updatePermission);
+if (typeof permissionsCtl.updatePermission === 'function') {
+  router.put('/:action', permissionsCtl.updatePermission);
 }
 
 module.exports = router;
