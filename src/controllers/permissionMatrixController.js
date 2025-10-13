@@ -1,11 +1,21 @@
+// backend/src/controllers/permissionMatrixController.js
 "use strict";
 
-const { Op } = require("sequelize");
 const db = require("../models"); // { Permission, Role }
+const { Op } = require("sequelize");
 
-/** ---------- CENTRAL CATALOG (groups + actions) ---------- */
+/**
+ * CENTRAL CATALOG
+ * - One place to define all app actions grouped by feature.
+ * - Keys here should match the UI/route intent (from App.jsx + Sidebar).
+ * - You can add or rename items safely; existing mappings will still round-trip.
+ */
 const CATALOG = [
-  { group: "Dashboard", actions: [{ key: "dashboard.view", label: "View dashboard" }] },
+  {
+    group: "Dashboard",
+    actions: [{ key: "dashboard.view", label: "View dashboard" }],
+  },
+
   {
     group: "Borrowers",
     actions: [
@@ -23,6 +33,7 @@ const CATALOG = [
       { key: "borrowers.bulkEmail", label: "Send Email" },
     ],
   },
+
   {
     group: "Loans",
     actions: [
@@ -44,6 +55,7 @@ const CATALOG = [
       { key: "loans.disburse", label: "Disburse loan" },
     ],
   },
+
   {
     group: "Repayments",
     actions: [
@@ -56,6 +68,7 @@ const CATALOG = [
       { key: "repayments.approve", label: "Approve repayments" },
     ],
   },
+
   {
     group: "Collection Sheets",
     actions: [
@@ -69,6 +82,7 @@ const CATALOG = [
       { key: "collections.email", label: "Send Email" },
     ],
   },
+
   {
     group: "Collateral",
     actions: [
@@ -77,6 +91,7 @@ const CATALOG = [
       { key: "collateral.edit", label: "Edit collateral" },
     ],
   },
+
   {
     group: "Savings",
     actions: [
@@ -87,6 +102,7 @@ const CATALOG = [
       { key: "savings.report", label: "Reports" },
     ],
   },
+
   {
     group: "Banking",
     actions: [
@@ -107,6 +123,7 @@ const CATALOG = [
       { key: "cash.statements", label: "Cash: statements" },
     ],
   },
+
   {
     group: "HR & Payroll",
     actions: [
@@ -119,6 +136,7 @@ const CATALOG = [
       { key: "hr.contracts", label: "Contracts" },
     ],
   },
+
   {
     group: "Expenses & Other Income",
     actions: [
@@ -130,6 +148,7 @@ const CATALOG = [
       { key: "income.csv", label: "Upload CSV (income)" },
     ],
   },
+
   {
     group: "Assets",
     actions: [
@@ -137,6 +156,7 @@ const CATALOG = [
       { key: "assets.create", label: "Add asset" },
     ],
   },
+
   {
     group: "Accounting",
     actions: [
@@ -147,6 +167,7 @@ const CATALOG = [
       { key: "accounting.manualJournal", label: "Manual journal" },
     ],
   },
+
   {
     group: "Reports",
     actions: [
@@ -170,6 +191,7 @@ const CATALOG = [
       { key: "reports.allEntries", label: "All entries" },
     ],
   },
+
   {
     group: "User & Org Management",
     actions: [
@@ -194,167 +216,103 @@ const CATALOG = [
 ];
 
 /* ------------------------------- Helpers ---------------------------------- */
-const safeString = (v) => (typeof v === "string" ? v : v == null ? "" : String(v)).trim();
-const asLower = (a) => (Array.isArray(a) ? a : []).map((x) => String(x || "").toLowerCase()).filter(Boolean);
 
-function flattenCatalog() {
-  const keys = [];
-  for (const g of CATALOG) for (const a of g.actions) keys.push(a.key);
-  return { keys };
-}
+const normalize = (rows = []) =>
+  (Array.isArray(rows) ? rows : []).map(r => ({
+    id: r.id,
+    action: r.action,
+    roles: Array.isArray(r.roles) ? r.roles : [],
+    description: r.description || "",
+    isSystem: !!r.isSystem,
+  }));
 
-async function ensurePermissionRows(keys) {
-  if (!db.Permission?.findAll) return [];
-  const existing = await db.Permission.findAll({ where: { action: { [Op.in]: keys } } });
-  const existingSet = new Set(existing.map((p) => p.action));
-  const missing = keys.filter((k) => !existingSet.has(k));
-  if (missing.length) {
-    const created = await Promise.all(
-      missing.map((k) => db.Permission.create({ action: k, roles: [], description: k, isSystem: false }))
-    );
-    return existing.concat(created);
-  }
-  return existing;
-}
+/* -------------------------------- Routes ---------------------------------- */
 
-function expandWildcardToNames(rolesField, roleNamesLower) {
-  const names = asLower(rolesField);
-  if (names.includes("*")) return roleNamesLower.slice();
-  return names;
-}
-
-/* ----------------------------------- GET ---------------------------------- */
+// GET /api/permissions/matrix
 exports.getMatrix = async (_req, res) => {
   try {
-    const { keys } = flattenCatalog();
+    const [roles, perms] = await Promise.all([
+      db.Role.findAll({ order: [["name", "ASC"]] }),
+      db.Permission.findAll({ order: [["action", "ASC"]] }),
+    ]);
 
-    let roles = [];
-    try { roles = await db.Role.findAll({ order: [["name", "ASC"]] }); }
-    catch (e) { console.warn("[permissions/matrix] roles fetch failed:", e.message); }
+    const roleList = roles.map(r => ({ id: r.id, name: r.name, isSystem: !!r.isSystem }));
+    const byAction = new Map(normalize(perms).map(p => [p.action, p]));
 
-    let perms = [];
-    try {
-      if (db.Permission?.findAll) {
-        perms = await db.Permission.findAll({
-          where: { action: { [Op.in]: keys } },
-          attributes: ["action", "roles"],
-        });
-      }
-    } catch (e) { console.warn("[permissions/matrix] permissions fetch failed:", e.message); }
-
-    const roleList = (roles || []).map((r) => ({ id: r.id, name: r.name, isSystem: !!r.isSystem }));
-    const roleNamesLower = roleList.map((r) => String(r.name || "").toLowerCase());
-    const byAction = new Map((perms || []).map((p) => [p.action, p]));
-
+    // Produce matrix { [actionKey]: string[]roleNames }
     const matrix = {};
-    for (const k of keys) {
-      const row = byAction.get(k);
-      matrix[k] = expandWildcardToNames(row?.roles || [], roleNamesLower);
+    for (const group of CATALOG) {
+      for (const act of group.actions) {
+        matrix[act.key] = byAction.get(act.key)?.roles || [];
+      }
     }
 
-    return res.json({ catalog: CATALOG, roles: roleList, matrix });
+    res.json({
+      catalog: CATALOG,
+      roles: roleList,
+      matrix,
+    });
   } catch (e) {
     console.error("getMatrix error:", e);
-    return res.status(500).json({ error: "Failed to build permission matrix" });
+    res.status(500).json({ error: "Failed to build permission matrix" });
   }
 };
 
-/* ----------------------------------- PUT ---------------------------------- */
-async function setRolePermissionsImpl(req, res) {
+// PUT /api/permissions/role/:roleId  { actions: string[], mode?: "replace"|"merge" }
+exports.saveForRole = async (req, res) => {
   try {
-    const roleId = safeString(req.params.roleId);
+    const { roleId } = req.params;
     const role = await db.Role.findByPk(roleId);
     if (!role) return res.status(404).json({ error: "Role not found" });
 
-    const actions = Array.isArray(req.body?.actions) ? req.body.actions.map(safeString).filter(Boolean) : null;
-    if (!actions) return res.status(400).json({ error: "actions must be an array of action strings" });
+    const actions = Array.isArray(req.body?.actions)
+      ? req.body.actions.map(String)
+      : [];
+    const mode = (req.body?.mode || "replace").toLowerCase();
 
-    let mode = safeString(req.body?.mode || "replace").toLowerCase();
-    if (mode === "merge") mode = "add";
-    if (!["replace", "add", "remove"].includes(mode)) {
-      return res.status(400).json({ error: "Invalid mode" });
-    }
-
-    const roleNameLc = String(role.name || "").toLowerCase();
-
-    // Ensure all catalog rows exist so saving always persists
-    const { keys } = flattenCatalog();
-    await ensurePermissionRows(keys);
-
-    const allPerms = await db.Permission.findAll();
-
-    if (mode === "replace") {
-      for (const p of allPerms) {
-        const set = new Set(asLower(p.roles));
-        set.delete(roleNameLc);
-        p.roles = Array.from(set);
-        await p.save();
-      }
-      const byAction = new Map(allPerms.map((p) => [p.action, p]));
-      for (const action of actions) {
-        let p = byAction.get(action);
-        if (!p) {
-          p = await db.Permission.create({ action, roles: [], description: action });
-          byAction.set(action, p);
-        }
-        const set = new Set(asLower(p.roles));
-        set.add(roleNameLc);
-        p.roles = Array.from(set);
-        await p.save();
-      }
-    } else if (mode === "add") {
-      for (const action of actions) {
-        let p = allPerms.find((x) => x.action === action);
-        if (!p) p = await db.Permission.create({ action, roles: [], description: action });
-        const set = new Set(asLower(p.roles));
-        set.add(roleNameLc);
-        p.roles = Array.from(set);
-        await p.save();
-      }
-    } else if (mode === "remove") {
-      for (const action of actions) {
-        const p = allPerms.find((x) => x.action === action);
-        if (!p) continue;
-        const set = new Set(asLower(p.roles));
-        set.delete(roleNameLc);
-        p.roles = Array.from(set);
-        await p.save();
-      }
-    }
-
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error("setRolePermissions error:", e);
-    return res.status(500).json({ error: "Failed to save role permissions" });
-  }
-}
-
-exports.setRolePermissions = setRolePermissionsImpl; // preferred
-exports.saveForRole = setRolePermissionsImpl;        // back-compat alias
-
-// Optional extra endpoint used by the router if present
-exports.updatePermission = async (req, res) => {
-  try {
-    const action = safeString(req.params.action);
-    if (!action) return res.status(400).json({ error: "action required in URL" });
-
-    const roles = asLower(req.body?.roles || []);
-    const description = safeString(req.body?.description || action);
-
-    const [row, created] = await db.Permission.findOrCreate({
-      where: { action },
-      defaults: { action, roles, description, isSystem: false },
+    // Fetch all existing permissions relevant to the provided actions
+    const existing = await db.Permission.findAll({
+      where: { action: { [Op.in]: actions } },
     });
 
-    if (!created) {
-      row.roles = roles;
-      row.description = description;
+    const byAction = new Map(existing.map(p => [p.action, p]));
+
+    for (const action of actions) {
+      const row = byAction.get(action);
+      if (!row) {
+        // create with ONLY this role
+        await db.Permission.create({
+          action,
+          roles: [role.name],
+          description: action,
+        });
+        continue;
+      }
+
+      const set = new Set((row.roles || []).map(String));
+      if (mode === "replace") {
+        row.roles = [role.name];
+      } else {
+        set.add(role.name);
+        row.roles = Array.from(set);
+      }
       await row.save();
     }
 
-    return res.json({ ok: true, action, roles, created });
+    // If replace: remove this role from actions NOT included
+    if (mode === "replace") {
+      await db.Permission.update(
+        { roles: db.sequelize.literal(`CASE
+          WHEN roles @> '["${role.name}"]' THEN (SELECT jsonb_agg(x) FROM jsonb_array_elements_text(roles) x WHERE x <> '${role.name}')
+          ELSE roles END
+        `) },
+        { where: { action: { [Op.notIn]: actions } } }
+      ).catch(() => {}); // works on Postgres; on MySQL skip silently
+    }
+
+    res.json({ ok: true });
   } catch (e) {
-    console.error("updatePermission error:", e);
-    return res.status(500).json({ error: "Failed to update permission" });
+    console.error("saveForRole error:", e);
+    res.status(500).json({ error: "Failed to save role permissions" });
   }
 };
