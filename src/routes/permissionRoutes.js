@@ -1,4 +1,4 @@
-// backend/src/routes/permissionRoutes.js   <-- NOTE: singular file name
+// backend/src/routes/permissionRoutes.js
 "use strict";
 
 const express = require("express");
@@ -9,41 +9,33 @@ let permsCtl = null;
 try { permsCtl = require("../controllers/permissionsController"); } catch {}
 
 /**
- * ROUTES ARE RELATIVE TO /api/permissions
- * So /matrix here => /api/permissions/matrix
+ * All routes here are relative to /api/permissions
+ * e.g. GET /matrix => /api/permissions/matrix
  */
 
-// ----- Matrix endpoints used by the UI -----
+// Matrix used by the UI
 router.get("/matrix", matrixCtl.getMatrix);
-
-// Per-role save (present in your controller)
 router.put("/role/:roleId", matrixCtl.saveForRole);
 
-// Optional: bulk save entire matrix (guarded in case not implemented)
+// Optional: bulk save if you implemented saveEntireMatrix
 if (typeof matrixCtl.saveEntireMatrix === "function") {
   router.put("/matrix", matrixCtl.saveEntireMatrix);
 } else {
-  // If your UI never calls this, you can delete this fallback.
   router.put("/matrix", (_req, res) =>
     res.status(501).json({ error: "Bulk save not implemented. Use PUT /api/permissions/role/:roleId" })
   );
 }
 
-// ----- Legacy/utility endpoints (namespaced so they don't conflict) -----
+// Utilities / legacy (optional)
 if (permsCtl) {
-  // List all raw permission rows
   router.get("/", permsCtl.getPermissions);
-  // Create a single permission row
   router.post("/", permsCtl.createPermission);
-  // Update one row by action name
   router.put("/:action", permsCtl.updatePermission);
-  // Delete by id
   router.delete("/:id", permsCtl.deletePermission);
-
-  // (Optional helper) Get actions for a role
-  if (permsCtl.getRolePermissions) {
-    router.get("/role/:roleId", permsCtl.getRolePermissions);
-  }
+  if (permsCtl.getRolePermissions) router.get("/role/:roleId", permsCtl.getRolePermissions);
 }
+
+// Tiny ping to confirm mount quickly
+router.get("/ping", (_req, res) => res.json({ ok: true }));
 
 module.exports = router;
