@@ -5,6 +5,7 @@ const router = require('express').Router();
 let db = {};
 try { db = require('../models'); } catch {}
 
+// Auth (optional at router level; we will place GET /matrix before it)
 let authenticateUser = (_req, _res, next) => next();
 try { ({ authenticateUser } = require('../middleware/authMiddleware')); } catch {}
 
@@ -19,15 +20,19 @@ const getMatrix          = ctl?.getMatrix;
 const setRolePermissions = ctl?.setRolePermissions || ctl?.saveForRole; // alias supported
 const updatePermission   = ctl?.updatePermission;
 
-router.use(authenticateUser);
-
-/* ---------------------- Permission Matrix (for UI) ---------------------- */
-// GET /api/permissions/matrix  -> { roles, catalog, matrix }
+/* ---------------------- Permission Matrix (read-only) ---------------------- */
+/** GET /api/permissions/matrix  -> { roles, catalog, matrix } 
+ *  This is intentionally placed BEFORE authenticateUser so the UI can render
+ *  even if the session expired. The write endpoints remain protected below.
+ */
 if (typeof getMatrix === 'function') {
   router.get('/matrix', getMatrix);
 }
 
-// PUT /api/permissions/role/:roleId  body: { actions: string[], mode?: "replace"|"add"|"remove" }
+/* ---------------------------- Protected routes ----------------------------- */
+router.use(authenticateUser);
+
+/** PUT /api/permissions/role/:roleId  body: { actions: string[], mode?: "replace"|"add"|"remove" } */
 if (typeof setRolePermissions === 'function') {
   router.put('/role/:roleId', setRolePermissions);
 }

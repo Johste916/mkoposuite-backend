@@ -1,17 +1,11 @@
-// backend/src/controllers/permissionMatrixController.js
 "use strict";
 
 const { Op } = require("sequelize");
 const db = require("../models"); // { Permission, Role }
 
-/**
- * CENTRAL CATALOG
- * - Define all app actions grouped by feature.
- * - Keys should match UI intent (App/Sidebar).
- */
+/** ---------- CENTRAL CATALOG (groups + actions) ---------- */
 const CATALOG = [
   { group: "Dashboard", actions: [{ key: "dashboard.view", label: "View dashboard" }] },
-
   {
     group: "Borrowers",
     actions: [
@@ -29,7 +23,6 @@ const CATALOG = [
       { key: "borrowers.bulkEmail", label: "Send Email" },
     ],
   },
-
   {
     group: "Loans",
     actions: [
@@ -51,7 +44,6 @@ const CATALOG = [
       { key: "loans.disburse", label: "Disburse loan" },
     ],
   },
-
   {
     group: "Repayments",
     actions: [
@@ -64,7 +56,6 @@ const CATALOG = [
       { key: "repayments.approve", label: "Approve repayments" },
     ],
   },
-
   {
     group: "Collection Sheets",
     actions: [
@@ -78,7 +69,6 @@ const CATALOG = [
       { key: "collections.email", label: "Send Email" },
     ],
   },
-
   {
     group: "Collateral",
     actions: [
@@ -87,7 +77,6 @@ const CATALOG = [
       { key: "collateral.edit", label: "Edit collateral" },
     ],
   },
-
   {
     group: "Savings",
     actions: [
@@ -98,7 +87,6 @@ const CATALOG = [
       { key: "savings.report", label: "Reports" },
     ],
   },
-
   {
     group: "Banking",
     actions: [
@@ -119,7 +107,6 @@ const CATALOG = [
       { key: "cash.statements", label: "Cash: statements" },
     ],
   },
-
   {
     group: "HR & Payroll",
     actions: [
@@ -132,7 +119,6 @@ const CATALOG = [
       { key: "hr.contracts", label: "Contracts" },
     ],
   },
-
   {
     group: "Expenses & Other Income",
     actions: [
@@ -144,7 +130,6 @@ const CATALOG = [
       { key: "income.csv", label: "Upload CSV (income)" },
     ],
   },
-
   {
     group: "Assets",
     actions: [
@@ -152,7 +137,6 @@ const CATALOG = [
       { key: "assets.create", label: "Add asset" },
     ],
   },
-
   {
     group: "Accounting",
     actions: [
@@ -163,7 +147,6 @@ const CATALOG = [
       { key: "accounting.manualJournal", label: "Manual journal" },
     ],
   },
-
   {
     group: "Reports",
     actions: [
@@ -187,7 +170,6 @@ const CATALOG = [
       { key: "reports.allEntries", label: "All entries" },
     ],
   },
-
   {
     group: "User & Org Management",
     actions: [
@@ -215,17 +197,10 @@ const CATALOG = [
 const safeString = (v) => (typeof v === "string" ? v : v == null ? "" : String(v)).trim();
 const asLower = (a) => (Array.isArray(a) ? a : []).map((x) => String(x || "").toLowerCase()).filter(Boolean);
 
-/** build list of keys and label map */
 function flattenCatalog() {
   const keys = [];
-  const labelByKey = new Map();
-  for (const g of CATALOG) {
-    for (const a of g.actions) {
-      keys.push(a.key);
-      labelByKey.set(a.key, a.label || a.key);
-    }
-  }
-  return { keys, labelByKey };
+  for (const g of CATALOG) for (const a of g.actions) keys.push(a.key);
+  return { keys };
 }
 
 async function ensurePermissionRows(keys) {
@@ -234,11 +209,10 @@ async function ensurePermissionRows(keys) {
   const existingSet = new Set(existing.map((p) => p.action));
   const missing = keys.filter((k) => !existingSet.has(k));
   if (missing.length) {
-    const creations = missing.map((k) =>
-      db.Permission.create({ action: k, roles: [], description: k, isSystem: false })
+    const created = await Promise.all(
+      missing.map((k) => db.Permission.create({ action: k, roles: [], description: k, isSystem: false }))
     );
-    const newRows = await Promise.all(creations);
-    return existing.concat(newRows);
+    return existing.concat(created);
   }
   return existing;
 }
@@ -250,24 +224,13 @@ function expandWildcardToNames(rolesField, roleNamesLower) {
 }
 
 /* ----------------------------------- GET ---------------------------------- */
-/**
- * GET /api/permissions/matrix
- * Returns:
- *  { catalog, roles, matrix }
- * where matrix is { [actionKey]: string[] } -> role **names** (lowercase),
- * so the frontend can map names → ids.
- */
 exports.getMatrix = async (_req, res) => {
   try {
     const { keys } = flattenCatalog();
 
-    // fetch roles + matching permissions; fail-soft
     let roles = [];
-    try {
-      roles = await db.Role.findAll({ order: [["name", "ASC"]] });
-    } catch (e) {
-      console.warn("[permissions/matrix] roles fetch failed:", e.message);
-    }
+    try { roles = await db.Role.findAll({ order: [["name", "ASC"]] }); }
+    catch (e) { console.warn("[permissions/matrix] roles fetch failed:", e.message); }
 
     let perms = [];
     try {
@@ -277,9 +240,7 @@ exports.getMatrix = async (_req, res) => {
           attributes: ["action", "roles"],
         });
       }
-    } catch (e) {
-      console.warn("[permissions/matrix] permissions fetch failed:", e.message);
-    }
+    } catch (e) { console.warn("[permissions/matrix] permissions fetch failed:", e.message); }
 
     const roleList = (roles || []).map((r) => ({ id: r.id, name: r.name, isSystem: !!r.isSystem }));
     const roleNamesLower = roleList.map((r) => String(r.name || "").toLowerCase());
@@ -299,12 +260,6 @@ exports.getMatrix = async (_req, res) => {
 };
 
 /* ----------------------------------- PUT ---------------------------------- */
-/**
- * PUT /api/permissions/role/:roleId
- * body: { actions: string[], mode?: "replace" | "add" | "remove" | "merge" }
- * - Bootstraps missing Permission rows to ensure changes persist.
- * - Stores role names (lowercase) in Permission.roles.
- */
 async function setRolePermissionsImpl(req, res) {
   try {
     const roleId = safeString(req.params.roleId);
@@ -326,18 +281,15 @@ async function setRolePermissionsImpl(req, res) {
     const { keys } = flattenCatalog();
     await ensurePermissionRows(keys);
 
-    // Now update
     const allPerms = await db.Permission.findAll();
 
     if (mode === "replace") {
-      // remove this role everywhere
       for (const p of allPerms) {
         const set = new Set(asLower(p.roles));
         set.delete(roleNameLc);
         p.roles = Array.from(set);
         await p.save();
       }
-      // then add where requested (create any missing rows too)
       const byAction = new Map(allPerms.map((p) => [p.action, p]));
       for (const action of actions) {
         let p = byAction.get(action);
@@ -377,12 +329,10 @@ async function setRolePermissionsImpl(req, res) {
   }
 }
 
-exports.setRolePermissions = setRolePermissionsImpl;
-// Back-compat with older router code
-exports.saveForRole = setRolePermissionsImpl;
+exports.setRolePermissions = setRolePermissionsImpl; // preferred
+exports.saveForRole = setRolePermissionsImpl;        // back-compat alias
 
-/* ------------------------ Upsert-by-action (optional) ---------------------- */
-// PUT /api/permissions/:action  body: { roles: string[], description? }
+// Optional extra endpoint used by the router if present
 exports.updatePermission = async (req, res) => {
   try {
     const action = safeString(req.params.action);

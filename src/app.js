@@ -1366,7 +1366,7 @@ app.use('/api/settings',       ...auth, ...active, settingRoutes);
 
 /* Admin/ACL */
 app.use('/api/admin/staff',     ...auth, ...active, adminStaffRoutes);
-app.use('/api/permissions',     ...auth, ...active, permissionRoutes);
+app.use('/api/permissions', permissionRoutes);
 app.use('/api/admin/audit',     ...auth, ...active, adminAuditRoutes);
 app.use('/api/audit-logs',      ...auth, ...active, adminAuditRoutes);
 app.use('/api/admin/report-subscriptions', ...auth, ...active, adminReportSubRoutes);
