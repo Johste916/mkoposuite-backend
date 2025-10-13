@@ -1,7 +1,7 @@
 "use strict";
 
 const { Op } = require("sequelize");
-const { Permission, Role, sequelize } = require("../models");
+const { Permission, Role } = require("../models");
 const CATALOG = require("../permissions/catalog");
 
 const safeString = v => (typeof v === "string" ? v : v == null ? "" : String(v).trim());
@@ -35,7 +35,9 @@ async function ensureCatalogRows() {
   }
 }
 
-// ---------- basic list ----------
+/* --------------------------- Legacy / Utility CRUD ------------------------- */
+
+// GET /api/permissions
 exports.getPermissions = async (_req, res) => {
   try {
     await ensureCatalogRows();
@@ -47,7 +49,7 @@ exports.getPermissions = async (_req, res) => {
   }
 };
 
-// ---------- upsert one ----------
+// PUT /api/permissions/:action
 exports.updatePermission = async (req, res) => {
   try {
     const action = safeString(req.params.action);
@@ -74,7 +76,7 @@ exports.updatePermission = async (req, res) => {
   }
 };
 
-// ---------- create & delete ----------
+// POST /api/permissions
 exports.createPermission = async (req, res) => {
   try {
     const name = safeString(req.body?.name);
@@ -91,6 +93,7 @@ exports.createPermission = async (req, res) => {
   }
 };
 
+// DELETE /api/permissions/:id
 exports.deletePermission = async (req, res) => {
   try {
     await Permission.destroy({ where: { id: req.params.id } });
@@ -101,86 +104,9 @@ exports.deletePermission = async (req, res) => {
   }
 };
 
-// ---------- grouped matrix ----------
-exports.getMatrix = async (_req, res) => {
-  try {
-    await ensureCatalogRows();
+/* ----------------------------- Role utilities ------------------------------ */
 
-    const roles = await Role.findAll({ order: [["name", "ASC"]] });
-    const perms = await Permission.findAll();
-    const byAction = new Map(perms.map(p => [p.action, p]));
-
-    const matrix = CATALOG.map(group => ({
-      group: group.group,
-      actions: group.actions.map(a => ({
-        action: a.key,
-        label: a.label,
-        roles: (byAction.get(a.key)?.roles || []),
-      })),
-    }));
-
-    res.json({ roles, matrix });
-  } catch (e) {
-    console.error("getMatrix error:", e);
-    res.status(500).json({ error: "Failed to load permission matrix" });
-  }
-};
-
-// ---------- role-based (replace/add/remove) ----------
-exports.setRolePermissions = async (req, res) => {
-  try {
-    const roleId = safeString(req.params.roleId);
-    const role = await Role.findByPk(roleId);
-    if (!role) return res.status(404).json({ error: "Role not found" });
-
-    const actions = Array.isArray(req.body?.actions) ? req.body.actions.map(safeString) : null;
-    const mode = safeString(req.body?.mode || "replace"); // replace | add | remove
-    if (!actions) return res.status(400).json({ error: "actions must be an array of action strings" });
-
-    await ensureCatalogRows();
-
-    const allPerms = await Permission.findAll({ where: { action: { [Op.in]: actions } } });
-
-    if (mode === "replace") {
-      const every = await Permission.findAll();
-      for (const p of every) {
-        const set = new Set((p.roles || []).map(String));
-        set.delete(role.name);
-        p.roles = Array.from(set);
-        await p.save();
-      }
-      for (const p of allPerms) {
-        const set = new Set((p.roles || []).map(String));
-        set.add(role.name);
-        p.roles = Array.from(set);
-        await p.save();
-      }
-    } else if (mode === "add") {
-      for (const p of allPerms) {
-        const set = new Set((p.roles || []).map(String));
-        set.add(role.name);
-        p.roles = Array.from(set);
-        await p.save();
-      }
-    } else if (mode === "remove") {
-      for (const p of allPerms) {
-        const set = new Set((p.roles || []).map(String));
-        set.delete(role.name);
-        p.roles = Array.from(set);
-        await p.save();
-      }
-    } else {
-      return res.status(400).json({ error: "Invalid mode" });
-    }
-
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("setRolePermissions error:", e);
-    res.status(500).json({ error: "Failed to save role permissions" });
-  }
-};
-
-// ---------- get actions for a role ----------
+// GET /api/permissions/role/:roleId  (when routed to permsCtl.getRolePermissions)
 exports.getRolePermissions = async (req, res) => {
   try {
     const roleId = safeString(req.params.roleId);

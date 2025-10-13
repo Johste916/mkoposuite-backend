@@ -6,20 +6,18 @@ const CATALOG = require("../permissions/catalog");
 
 /* ------------------------------- Helpers ---------------------------------- */
 
-const normalizePermRow = (r) => ({
-  id: r.id,
-  action: r.action,
-  roles: Array.isArray(r.roles) ? r.roles : [],
-  description: r.description || "",
-  isSystem: !!r.isSystem,
-});
-
 const roleMapFromList = (roles) => {
   // map lower(name) -> canonical display name
   const map = new Map();
   for (const r of roles) map.set(String(r.name).toLowerCase(), r.name);
   return map;
 };
+
+function allCatalogActionKeys() {
+  const keys = [];
+  for (const g of CATALOG) for (const a of g.actions) keys.push(a.key);
+  return keys;
+}
 
 async function ensureCatalogRows() {
   // Upsert all actions so the table always contains the catalog.
@@ -56,6 +54,7 @@ async function ensureCatalogRows() {
 /* -------------------------------- Routes ---------------------------------- */
 
 // GET /api/permissions/matrix
+// Shape the UI expects: { catalog, roles, matrix: { [actionKey]: string[] } }
 exports.getMatrix = async (_req, res) => {
   try {
     await ensureCatalogRows();
@@ -66,7 +65,7 @@ exports.getMatrix = async (_req, res) => {
     ]);
 
     const roleNameMap = roleMapFromList(roles); // lower -> Canonical
-    const byAction = new Map(perms.map(p => [p.action, normalizePermRow(p)]));
+    const byAction = new Map(perms.map(p => [p.action, p]));
 
     // Build matrix: { [actionKey]: string[]CanonicalRoleNames }
     const matrix = {};
@@ -74,11 +73,10 @@ exports.getMatrix = async (_req, res) => {
       for (const act of group.actions) {
         const row = byAction.get(act.key);
         const names = [];
-        if (row?.roles) {
-          for (const r of row.roles) {
-            const canon = roleNameMap.get(String(r).toLowerCase());
-            if (canon) names.push(canon);
-          }
+        const rawRoles = Array.isArray(row?.roles) ? row.roles : [];
+        for (const r of rawRoles) {
+          const canon = roleNameMap.get(String(r).toLowerCase());
+          if (canon) names.push(canon);
         }
         matrix[act.key] = names;
       }
@@ -95,65 +93,46 @@ exports.getMatrix = async (_req, res) => {
   }
 };
 
-// PUT /api/permissions/role/:roleId  { actions: string[], mode?: "replace"|"merge" }
+// PUT /api/permissions/role/:roleId
+// Body: { actions: string[] }  — sets membership for THIS role only.
+// If an action is listed => ensure role is present. If not listed => ensure role is removed.
 exports.saveForRole = async (req, res) => {
   try {
     const { roleId } = req.params;
     const role = await db.Role.findByPk(roleId);
     if (!role) return res.status(404).json({ error: "Role not found" });
 
-    const actions = Array.isArray(req.body?.actions) ? req.body.actions.map(String) : [];
-    const mode = String(req.body?.mode || "replace").toLowerCase();
+    const wanted = new Set(
+      Array.isArray(req.body?.actions) ? req.body.actions.map(String) : []
+    );
 
     await ensureCatalogRows();
 
-    // Fetch all existing permissions relevant to provided actions
-    const existing = await db.Permission.findAll({ where: { action: { [Op.in]: actions } } });
-    const byAction = new Map(existing.map(p => [p.action, p]));
+    // Work against the *full* catalog of actions so we can add/remove consistently
+    const allActions = allCatalogActionKeys();
 
-    for (const action of actions) {
-      const row = byAction.get(action);
-      if (!row) {
-        await db.Permission.create({
-          action,
-          roles: [role.name],
-          description: action,
-        });
-        continue;
-      }
+    // Fetch all permission rows in one go
+    const rows = await db.Permission.findAll({
+      where: { action: { [Op.in]: allActions } },
+    });
+    const byAction = new Map(rows.map(p => [p.action, p]));
+
+    // Adjust each action for THIS role only (do not affect other roles)
+    for (const action of allActions) {
+      const row = byAction.get(action) || db.Permission.build({ action, roles: [] });
 
       const set = new Set((row.roles || []).map(x => String(x)));
-      if (mode === "replace") {
-        row.roles = [role.name];
-      } else {
-        set.add(role.name);
-        row.roles = Array.from(set);
+      if (wanted.has(action)) set.add(role.name); else set.delete(role.name);
+
+      row.roles = Array.from(set);
+
+      // ensure description exists (from catalog)
+      if (!row.description) {
+        const label = CATALOG.find(g => g.actions.some(a => a.key === action))
+          ?.actions.find(a => a.key === action)?.label;
+        if (label) row.description = label;
       }
       await row.save();
-    }
-
-    // If replace: remove this role from actions NOT included (Postgres JSONB-friendly branch)
-    if (mode === "replace") {
-      try {
-        await db.Permission.update(
-          { roles: db.sequelize.literal(`CASE
-            WHEN roles @> '["${role.name}"]' THEN (
-              SELECT jsonb_agg(x) FROM jsonb_array_elements_text(roles) x WHERE x <> '${role.name}'
-            )
-            ELSE roles END
-          `) },
-          { where: { action: { [Op.notIn]: actions } } }
-        );
-      } catch (_) {
-        // For MySQL/SQLite: fallback to fetch-all and save
-        const all = await db.Permission.findAll({ where: { action: { [Op.notIn]: actions } } });
-        for (const p of all) {
-          const set = new Set((p.roles || []).map(String));
-          set.delete(role.name);
-          p.roles = Array.from(set);
-          await p.save();
-        }
-      }
     }
 
     res.json({ ok: true });
@@ -163,7 +142,7 @@ exports.saveForRole = async (req, res) => {
   }
 };
 
-// NEW: PUT /api/permissions/matrix  { matrix: { [actionKey]: string[]roleNames } }
+// OPTIONAL bulk: PUT /api/permissions/matrix  { matrix: { [actionKey]: string[]roleNames } }
 exports.saveEntireMatrix = async (req, res) => {
   try {
     const incoming = req.body?.matrix || {};
@@ -177,8 +156,7 @@ exports.saveEntireMatrix = async (req, res) => {
     const roleNameMap = roleMapFromList(roles);  // lower -> Canonical
     const canonicalSet = new Set(roles.map(r => r.name));
 
-    const actions = [];
-    for (const g of CATALOG) for (const a of g.actions) actions.push(a.key);
+    const actions = allCatalogActionKeys();
 
     const existing = await db.Permission.findAll({ where: { action: { [Op.in]: actions } } });
     const byAction = new Map(existing.map(p => [p.action, p]));
@@ -196,9 +174,14 @@ exports.saveEntireMatrix = async (req, res) => {
       ).filter(r => canonicalSet.has(r));
 
       row.roles = clean;
+
       // ensure description exists (from catalog)
-      const label = CATALOG.find(g => g.actions.find(a => a.key === action))?.actions.find(a => a.key === action)?.label;
-      if (!row.description && label) row.description = label;
+      if (!row.description) {
+        const label = CATALOG.find(g => g.actions.some(a => a.key === action))
+          ?.actions.find(a => a.key === action)?.label;
+        if (label) row.description = label;
+      }
+
       await row.save();
     }
 
