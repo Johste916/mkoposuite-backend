@@ -24,8 +24,10 @@ const sequelize = models.sequelize || null;
 const _qi = sequelize?.getQueryInterface?.();
 const _colCache = new Map();
 
-const likeOp = (sequelize?.getDialect?.() === 'postgres') ? Op.iLike : Op.like;
+const likeOp = (sequelize?.getDialect?.() === "postgres") ? Op.iLike : Op.like;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/* -------------------- Column helpers -------------------- */
 const getExistingColumns = async (Model) => {
   const table = Model?.getTableName?.();
   if (!Model || !table || !_qi) return Object.keys(Model?.rawAttributes || {});
@@ -49,6 +51,7 @@ const safeAttributes = async (Model, candidates) => {
   return base.filter((c) => cols.includes(c));
 };
 
+/* -------------------- small utils -------------------- */
 const toApi = (b) => (b ? ({ ...(b.toJSON ? b.toJSON() : b), fullName: (b.fullName ?? b.name ?? "") }) : null);
 const safeNum = (v) => Number(v || 0);
 
@@ -56,7 +59,9 @@ function hasAnyPermission(req, names = []) {
   try {
     const perms = (req.user?.permissions || []).map((p) => String(p).toLowerCase());
     return names.some((n) => perms.includes(String(n).toLowerCase()));
-  } catch { return true; }
+  } catch {
+    return true; // permissive if ACL not wired
+  }
 }
 function canAssignLoanOfficer(req) {
   return hasAnyPermission(req, ["borrower.assign", "staff.update", "loan.assign", "borrower.create"]);
@@ -86,13 +91,16 @@ async function maybePersistPhoto(borrowerId, file) {
   }
 }
 
+/* -------------------- Derived KPIs -------------------- */
 async function computeBorrowerDerived(borrowerId) {
   const derived = { parPercent: 0, overdueAmount: 0, netSavings: 0 };
 
   try {
+    // Savings balance
     if (SavingsTransaction) {
       const txAttrs = await safeAttributes(SavingsTransaction, ["type", "amount", "reversed"]);
       const txs = await SavingsTransaction.findAll({ where: { borrowerId }, attributes: txAttrs, limit: 2000 });
+
       let balance = 0;
       for (const t of txs) {
         if (t.reversed === true) continue;
@@ -103,9 +111,12 @@ async function computeBorrowerDerived(borrowerId) {
       derived.netSavings = balance;
     }
 
+    // Outstanding
     let totalOutstanding = 0;
     if (Loan) {
-      const loanAttrs = await safeAttributes(Loan, ["id","borrowerId","amount","status","outstanding","outstandingAmount","outstandingTotal"]);
+      const loanAttrs = await safeAttributes(Loan, [
+        "id", "borrowerId", "amount", "status", "outstanding", "outstandingAmount", "outstandingTotal",
+      ]);
       const loans = await Loan.findAll({ where: { borrowerId }, attributes: loanAttrs, limit: 1000 });
       for (const l of loans) {
         const out = [l.outstanding, l.outstandingAmount, l.outstandingTotal]
@@ -114,13 +125,14 @@ async function computeBorrowerDerived(borrowerId) {
       }
     }
 
+    // Overdue + PAR
     if (LoanRepayment && Loan) {
-      const repayAttrs = await safeAttributes(LoanRepayment, ["amount","amountPaid","status","dueDate","loanId"]);
+      const repayAttrs = await safeAttributes(LoanRepayment, ["amount", "amountPaid", "status", "dueDate", "loanId"]);
       const today = new Date();
       const rows = await LoanRepayment.findAll({
         attributes: repayAttrs,
         include: [{ model: Loan, where: { borrowerId }, attributes: [] }],
-        where: { [Op.or]: [{ status: { [Op.in]: ["overdue","due"] } }, { dueDate: { [Op.lt]: today } }] },
+        where: { [Op.or]: [{ status: { [Op.in]: ["overdue", "due"] } }, { dueDate: { [Op.lt]: today } }] },
         limit: 5000,
         order: [["dueDate", "DESC"]],
       });
@@ -146,72 +158,62 @@ function officerPrettyName(officer) {
   return officer.name || [officer.firstName, officer.lastName].filter(Boolean).join(" ") || null;
 }
 
-/* ---------- NEW: safe officer candidate lookup (no eager-loading crash) ---------- */
+/* ---------- Officer candidate lookup (include-safe) ---------- */
 async function findOfficerCandidates({ branchId }) {
   if (!User) return [];
-  const roleNames = ['loan officer', 'loan_officer', 'Loan Officer', 'LOAN_OFFICER'];
-
-  // If the association User<->Roles exists, we can include it; otherwise, skip include.
   const canIncludeRoles = !!(User.associations && User.associations.Roles && Role);
+
   if (canIncludeRoles) {
     try {
       return await User.findAll({
         where: { ...(branchId ? { branchId } : {}), isActive: { [Op.not]: false } },
         include: [{
           model: Role,
-          as: 'Roles',
+          as: "Roles",
           through: { attributes: [] },
-          where: { name: { [likeOp]: 'loan officer' } },
+          where: { name: { [likeOp]: "loan officer" } },
           required: true,
         }],
         limit: 1000,
       });
     } catch (e) {
-      console.warn('Officer include skipped (association error):', e?.message || e);
+      console.warn("Officer include skipped (association error):", e?.message || e);
     }
   }
 
-  // Fallback: join via UserRoles manually (no include)
+  // Manual join via UserRole if available
   try {
     const roleRows = Role ? await Role.findAll({
-      where: { name: { [Op.in]: roleNames } }, attributes: ['id'],
+      where: { name: { [likeOp]: "loan officer" } }, attributes: ["id"],
     }) : [];
 
     if (roleRows.length && models.UserRole) {
       const roleIds = roleRows.map(r => r.id);
-      const links = await models.UserRole.findAll({ where: { roleId: { [Op.in]: roleIds } }, attributes: ['userId'] });
+      const links = await models.UserRole.findAll({ where: { roleId: { [Op.in]: roleIds } }, attributes: ["userId"] });
       const userIds = links.map(l => l.userId);
       if (userIds.length) {
         return await User.findAll({
-          where: {
-            id: { [Op.in]: userIds },
-            ...(branchId ? { branchId } : {}),
-            isActive: { [Op.not]: false },
-          },
+          where: { id: { [Op.in]: userIds }, ...(branchId ? { branchId } : {}), isActive: { [Op.not]: false } },
           limit: 1000,
         });
       }
     }
   } catch (e) {
-    console.warn('Officer fallback lookup failed:', e?.message || e);
+    console.warn("Officer fallback lookup failed:", e?.message || e);
   }
 
-  // Final fallback: filter by string column "role"
+  // Fallback: string role column
   try {
     return await User.findAll({
-      where: {
-        ...(branchId ? { branchId } : {}),
-        role: { [likeOp]: 'loan officer' },
-        isActive: { [Op.not]: false },
-      },
+      where: { ...(branchId ? { branchId } : {}), role: { [likeOp]: "loan officer" }, isActive: { [Op.not]: false } },
       limit: 1000,
     });
-  } catch (_) {
+  } catch {
     return [];
   }
 }
 
-/* ---------- CRUD ---------- */
+/* ================================ CRUD ================================ */
 exports.getAllBorrowers = async (req, res) => {
   try {
     if (!Borrower) return res.json({ items: [], total: 0 });
@@ -230,8 +232,9 @@ exports.getAllBorrowers = async (req, res) => {
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
 
-    const attributes = ["id","name","nationalId","phone","address","branchId","loanOfficerId","createdAt","updatedAt"]
-      .filter((a) => Borrower.rawAttributes[a]);
+    const attributes = [
+      "id","name","nationalId","phone","address","branchId","loanOfficerId","loan_officer_id","createdAt","updatedAt",
+    ].filter((a) => Borrower.rawAttributes[a]);
 
     const include = [];
     if (Branch && Borrower.associations?.Branch) {
@@ -239,7 +242,7 @@ exports.getAllBorrowers = async (req, res) => {
     }
 
     const { rows, count } = await Borrower.findAndCountAll({
-      where, attributes, include, order: [["createdAt","DESC"]], limit, offset,
+      where, attributes, include, order: [["createdAt", "DESC"]], limit, offset,
     });
 
     const items = rows.map((b) => {
@@ -271,7 +274,7 @@ exports.createBorrower = async (req, res) => {
     const incomingBranchId = b.branchId || req.headers["x-branch-id"] || req.user?.branchId || null;
     if (needsBranchId && !incomingBranchId) return res.status(400).json({ error: "branchId is required" });
 
-    // ---- role-aware loan officer assignment (safe) ----
+    // Officer assignment
     let desiredOfficerId = b.loanOfficerId || b.officerId || null;
 
     if (desiredOfficerId != null) {
@@ -280,7 +283,6 @@ exports.createBorrower = async (req, res) => {
       }
       if (!User) return res.status(500).json({ error: "User model not available for assignment" });
 
-      // association guard
       const canIncludeRoles = !!(User.associations && User.associations.Roles && Role);
       let officer;
       if (canIncludeRoles) {
@@ -309,7 +311,7 @@ exports.createBorrower = async (req, res) => {
         for (const u of candidates) {
           counts[u.id] = Loan
             ? await Loan.count({
-                where: { loanOfficerId: u.id, status: { [Op.notIn]: ["closed","rejected","cancelled"] } },
+                where: { loanOfficerId: u.id, status: { [Op.notIn]: ["closed", "rejected", "cancelled"] } },
               })
             : 0;
         }
@@ -317,6 +319,7 @@ exports.createBorrower = async (req, res) => {
       }
     }
 
+    // Build payload guarded by existing columns
     const payload = {};
     if (existingCols.includes("name"))        payload.name = displayName;
     if (existingCols.includes("nationalId"))  payload.nationalId = b.nationalId || b.idNumber || null;
@@ -345,10 +348,15 @@ exports.createBorrower = async (req, res) => {
 
     const created = await Borrower.create(payload);
 
-    const file = Array.isArray(req.files) && req.files.find(f => f.fieldname === "photo");
+    // photo: support req.file or req.files
+    const file =
+      req.file ||
+      (Array.isArray(req.files) && req.files.find((f) => f.fieldname === "photo")) ||
+      null;
     const photoUrl = await maybePersistPhoto(created.id, file);
     if (photoUrl && existingCols.includes("photoUrl")) await created.update({ photoUrl });
 
+    // eager names
     let branchName = null, officerName = null;
     if (Branch && Borrower.associations?.Branch) {
       const reloaded = await Borrower.findByPk(created.id, {
@@ -407,7 +415,7 @@ exports.updateBorrower = async (req, res) => {
     const b = await Borrower.findByPk(req.params.id);
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
-    // 🔒 Single-branch policy for borrowers:
+    // Single-branch policy
     const { branchId } = req.body || {};
     if (Borrower.rawAttributes.branchId && typeof branchId !== "undefined") {
       const current = b.branchId;
@@ -444,7 +452,7 @@ exports.updateBorrower = async (req, res) => {
       }
     }
 
-    // ✅ loan officer: honor either column in DB
+    // Officer (uuid or int depending on schema)
     const wantOfficer = body.officerId ?? body.loanOfficerId;
     if (typeof wantOfficer !== "undefined") {
       if (cols.includes("loanOfficerId") || cols.includes("loan_officer_id")) {
@@ -452,10 +460,8 @@ exports.updateBorrower = async (req, res) => {
       }
     }
 
-    // Status
+    // Status + KYC-ish
     setIf("status", body.status);
-
-    // Identity / KYC mirrors UI
     setIf("gender", body.gender);
     setIf("birthDate", body.birthDate || null);
     setIf("employmentStatus", body.employmentStatus);
@@ -577,7 +583,7 @@ exports.unassignBranch = async (req, res) => {
       });
     }
 
-    if (b.branchId === null || typeof b.branchId === 'undefined') {
+    if (b.branchId === null || typeof b.branchId === "undefined") {
       return res.json({ ok: true, borrowerId: b.id, branchId: null });
     }
 
@@ -590,7 +596,7 @@ exports.unassignBranch = async (req, res) => {
   }
 };
 
-/* ---------- Nested ---------- */
+/* -------------------- Nested -------------------- */
 exports.getLoansByBorrower = async (req, res) => {
   try {
     if (!Loan) return res.json([]);
@@ -610,14 +616,7 @@ exports.getRepaymentsByBorrower = async (req, res) => {
   try {
     if (!Loan || !LoanRepayment) return res.json([]);
     const repayAttrs = await safeAttributes(LoanRepayment, [
-      "id",
-      "loanId",
-      "amount",
-      "amountPaid",
-      "status",
-      "dueDate",
-      "date",
-      "createdAt",
+      "id", "loanId", "amount", "amountPaid", "status", "dueDate", "date", "createdAt",
     ]);
     const rows = await LoanRepayment.findAll({
       attributes: repayAttrs,
@@ -632,7 +631,7 @@ exports.getRepaymentsByBorrower = async (req, res) => {
   }
 };
 
-/* ---------- Comments ---------- */
+/* -------------------- Comments -------------------- */
 exports.listComments = async (req, res) => {
   try {
     if (!BorrowerComment) return res.json([]);
@@ -680,7 +679,7 @@ exports.addComment = async (req, res) => {
   }
 };
 
-/* ---------- Savings ---------- */
+/* -------------------- Savings -------------------- */
 exports.getSavingsByBorrower = async (req, res) => {
   try {
     if (!SavingsTransaction) {
@@ -692,17 +691,7 @@ exports.getSavingsByBorrower = async (req, res) => {
     }
 
     const txAttrs = await safeAttributes(SavingsTransaction, [
-      "id",
-      "borrowerId",
-      "type",
-      "amount",
-      "date",
-      "notes",
-      "reference",
-      "status",
-      "reversed",
-      "createdAt",
-      "updatedAt",
+      "id", "borrowerId", "type", "amount", "date", "notes", "reference", "status", "reversed", "createdAt", "updatedAt",
     ]);
 
     const existingCols = await getExistingColumns(SavingsTransaction);
@@ -722,24 +711,11 @@ exports.getSavingsByBorrower = async (req, res) => {
       if (t.reversed === true) continue;
       const amt = safeNum(t.amount);
       switch (t.type) {
-        case "deposit":
-          totals.deposits += amt;
-          balance += amt;
-          break;
-        case "withdrawal":
-          totals.withdrawals += amt;
-          balance -= amt;
-          break;
-        case "charge":
-          totals.charges += amt;
-          balance -= amt;
-          break;
-        case "interest":
-          totals.interest += amt;
-          balance += amt;
-          break;
-        default:
-          break;
+        case "deposit": totals.deposits += amt; balance += amt; break;
+        case "withdrawal": totals.withdrawals += amt; balance -= amt; break;
+        case "charge": totals.charges += amt; balance -= amt; break;
+        case "interest": totals.interest += amt; balance += amt; break;
+        default: break;
       }
     }
 
@@ -750,7 +726,7 @@ exports.getSavingsByBorrower = async (req, res) => {
   }
 };
 
-/* ---------- Blacklist ---------- */
+/* -------------------- Blacklist -------------------- */
 exports.blacklist = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
@@ -783,25 +759,27 @@ exports.listBlacklisted = async (_req, res) => {
   try {
     if (!Borrower) return res.json([]);
     const borrowers = await Borrower.findAll({ where: { status: "blacklisted" } });
-    res.json(borrowers.map((b) => {
-      const j = toApi(b);
-      if (j.phone) j.phone = normalizePhone(j.phone);
-      return j;
-    }));
+    res.json(
+      borrowers.map((b) => {
+        const j = toApi(b);
+        if (j.phone) j.phone = normalizePhone(j.phone);
+        return j;
+      })
+    );
   } catch (error) {
     console.error("listBlacklisted error:", error);
     res.status(500).json({ error: "Failed to fetch blacklisted borrowers" });
   }
 };
 
-/* ---------- KYC ---------- */
+/* -------------------- KYC -------------------- */
 exports.uploadKyc = async (req, res) => {
   try {
     if (!Borrower) return res.status(404).json({ error: "Borrower not found" });
     const b = await Borrower.findByPk(req.params.id);
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
-    const files = (req.files || []).map((f) => ({
+    const files = (req.files || (req.file ? [req.file] : [])).map((f) => ({
       field: f.fieldname,
       originalName: f.originalname,
       size: f.size,
@@ -861,7 +839,7 @@ exports.listKycQueue = async (_req, res) => {
   }
 };
 
-/* ---------- Groups ---------- */
+/* -------------------- Groups -------------------- */
 exports.listGroups = async (_req, res) => {
   try {
     if (!Group) return res.json([]);
@@ -969,20 +947,12 @@ exports.groupReports = async (_req, res) => {
         const memberIds = (g.GroupMembers || []).map((m) => m.borrowerId);
         const membersCount = memberIds.length;
 
-        let totalLoans = 0,
-          totalLoanAmount = 0;
+        let totalLoans = 0, totalLoanAmount = 0;
         if (Loan && membersCount) {
           totalLoans = await Loan.count({ where: { borrowerId: memberIds } });
-          totalLoanAmount =
-            (await Loan.sum("amount", { where: { borrowerId: memberIds } })) || 0;
+          totalLoanAmount = (await Loan.sum("amount", { where: { borrowerId: memberIds } })) || 0;
         }
-        return {
-          id: g.id,
-          name: g.name,
-          membersCount,
-          totalLoans,
-          totalLoanAmount,
-        };
+        return { id: g.id, name: g.name, membersCount, totalLoans, totalLoanAmount };
       })
     );
 
@@ -1026,16 +996,20 @@ exports.importGroupMembers = async (req, res) => {
   }
 };
 
-/* ---------- Import Borrowers ---------- */
+/* -------------------- Import Borrowers -------------------- */
 function splitCSVLine(line) {
   // Split by commas not inside quotes
-  return line.match(/(?<=^|,)(?:"[^"]*"|[^,]*)/g)?.map(s => {
-    const trimmed = s.trim();
-    if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-      return trimmed.slice(1, -1).replace(/""/g, '"');
-    }
-    return trimmed;
-  }) || [];
+  return (
+    line
+      .match(/(?<=^|,)(?:"[^"]*"|[^,]*)/g)
+      ?.map((s) => {
+        const trimmed = s.trim();
+        if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+          return trimmed.slice(1, -1).replace(/""/g, '"');
+        }
+        return trimmed;
+      }) || []
+  );
 }
 
 exports.importBorrowers = async (req, res) => {
@@ -1046,7 +1020,7 @@ exports.importBorrowers = async (req, res) => {
     const buf = req.file.buffer;
     const text = buf.toString("utf8");
 
-    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
     if (lines.length <= 1) return res.status(400).json({ error: "No rows" });
 
     const header = splitCSVLine(lines[0]).map((h) => h.trim().toLowerCase());
@@ -1076,20 +1050,26 @@ exports.importBorrowers = async (req, res) => {
       if (existingCols.includes("phone")) payload.phone = phone;
       if (existingCols.includes("nationalId")) payload.nationalId = nationalId;
 
+      // branchId: integer
       if (existingCols.includes("branch_id") || existingCols.includes("branchId")) {
         const raw = branchIdIdx !== -1 ? cols[branchIdIdx] : null;
-        if (raw) payload.branchId = Number.isFinite(Number(raw)) ? Number(raw) : null;
+        if (raw && Number.isFinite(Number(raw))) payload.branchId = Number(raw);
       }
-      // ✅ support both column casings
+
+      // loanOfficerId: accept UUID (preferred) or numeric (legacy)
       if (existingCols.includes("loanOfficerId") || existingCols.includes("loan_officer_id")) {
         const raw = officerIdIdx !== -1 ? cols[officerIdIdx] : null;
-        if (raw) payload.loanOfficerId = Number.isFinite(Number(raw)) ? Number(raw) : null;
+        if (raw) {
+          if (UUID_RE.test(raw)) payload.loanOfficerId = raw;
+          else if (Number.isFinite(Number(raw))) payload.loanOfficerId = Number(raw);
+        }
       }
+
       if (existingCols.includes("status") && statusIdx !== -1 && cols[statusIdx]) {
         payload.status = String(cols[statusIdx]).toLowerCase();
       }
 
-      // Prefer findOrCreate if nationalId column exists & may be unique
+      // Prefer findOrCreate if nationalId exists
       let b;
       if (existingCols.includes("nationalId") && nationalId) {
         const [row, createdFlag] = await Borrower.findOrCreate({
@@ -1097,7 +1077,6 @@ exports.importBorrowers = async (req, res) => {
           defaults: payload,
         });
         if (!createdFlag) {
-          // Update missing phone or name if needed
           const patch = {};
           if (existingCols.includes("phone") && phone && !row.phone) patch.phone = phone;
           if (existingCols.includes("name") && name && row.name !== name) patch.name = name;
@@ -1126,7 +1105,7 @@ exports.importBorrowers = async (req, res) => {
   }
 };
 
-/* ---------- Reports ---------- */
+/* -------------------- Reports -------------------- */
 exports.summaryReport = async (req, res) => {
   try {
     if (!Borrower) return res.status(404).json({ error: "Borrower not found" });
@@ -1145,26 +1124,13 @@ exports.summaryReport = async (req, res) => {
         include: [{ model: Loan, where: { borrowerId: b.id }, attributes: [] }],
       });
     }
-    const totalRepayments = reps.reduce(
-      (acc, r) => acc + safeNum(r.amountPaid ?? r.amount),
-      0
-    );
+    const totalRepayments = reps.reduce((acc, r) => acc + safeNum(r.amountPaid ?? r.amount), 0);
 
     let balance = 0;
     let txCount = 0;
     if (SavingsTransaction) {
       const txAttrs = await safeAttributes(SavingsTransaction, [
-        "id",
-        "borrowerId",
-        "type",
-        "amount",
-        "date",
-        "notes",
-        "reference",
-        "status",
-        "reversed",
-        "createdAt",
-        "updatedAt",
+        "id", "borrowerId", "type", "amount", "date", "notes", "reference", "status", "reversed", "createdAt", "updatedAt",
       ]);
       const existingCols = await getExistingColumns(SavingsTransaction);
       const hasDate = existingCols.includes("date");
@@ -1172,14 +1138,11 @@ exports.summaryReport = async (req, res) => {
       const txs = await SavingsTransaction.findAll({
         where: { borrowerId: b.id },
         attributes: txAttrs,
-        order: hasDate
-          ? [["date", "DESC"], ["createdAt", "DESC"]]
-          : [["createdAt", "DESC"]],
+        order: hasDate ? [["date", "DESC"], ["createdAt", "DESC"]] : [["createdAt", "DESC"]],
       });
       txCount = txs.length;
 
-      let dep = 0,
-          wdr = 0;
+      let dep = 0, wdr = 0;
       for (const t of txs) {
         if (t.reversed === true) continue;
         if (t.type === "deposit") dep += safeNum(t.amount);
@@ -1217,9 +1180,7 @@ exports.globalBorrowerReport = async (req, res) => {
       borrowers.map(async (b) => {
         const id = b.id;
         const loansCount = Loan ? await Loan.count({ where: { borrowerId: id } }) : 0;
-        const loansTotal = Loan
-          ? (await Loan.sum("amount", { where: { borrowerId: id } })) || 0
-          : 0;
+        const loansTotal = Loan ? (await Loan.sum("amount", { where: { borrowerId: id } })) || 0 : 0;
 
         let repaymentsTotal = 0;
         if (LoanRepayment && Loan) {
@@ -1228,14 +1189,7 @@ exports.globalBorrowerReport = async (req, res) => {
               include: [{ model: Loan, where: { borrowerId: id }, attributes: [] }],
             })) || 0;
         }
-        return {
-          id,
-          name: b.name,
-          status: b.status,
-          loansCount,
-          loansTotal,
-          repaymentsTotal,
-        };
+        return { id, name: b.name, status: b.status, loansCount, loansTotal, repaymentsTotal };
       })
     );
 
