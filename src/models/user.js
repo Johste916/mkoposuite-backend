@@ -20,14 +20,13 @@ module.exports = (sequelize, DataTypes) => {
         set(value) { this.setDataValue('password', value); },
         validate: { len: { args: [6, 100], msg: 'Password must be at least 6 characters long.' } },
       },
-      role: { type: DataTypes.STRING, defaultValue: 'user' },
-      branchId: { type: DataTypes.INTEGER, allowNull: true, field: 'branchId' },
+      role: { type: DataTypes.STRING, defaultValue: 'user' }, // legacy convenience
+      branchId: { type: DataTypes.INTEGER, allowNull: true },
       status: { type: DataTypes.ENUM('active', 'inactive'), defaultValue: 'active' },
     },
     {
       tableName: 'Users',
       timestamps: true,
-      underscored: false,
       defaultScope: { attributes: { exclude: ['password_hash'] } },
       hooks: {
         async beforeSave(user) {
@@ -42,6 +41,7 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   User.associate = (models) => {
+    // M:N Roles — alias must match includes ("Roles")
     if (models.Role) {
       User.belongsToMany(models.Role, {
         through: models.UserRole || 'UserRoles',
@@ -50,6 +50,7 @@ module.exports = (sequelize, DataTypes) => {
         as: 'Roles',
       });
     }
+
     if (models.Branch) {
       User.belongsTo(models.Branch, {
         foreignKey: 'branchId',
@@ -57,6 +58,8 @@ module.exports = (sequelize, DataTypes) => {
         onUpdate: 'CASCADE',
         onDelete: 'SET NULL',
       });
+
+      // Optional multi-branch legacy support if view/table exists
       const through = models.UserBranch || models.UserBranches || 'UserBranches';
       User.belongsToMany(models.Branch, {
         through,

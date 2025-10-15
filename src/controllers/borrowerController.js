@@ -1,4 +1,3 @@
-// backend/controllers/borrowers.js
 "use strict";
 
 const { Op } = require("sequelize");
@@ -6,7 +5,6 @@ const models = require("../models");
 const fs = require("fs");
 const path = require("path");
 
-// Default phone country code for normalization (matches front-end)
 const PHONE_CC = "+255";
 
 // Models (nullable-safe)
@@ -22,19 +20,16 @@ const User               = models.User || null;
 const Role               = models.Role || null;
 const Branch             = models.Branch || null;
 
-// Runtime column introspection (for DB ↔ model drift safety)
 const sequelize = models.sequelize || null;
 const _qi = sequelize?.getQueryInterface?.();
 const _colCache = new Map();
 
-/** Return the actual columns that exist in DB for Model (cached). */
+const likeOp = (sequelize?.getDialect?.() === 'postgres') ? Op.iLike : Op.like;
+
 const getExistingColumns = async (Model) => {
   const table = Model?.getTableName?.();
-  if (!Model || !table || !_qi) {
-    return Object.keys(Model?.rawAttributes || {});
-  }
-  const key =
-    typeof table === "string" ? table : `${table.schema}.${table.tableName}`;
+  if (!Model || !table || !_qi) return Object.keys(Model?.rawAttributes || {});
+  const key = typeof table === "string" ? table : `${table.schema}.${table.tableName}`;
   if (_colCache.has(key)) return _colCache.get(key);
   try {
     const desc = await _qi.describeTable(table);
@@ -48,22 +43,15 @@ const getExistingColumns = async (Model) => {
   }
 };
 
-/** Build a safe attributes list limited to columns that exist in DB. */
 const safeAttributes = async (Model, candidates) => {
   const cols = await getExistingColumns(Model);
   const base = candidates || Object.keys(Model?.rawAttributes || {});
   return base.filter((c) => cols.includes(c));
 };
 
-const toApi = (b) => {
-  if (!b) return null;
-  const json = b.toJSON ? b.toJSON() : b;
-  return { ...json, fullName: json.fullName ?? json.name ?? "" };
-};
-
+const toApi = (b) => (b ? ({ ...(b.toJSON ? b.toJSON() : b), fullName: (b.fullName ?? b.name ?? "") }) : null);
 const safeNum = (v) => Number(v || 0);
 
-/* permissions helper — permissive if not wired */
 function hasAnyPermission(req, names = []) {
   try {
     const perms = (req.user?.permissions || []).map((p) => String(p).toLowerCase());
@@ -71,23 +59,18 @@ function hasAnyPermission(req, names = []) {
   } catch { return true; }
 }
 function canAssignLoanOfficer(req) {
-  // tweak the list to fit your policy
   return hasAnyPermission(req, ["borrower.assign", "staff.update", "loan.assign", "borrower.create"]);
 }
 
-/* Phone normalization: produce +CC######## (best-effort) */
 function normalizePhone(raw, cc = PHONE_CC) {
   if (!raw) return raw;
-  let s = String(raw).trim();
-  // remove spaces/dashes
-  s = s.replace(/[\s-]/g, "");
+  let s = String(raw).trim().replace(/[\s-]/g, "");
   if (s.startsWith("+")) return s;
   if (cc && s.startsWith(cc.replace("+", ""))) return `+${s}`;
   if (cc && s.startsWith("0")) return `${cc}${s.slice(1)}`;
   return s.startsWith("+") ? s : `+${s}`;
 }
 
-/* helper: store an uploaded photo if the Borrower has a photoUrl column */
 async function maybePersistPhoto(borrowerId, file) {
   if (!file || !Borrower?.rawAttributes?.photoUrl) return null;
   try {
@@ -103,28 +86,13 @@ async function maybePersistPhoto(borrowerId, file) {
   }
 }
 
-/* ---------- Derived borrower metrics (auto-updating for UI cards) ---------- */
 async function computeBorrowerDerived(borrowerId) {
-  const derived = {
-    parPercent: 0,
-    overdueAmount: 0,
-    netSavings: 0,
-  };
+  const derived = { parPercent: 0, overdueAmount: 0, netSavings: 0 };
 
   try {
-    // Savings balance (netSavings)
     if (SavingsTransaction) {
-      const txAttrs = await safeAttributes(SavingsTransaction, [
-        "type",
-        "amount",
-        "reversed",
-      ]);
-      const txs = await SavingsTransaction.findAll({
-        where: { borrowerId },
-        attributes: txAttrs,
-        limit: 2000,
-      });
-
+      const txAttrs = await safeAttributes(SavingsTransaction, ["type", "amount", "reversed"]);
+      const txs = await SavingsTransaction.findAll({ where: { borrowerId }, attributes: txAttrs, limit: 2000 });
       let balance = 0;
       for (const t of txs) {
         if (t.reversed === true) continue;
@@ -135,57 +103,24 @@ async function computeBorrowerDerived(borrowerId) {
       derived.netSavings = balance;
     }
 
-    // Overdue & PAR
     let totalOutstanding = 0;
     if (Loan) {
-      const loanAttrs = await safeAttributes(Loan, [
-        "id",
-        "borrowerId",
-        "amount",
-        "status",
-        "outstanding",
-        "outstandingAmount",
-        "outstandingTotal",
-      ]);
-      const loans = await Loan.findAll({
-        where: { borrowerId },
-        attributes: loanAttrs,
-        limit: 1000,
-      });
-
+      const loanAttrs = await safeAttributes(Loan, ["id","borrowerId","amount","status","outstanding","outstandingAmount","outstandingTotal"]);
+      const loans = await Loan.findAll({ where: { borrowerId }, attributes: loanAttrs, limit: 1000 });
       for (const l of loans) {
-        const out =
-          [l.outstanding, l.outstandingAmount, l.outstandingTotal]
-            .map((x) => (typeof x === "number" ? x : null))
-            .find((x) => x != null) ?? null;
-
-        if (out != null) {
-          totalOutstanding += safeNum(out);
-        } else {
-          totalOutstanding += safeNum(l.amount);
-        }
+        const out = [l.outstanding, l.outstandingAmount, l.outstandingTotal]
+          .map((x) => (typeof x === "number" ? x : null)).find((x) => x != null);
+        totalOutstanding += (out != null) ? safeNum(out) : safeNum(l.amount);
       }
     }
 
     if (LoanRepayment && Loan) {
-      const repayAttrs = await safeAttributes(LoanRepayment, [
-        "amount",
-        "amountPaid",
-        "status",
-        "dueDate",
-        "loanId",
-      ]);
-
+      const repayAttrs = await safeAttributes(LoanRepayment, ["amount","amountPaid","status","dueDate","loanId"]);
       const today = new Date();
       const rows = await LoanRepayment.findAll({
         attributes: repayAttrs,
-        include: [{ model: Loan, where: { borrowerId }, attributes: [] }], // join
-        where: {
-          [Op.or]: [
-            { status: { [Op.in]: ["overdue", "due"] } },
-            { dueDate: { [Op.lt]: today } },
-          ],
-        },
+        include: [{ model: Loan, where: { borrowerId }, attributes: [] }],
+        where: { [Op.or]: [{ status: { [Op.in]: ["overdue","due"] } }, { dueDate: { [Op.lt]: today } }] },
         limit: 5000,
         order: [["dueDate", "DESC"]],
       });
@@ -197,12 +132,7 @@ async function computeBorrowerDerived(borrowerId) {
         if (due > paid) overdue += (due - paid);
       }
       derived.overdueAmount = overdue;
-
-      if (totalOutstanding > 0) {
-        derived.parPercent = Number(((overdue / totalOutstanding) * 100).toFixed(2));
-      } else {
-        derived.parPercent = 0;
-      }
+      derived.parPercent = totalOutstanding > 0 ? Number(((overdue / totalOutstanding) * 100).toFixed(2)) : 0;
     }
   } catch (err) {
     console.warn("computeBorrowerDerived failed:", err?.message || err);
@@ -211,12 +141,74 @@ async function computeBorrowerDerived(borrowerId) {
   return derived;
 }
 
-/* ---------- tiny helpers for names ---------- */
 function officerPrettyName(officer) {
   if (!officer) return null;
-  return officer.name ||
-    [officer.firstName, officer.lastName].filter(Boolean).join(" ") ||
-    null;
+  return officer.name || [officer.firstName, officer.lastName].filter(Boolean).join(" ") || null;
+}
+
+/* ---------- NEW: safe officer candidate lookup (no eager-loading crash) ---------- */
+async function findOfficerCandidates({ branchId }) {
+  if (!User) return [];
+  const roleNames = ['loan officer', 'loan_officer', 'Loan Officer', 'LOAN_OFFICER'];
+
+  // If the association User<->Roles exists, we can include it; otherwise, skip include.
+  const canIncludeRoles = !!(User.associations && User.associations.Roles && Role);
+  if (canIncludeRoles) {
+    try {
+      return await User.findAll({
+        where: { ...(branchId ? { branchId } : {}), isActive: { [Op.not]: false } },
+        include: [{
+          model: Role,
+          as: 'Roles',
+          through: { attributes: [] },
+          where: { name: { [likeOp]: 'loan officer' } },
+          required: true,
+        }],
+        limit: 1000,
+      });
+    } catch (e) {
+      console.warn('Officer include skipped (association error):', e?.message || e);
+    }
+  }
+
+  // Fallback: join via UserRoles manually (no include)
+  try {
+    const roleRows = Role ? await Role.findAll({
+      where: { name: { [Op.in]: roleNames } }, attributes: ['id'],
+    }) : [];
+
+    if (roleRows.length && models.UserRole) {
+      const roleIds = roleRows.map(r => r.id);
+      const links = await models.UserRole.findAll({ where: { roleId: { [Op.in]: roleIds } }, attributes: ['userId'] });
+      const userIds = links.map(l => l.userId);
+      if (userIds.length) {
+        return await User.findAll({
+          where: {
+            id: { [Op.in]: userIds },
+            ...(branchId ? { branchId } : {}),
+            isActive: { [Op.not]: false },
+          },
+          limit: 1000,
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('Officer fallback lookup failed:', e?.message || e);
+  }
+
+  // Final fallback: filter by string column "role"
+  try {
+    return await User.findAll({
+      where: {
+        ...(branchId ? { branchId } : {}),
+        role: { [likeOp]: 'loan officer' },
+        isActive: { [Op.not]: false },
+      },
+      limit: 1000,
+    });
+  } catch (_) {
+    return [];
+  }
 }
 
 /* ---------- CRUD ---------- */
@@ -228,37 +220,28 @@ exports.getAllBorrowers = async (req, res) => {
     const where = {};
     if (branchId) where.branchId = branchId;
     if (q) {
-      // Use iLike when available; fallback to like
-      const like = (sequelize?.getDialect?.() === 'postgres') ? Op.iLike : Op.like;
       where[Op.or] = [
-        { name: { [like]: `%${q}%` } },
-        { phone: { [like]: `%${q}%` } },
-        { nationalId: { [like]: `%${q}%` } },
+        { name: { [likeOp]: `%${q}%` } },
+        { phone: { [likeOp]: `%${q}%` } },
+        { nationalId: { [likeOp]: `%${q}%` } },
       ];
     }
 
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
 
-    const attributes = ["id", "name", "nationalId", "phone", "address", "branchId", "loanOfficerId", "createdAt", "updatedAt"]
+    const attributes = ["id","name","nationalId","phone","address","branchId","loanOfficerId","createdAt","updatedAt"]
       .filter((a) => Borrower.rawAttributes[a]);
 
-    // include Branch so list pages can show name
     const include = [];
     if (Branch && Borrower.associations?.Branch) {
       include.push({ model: Branch, as: "Branch", attributes: ["id", "name"] });
     }
 
     const { rows, count } = await Borrower.findAndCountAll({
-      where,
-      attributes,
-      include,
-      order: [["createdAt", "DESC"]],
-      limit,
-      offset,
+      where, attributes, include, order: [["createdAt","DESC"]], limit, offset,
     });
 
-    // Ensure phone formatting and return branchName
     const items = rows.map((b) => {
       const j = toApi(b);
       if (j.phone) j.phone = normalizePhone(j.phone);
@@ -278,39 +261,35 @@ exports.createBorrower = async (req, res) => {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
 
     const existingCols = await getExistingColumns(Borrower);
-
     const b = req.body || {};
     const firstName = (b.firstName || "").trim();
     const lastName  = (b.lastName || "").trim();
     const displayName = (b.name || b.fullName || `${firstName} ${lastName}`.trim()).trim();
-
     if (!displayName) return res.status(400).json({ error: "name is required" });
 
-    const needsBranchId =
-      !!Borrower.rawAttributes.branchId &&
-      Borrower.rawAttributes.branchId.allowNull === false;
+    const needsBranchId = !!Borrower.rawAttributes.branchId && Borrower.rawAttributes.branchId.allowNull === false;
+    const incomingBranchId = b.branchId || req.headers["x-branch-id"] || req.user?.branchId || null;
+    if (needsBranchId && !incomingBranchId) return res.status(400).json({ error: "branchId is required" });
 
-    // Resolve desired branch (explicit > header > user > null)
-    const incomingBranchId =
-      b.branchId || req.headers["x-branch-id"] || req.user?.branchId || null;
-
-    if (needsBranchId && !incomingBranchId) {
-      return res.status(400).json({ error: "branchId is required" });
-    }
-
-    // ----- role-aware loan officer assignment -----
+    // ---- role-aware loan officer assignment (safe) ----
     let desiredOfficerId = b.loanOfficerId || b.officerId || null;
 
-    // If provided, validate permissions + role + branch compatibility
     if (desiredOfficerId != null) {
       if (!canAssignLoanOfficer(req)) {
         return res.status(403).json({ error: "You are not allowed to assign a loan officer." });
       }
       if (!User) return res.status(500).json({ error: "User model not available for assignment" });
 
-      const officer = await User.findByPk(desiredOfficerId, {
-        include: [{ model: Role, as: "Roles", through: { attributes: [] } }],
-      });
+      // association guard
+      const canIncludeRoles = !!(User.associations && User.associations.Roles && Role);
+      let officer;
+      if (canIncludeRoles) {
+        officer = await User.findByPk(desiredOfficerId, {
+          include: [{ model: Role, as: "Roles", through: { attributes: [] } }],
+        });
+      } else {
+        officer = await User.findByPk(desiredOfficerId);
+      }
       if (!officer) return res.status(400).json({ error: "loanOfficerId not found" });
 
       const isOfficer =
@@ -318,47 +297,23 @@ exports.createBorrower = async (req, res) => {
         (officer.Roles || []).some((r) => (String(r.name) || "").toLowerCase() === "loan officer");
 
       if (!isOfficer) return res.status(400).json({ error: "Selected user is not a Loan Officer" });
-
       if (incomingBranchId && officer.branchId && String(officer.branchId) !== String(incomingBranchId)) {
         return res.status(400).json({ error: "Loan Officer not in selected branch" });
       }
     }
 
-    // If not provided, try auto-assign least-loaded officer in same branch (if any)
-    if (!desiredOfficerId && User && Role) {
-      const like = (sequelize?.getDialect?.() === 'postgres') ? Op.iLike : Op.like;
-
-      const candidates = await User.findAll({
-        where: incomingBranchId ? { branchId: incomingBranchId } : {},
-        include: [{
-          model: Role,
-          as: "Roles",
-          through: { attributes: [] },
-          where: { name: { [like]: "loan officer" } },
-          required: false,
-        }],
-        limit: 1000,
-      });
-
-      const onlyOfficers = candidates.filter((u) =>
-        (String(u.role || "").toLowerCase() === "loan officer") ||
-        (u.Roles || []).some((r) => (String(r.name) || "").toLowerCase() === "loan officer")
-      );
-
-      if (onlyOfficers.length) {
-        // Least-loaded by active loans
+    if (!desiredOfficerId) {
+      const candidates = await findOfficerCandidates({ branchId: incomingBranchId });
+      if (candidates.length) {
         const counts = {};
-        for (const u of onlyOfficers) {
+        for (const u of candidates) {
           counts[u.id] = Loan
             ? await Loan.count({
-                where: {
-                  loanOfficerId: u.id,
-                  status: { [Op.notIn]: ["closed", "rejected", "cancelled"] },
-                },
+                where: { loanOfficerId: u.id, status: { [Op.notIn]: ["closed","rejected","cancelled"] } },
               })
             : 0;
         }
-        desiredOfficerId = onlyOfficers.sort((a, b) => (counts[a.id] - counts[b.id]))[0]?.id ?? null;
+        desiredOfficerId = candidates.sort((a, b) => (counts[a.id] - counts[b.id]))[0]?.id ?? null;
       }
     }
 
@@ -383,25 +338,18 @@ exports.createBorrower = async (req, res) => {
     if (existingCols.includes("nextKinPhone"))            payload.nextKinPhone = normalizePhone(b.nextKinPhone || null);
     if (existingCols.includes("nextOfKinRelationship"))   payload.nextOfKinRelationship = b.nextOfKinRelationship || b.kinRelationship || null;
     if (existingCols.includes("regDate"))                 payload.regDate = b.regDate || null;
-
-    // ✅ handle both camelCase and snake_case in DB
     if (existingCols.includes("loanOfficerId") || existingCols.includes("loan_officer_id")) {
       payload.loanOfficerId = desiredOfficerId || null;
     }
-
     if (existingCols.includes("groupId"))                 payload.groupId = b.loanType === "group" ? (b.groupId || null) : null;
 
     const created = await Borrower.create(payload);
 
     const file = Array.isArray(req.files) && req.files.find(f => f.fieldname === "photo");
     const photoUrl = await maybePersistPhoto(created.id, file);
-    if (photoUrl && existingCols.includes("photoUrl")) {
-      await created.update({ photoUrl });
-    }
+    if (photoUrl && existingCols.includes("photoUrl")) await created.update({ photoUrl });
 
-    // --- enrich names for UI ---
-    let branchName = null;
-    let officerName = null;
+    let branchName = null, officerName = null;
     if (Branch && Borrower.associations?.Branch) {
       const reloaded = await Borrower.findByPk(created.id, {
         include: [

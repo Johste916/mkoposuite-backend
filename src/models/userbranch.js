@@ -1,24 +1,14 @@
-// models/UserBranch.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
-  // Runtime table for writes
   const UserBranch = sequelize.define(
     'UserBranch',
     {
-      userId: {
-        type: DataTypes.UUID,
-        allowNull: false,
-        field: 'user_id',
-      },
-      branchId: {
-        type: DataTypes.INTEGER,
-        allowNull: false,
-        field: 'branch_id',
-      },
+      userId: { type: DataTypes.UUID, allowNull: false, field: 'user_id' },
+      branchId: { type: DataTypes.INTEGER, allowNull: false, field: 'branch_id' },
     },
     {
-      tableName: 'user_branches_rt',   // ✅ runtime TABLE
+      tableName: 'user_branches_rt',
       schema: 'public',
       timestamps: true,
       underscored: true,
