@@ -1,3 +1,4 @@
+// backend/controllers/borrowers.js
 "use strict";
 
 const { Op } = require("sequelize");
@@ -178,7 +179,7 @@ async function computeBorrowerDerived(borrowerId) {
       const today = new Date();
       const rows = await LoanRepayment.findAll({
         attributes: repayAttrs,
-        include: [{ model: Loan, where: { borrowerId }, attributes: [] }],
+        include: [{ model: Loan, where: { borrowerId }, attributes: [] }], // join
         where: {
           [Op.or]: [
             { status: { [Op.in]: ["overdue", "due"] } },
