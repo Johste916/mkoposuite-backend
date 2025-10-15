@@ -19,6 +19,7 @@ const BorrowerComment    = models.BorrowerComment || null;
 const KYCDocument        = models.KYCDocument || null;
 const User               = models.User || null;
 const Role               = models.Role || null;
+const Branch             = models.Branch || null;
 
 // Runtime column introspection (for DB ↔ model drift safety)
 const sequelize = models.sequelize || null;
@@ -209,6 +210,14 @@ async function computeBorrowerDerived(borrowerId) {
   return derived;
 }
 
+/* ---------- tiny helpers for names ---------- */
+function officerPrettyName(officer) {
+  if (!officer) return null;
+  return officer.name ||
+    [officer.firstName, officer.lastName].filter(Boolean).join(" ") ||
+    null;
+}
+
 /* ---------- CRUD ---------- */
 exports.getAllBorrowers = async (req, res) => {
   try {
@@ -230,21 +239,29 @@ exports.getAllBorrowers = async (req, res) => {
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
 
-    const attributes = ["id", "name", "nationalId", "phone", "address", "createdAt", "updatedAt"]
+    const attributes = ["id", "name", "nationalId", "phone", "address", "branchId", "loanOfficerId", "createdAt", "updatedAt"]
       .filter((a) => Borrower.rawAttributes[a]);
+
+    // include Branch so list pages can show name
+    const include = [];
+    if (Branch && Borrower.associations?.Branch) {
+      include.push({ model: Branch, as: "Branch", attributes: ["id", "name"] });
+    }
 
     const { rows, count } = await Borrower.findAndCountAll({
       where,
       attributes,
+      include,
       order: [["createdAt", "DESC"]],
       limit,
       offset,
     });
 
-    // Ensure phone formatting on output
+    // Ensure phone formatting and return branchName
     const items = rows.map((b) => {
       const j = toApi(b);
       if (j.phone) j.phone = normalizePhone(j.phone);
+      j.branchName = b.Branch?.name ?? j.branchName ?? null;
       return j;
     });
 
@@ -365,7 +382,12 @@ exports.createBorrower = async (req, res) => {
     if (existingCols.includes("nextKinPhone"))            payload.nextKinPhone = normalizePhone(b.nextKinPhone || null);
     if (existingCols.includes("nextOfKinRelationship"))   payload.nextOfKinRelationship = b.nextOfKinRelationship || b.kinRelationship || null;
     if (existingCols.includes("regDate"))                 payload.regDate = b.regDate || null;
-    if (existingCols.includes("loanOfficerId"))           payload.loanOfficerId = desiredOfficerId || null;
+
+    // ✅ handle both camelCase and snake_case in DB
+    if (existingCols.includes("loanOfficerId") || existingCols.includes("loan_officer_id")) {
+      payload.loanOfficerId = desiredOfficerId || null;
+    }
+
     if (existingCols.includes("groupId"))                 payload.groupId = b.loanType === "group" ? (b.groupId || null) : null;
 
     const created = await Borrower.create(payload);
@@ -376,8 +398,22 @@ exports.createBorrower = async (req, res) => {
       await created.update({ photoUrl });
     }
 
+    // --- enrich names for UI ---
+    let branchName = null;
+    let officerName = null;
+    if (Branch && Borrower.associations?.Branch) {
+      const reloaded = await Borrower.findByPk(created.id, {
+        include: [
+          { model: Branch, as: "Branch", attributes: ["id", "name"] },
+          { model: User, as: "loanOfficer", attributes: ["id", "name", "firstName", "lastName"] },
+        ],
+      });
+      branchName = reloaded?.Branch?.name ?? null;
+      officerName = officerPrettyName(reloaded?.loanOfficer);
+    }
+
     const derived = await computeBorrowerDerived(created.id);
-    const out = { ...toApi(created), ...derived };
+    const out = { ...toApi(created), ...derived, branchName, officerName };
     if (out.phone) out.phone = normalizePhone(out.phone);
     res.status(201).json(out);
   } catch (error) {
@@ -389,10 +425,25 @@ exports.createBorrower = async (req, res) => {
 exports.getBorrowerById = async (req, res) => {
   try {
     if (!Borrower) return res.status(404).json({ error: "Borrower not found" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const include = [];
+    if (Branch && Borrower.associations?.Branch) {
+      include.push({ model: Branch, as: "Branch", attributes: ["id", "name"] });
+    }
+    if (User && Borrower.associations?.loanOfficer) {
+      include.push({ model: User, as: "loanOfficer", attributes: ["id", "name", "firstName", "lastName"] });
+    }
+
+    const b = await Borrower.findByPk(req.params.id, { include });
     if (!b) return res.status(404).json({ error: "Borrower not found" });
+
     const derived = await computeBorrowerDerived(b.id);
-    const out = { ...toApi(b), ...derived };
+    const out = {
+      ...toApi(b),
+      ...derived,
+      branchName: b.Branch?.name ?? null,
+      officerName: officerPrettyName(b.loanOfficer),
+    };
     if (out.phone) out.phone = normalizePhone(out.phone);
     res.json(out);
   } catch (error) {
@@ -433,18 +484,24 @@ exports.updateBorrower = async (req, res) => {
     // Core fields
     setIf("name", body.name ?? body.fullName);
     setIf("nationalId", body.nationalId);
-    setIf("phone", typeof body.phone !== "undefined" ? normalizePhone(body.phone) : undefined);
+    if (typeof body.phone !== "undefined") setIf("phone", normalizePhone(body.phone));
     setIf("email", body.email);
     setIf("address", body.address);
 
     // Assignment
     if (Borrower.rawAttributes.branchId) {
       if (!b.branchId && typeof body.branchId !== "undefined") {
-        setIf("branchId", body.branchId);
+        if (cols.includes("branchId") || cols.includes("branch_id")) patch.branchId = body.branchId;
       }
     }
-    // loan officer can be updated (trusting UI permission)
-    setIf("loanOfficerId", body.officerId ?? body.loanOfficerId);
+
+    // ✅ loan officer: honor either column in DB
+    const wantOfficer = body.officerId ?? body.loanOfficerId;
+    if (typeof wantOfficer !== "undefined") {
+      if (cols.includes("loanOfficerId") || cols.includes("loan_officer_id")) {
+        patch.loanOfficerId = wantOfficer;
+      }
+    }
 
     // Status
     setIf("status", body.status);
@@ -457,15 +514,31 @@ exports.updateBorrower = async (req, res) => {
     setIf("idType", body.idType);
     setIf("idIssuedDate", body.idIssuedDate || null);
     setIf("idExpiryDate", body.idExpiryDate || null);
+    if (typeof body.nextKinPhone !== "undefined") setIf("nextKinPhone", normalizePhone(body.nextKinPhone));
     setIf("nextKinName", body.nextKinName);
-    setIf("nextKinPhone", typeof body.nextKinPhone !== "undefined" ? normalizePhone(body.nextKinPhone) : undefined);
     setIf("nextOfKinRelationship", body.nextOfKinRelationship);
     setIf("groupId", body.groupId);
+    setIf("regDate", body.regDate);
 
     await b.update(patch);
 
+    // Reload with associations so UI gets names immediately
+    const include = [];
+    if (Branch && Borrower.associations?.Branch) {
+      include.push({ model: Branch, as: "Branch", attributes: ["id", "name"] });
+    }
+    if (User && Borrower.associations?.loanOfficer) {
+      include.push({ model: User, as: "loanOfficer", attributes: ["id", "name", "firstName", "lastName"] });
+    }
+    const reloaded = await Borrower.findByPk(b.id, { include });
+
     const derived = await computeBorrowerDerived(b.id);
-    const out = { ...toApi(b), ...derived };
+    const out = {
+      ...toApi(reloaded),
+      ...derived,
+      branchName: reloaded?.Branch?.name ?? null,
+      officerName: officerPrettyName(reloaded?.loanOfficer),
+    };
     if (out.phone) out.phone = normalizePhone(out.phone);
     res.json(out);
   } catch (error) {
@@ -1058,7 +1131,8 @@ exports.importBorrowers = async (req, res) => {
         const raw = branchIdIdx !== -1 ? cols[branchIdIdx] : null;
         if (raw) payload.branchId = Number.isFinite(Number(raw)) ? Number(raw) : null;
       }
-      if (existingCols.includes("loanOfficerId")) {
+      // ✅ support both column casings
+      if (existingCols.includes("loanOfficerId") || existingCols.includes("loan_officer_id")) {
         const raw = officerIdIdx !== -1 ? cols[officerIdIdx] : null;
         if (raw) payload.loanOfficerId = Number.isFinite(Number(raw)) ? Number(raw) : null;
       }
