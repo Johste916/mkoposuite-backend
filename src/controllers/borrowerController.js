@@ -52,8 +52,10 @@ const safeAttributes = async (Model, candidates) => {
 };
 
 /* -------------------- small utils -------------------- */
-const toApi = (b) => (b ? ({ ...(b.toJSON ? b.toJSON() : b), fullName: (b.fullName ?? b.name ?? "") }) : null);
+const toApi = (b) =>
+  b ? { ...(b.toJSON ? b.toJSON() : b), fullName: b.fullName ?? b.name ?? "" } : null;
 const safeNum = (v) => Number(v || 0);
+const emptyToNull = (v) => (v === "" || typeof v === "undefined" ? null : v);
 
 function hasAnyPermission(req, names = []) {
   try {
@@ -64,7 +66,12 @@ function hasAnyPermission(req, names = []) {
   }
 }
 function canAssignLoanOfficer(req) {
-  return hasAnyPermission(req, ["borrower.assign", "staff.update", "loan.assign", "borrower.create"]);
+  return hasAnyPermission(req, [
+    "borrower.assign",
+    "staff.update",
+    "loan.assign",
+    "borrower.create",
+  ]);
 }
 
 function normalizePhone(raw, cc = PHONE_CC) {
@@ -93,14 +100,24 @@ async function maybePersistPhoto(borrowerId, file) {
 
 /* -------------------- Derived KPIs -------------------- */
 async function computeBorrowerDerived(borrowerId) {
-  const derived = { parPercent: 0, overdueAmount: 0, netSavings: 0 };
+  const derived = {
+    parPercent: 0,
+    overdueAmount: 0,
+    netSavings: 0,
+    outstanding: 0,
+    outstandingLoan: 0,
+    outstandingInterest: 0,
+  };
 
   try {
-    // Savings balance
+    // Savings
     if (SavingsTransaction) {
       const txAttrs = await safeAttributes(SavingsTransaction, ["type", "amount", "reversed"]);
-      const txs = await SavingsTransaction.findAll({ where: { borrowerId }, attributes: txAttrs, limit: 2000 });
-
+      const txs = await SavingsTransaction.findAll({
+        where: { borrowerId },
+        attributes: txAttrs,
+        limit: 2000,
+      });
       let balance = 0;
       for (const t of txs) {
         if (t.reversed === true) continue;
@@ -111,28 +128,74 @@ async function computeBorrowerDerived(borrowerId) {
       derived.netSavings = balance;
     }
 
-    // Outstanding
-    let totalOutstanding = 0;
+    // Outstanding (total / principal / interest if available)
     if (Loan) {
       const loanAttrs = await safeAttributes(Loan, [
-        "id", "borrowerId", "amount", "status", "outstanding", "outstandingAmount", "outstandingTotal",
+        "id",
+        "borrowerId",
+        "amount",
+        "status",
+        "outstanding",
+        "outstandingAmount",
+        "outstandingTotal",
+        "outstandingPrincipal",
+        "principalOutstanding",
+        "principal_outstanding",
+        "outstandingInterest",
+        "interestOutstanding",
+        "interest_outstanding",
       ]);
-      const loans = await Loan.findAll({ where: { borrowerId }, attributes: loanAttrs, limit: 1000 });
+      const loans = await Loan.findAll({
+        where: { borrowerId },
+        attributes: loanAttrs,
+        limit: 1000,
+      });
+
+      let total = 0,
+        p = 0,
+        i = 0;
       for (const l of loans) {
-        const out = [l.outstanding, l.outstandingAmount, l.outstandingTotal]
-          .map((x) => (typeof x === "number" ? x : null)).find((x) => x != null);
-        totalOutstanding += (out != null) ? safeNum(out) : safeNum(l.amount);
+        const tot =
+          [l.outstanding, l.outstandingAmount, l.outstandingTotal].find(
+            (x) => typeof x === "number"
+          ) ?? l.amount;
+        total += safeNum(tot);
+
+        const pv = [
+          l.outstandingPrincipal,
+          l.principalOutstanding,
+          l.principal_outstanding,
+        ].find((x) => typeof x === "number");
+        if (pv != null) p += safeNum(pv);
+
+        const iv = [
+          l.outstandingInterest,
+          l.interestOutstanding,
+          l.interest_outstanding,
+        ].find((x) => typeof x === "number");
+        if (iv != null) i += safeNum(iv);
       }
+      derived.outstanding = total;
+      derived.outstandingLoan = p || total;
+      derived.outstandingInterest = i || 0;
     }
 
     // Overdue + PAR
     if (LoanRepayment && Loan) {
-      const repayAttrs = await safeAttributes(LoanRepayment, ["amount", "amountPaid", "status", "dueDate", "loanId"]);
+      const repayAttrs = await safeAttributes(LoanRepayment, [
+        "amount",
+        "amountPaid",
+        "status",
+        "dueDate",
+        "loanId",
+      ]);
       const today = new Date();
       const rows = await LoanRepayment.findAll({
         attributes: repayAttrs,
         include: [{ model: Loan, where: { borrowerId }, attributes: [] }],
-        where: { [Op.or]: [{ status: { [Op.in]: ["overdue", "due"] } }, { dueDate: { [Op.lt]: today } }] },
+        where: {
+          [Op.or]: [{ status: { [Op.in]: ["overdue", "due"] } }, { dueDate: { [Op.lt]: today } }],
+        },
         limit: 5000,
         order: [["dueDate", "DESC"]],
       });
@@ -141,10 +204,13 @@ async function computeBorrowerDerived(borrowerId) {
       for (const r of rows) {
         const due = safeNum(r.amount);
         const paid = safeNum(r.amountPaid);
-        if (due > paid) overdue += (due - paid);
+        if (due > paid) overdue += due - paid;
       }
       derived.overdueAmount = overdue;
-      derived.parPercent = totalOutstanding > 0 ? Number(((overdue / totalOutstanding) * 100).toFixed(2)) : 0;
+      derived.parPercent =
+        derived.outstanding > 0
+          ? Number(((overdue / derived.outstanding) * 100).toFixed(2))
+          : 0;
     }
   } catch (err) {
     console.warn("computeBorrowerDerived failed:", err?.message || err);
@@ -159,21 +225,36 @@ function officerPrettyName(officer) {
 }
 
 /* ---------- Officer candidate lookup (include-safe) ---------- */
+async function buildActiveUserFilter() {
+  if (!User) return {};
+  try {
+    const cols = await getExistingColumns(User);
+    if (cols.includes("isActive")) return { isActive: { [Op.not]: false } };
+    if (cols.includes("active"))   return { active:   { [Op.not]: false } };
+    if (cols.includes("status"))   return { status:   { [Op.notIn]: ["disabled", "inactive"] } };
+  } catch {}
+  return {};
+}
+
 async function findOfficerCandidates({ branchId }) {
   if (!User) return [];
   const canIncludeRoles = !!(User.associations && User.associations.Roles && Role);
+  const activeFilter = await buildActiveUserFilter();
+  const baseWhere = { ...(branchId ? { branchId } : {}), ...activeFilter };
 
   if (canIncludeRoles) {
     try {
       return await User.findAll({
-        where: { ...(branchId ? { branchId } : {}), isActive: { [Op.not]: false } },
-        include: [{
-          model: Role,
-          as: "Roles",
-          through: { attributes: [] },
-          where: { name: { [likeOp]: "loan officer" } },
-          required: true,
-        }],
+        where: baseWhere,
+        include: [
+          {
+            model: Role,
+            as: "Roles",
+            through: { attributes: [] },
+            where: { name: { [likeOp]: "loan officer" } },
+            required: true,
+          },
+        ],
         limit: 1000,
       });
     } catch (e) {
@@ -183,17 +264,19 @@ async function findOfficerCandidates({ branchId }) {
 
   // Manual join via UserRole if available
   try {
-    const roleRows = Role ? await Role.findAll({
-      where: { name: { [likeOp]: "loan officer" } }, attributes: ["id"],
-    }) : [];
-
+    const roleRows = Role
+      ? await Role.findAll({ where: { name: { [likeOp]: "loan officer" } }, attributes: ["id"] })
+      : [];
     if (roleRows.length && models.UserRole) {
-      const roleIds = roleRows.map(r => r.id);
-      const links = await models.UserRole.findAll({ where: { roleId: { [Op.in]: roleIds } }, attributes: ["userId"] });
-      const userIds = links.map(l => l.userId);
+      const roleIds = roleRows.map((r) => r.id);
+      const links = await models.UserRole.findAll({
+        where: { roleId: { [Op.in]: roleIds } },
+        attributes: ["userId"],
+      });
+      const userIds = links.map((l) => l.userId);
       if (userIds.length) {
         return await User.findAll({
-          where: { id: { [Op.in]: userIds }, ...(branchId ? { branchId } : {}), isActive: { [Op.not]: false } },
+          where: { id: { [Op.in]: userIds }, ...baseWhere },
           limit: 1000,
         });
       }
@@ -205,7 +288,7 @@ async function findOfficerCandidates({ branchId }) {
   // Fallback: string role column
   try {
     return await User.findAll({
-      where: { ...(branchId ? { branchId } : {}), role: { [likeOp]: "loan officer" }, isActive: { [Op.not]: false } },
+      where: { ...baseWhere, role: { [likeOp]: "loan officer" } },
       limit: 1000,
     });
   } catch {
@@ -217,10 +300,21 @@ async function findOfficerCandidates({ branchId }) {
 exports.getAllBorrowers = async (req, res) => {
   try {
     if (!Borrower) return res.json({ items: [], total: 0 });
-    const { q = "", branchId, page = 1, pageSize = 50 } = req.query;
+    const {
+      q = "",
+      branchId,
+      officerId,
+      status,
+      page = 1,
+      pageSize = 50,
+      sort = "createdAt",
+      dir = "desc",
+    } = req.query;
 
     const where = {};
     if (branchId) where.branchId = branchId;
+    if (officerId) where.loanOfficerId = officerId;
+    if (status) where.status = status;
     if (q) {
       where[Op.or] = [
         { name: { [likeOp]: `%${q}%` } },
@@ -233,26 +327,65 @@ exports.getAllBorrowers = async (req, res) => {
     const offset = (Math.max(1, Number(page)) - 1) * limit;
 
     const attributes = [
-      "id","name","nationalId","phone","address","branchId","loanOfficerId","loan_officer_id","createdAt","updatedAt",
+      "id",
+      "name",
+      "nationalId",
+      "phone",
+      "address",
+      "branchId",
+      "loanOfficerId",
+      "status",
+      "createdAt",
+      "updatedAt",
     ].filter((a) => Borrower.rawAttributes[a]);
 
     const include = [];
     if (Branch && Borrower.associations?.Branch) {
       include.push({ model: Branch, as: "Branch", attributes: ["id", "name"] });
     }
+    if (User && Borrower.associations?.loanOfficer) {
+      include.push({
+        model: User,
+        as: "loanOfficer",
+        attributes: ["id", "name", "firstName", "lastName"],
+      });
+    }
+
+    const safeOrders = [];
+    const dirSql = String(dir).toUpperCase() === "ASC" ? "ASC" : "DESC";
+    const sortKey = String(sort);
+    if (["name", "phone", "status", "createdAt", "updatedAt"].includes(sortKey)) {
+      safeOrders.push([sortKey, dirSql]);
+    } else if (sortKey === "branchName") {
+      safeOrders.push([{ model: Branch, as: "Branch" }, "name", dirSql]);
+    } else if (sortKey === "officerName") {
+      safeOrders.push([{ model: User, as: "loanOfficer" }, "name", dirSql]);
+    } else {
+      safeOrders.push(["createdAt", "DESC"]);
+    }
 
     const { rows, count } = await Borrower.findAndCountAll({
-      where, attributes, include, order: [["createdAt", "DESC"]], limit, offset,
+      where,
+      attributes,
+      include,
+      order: safeOrders,
+      limit,
+      offset,
     });
 
-    const items = rows.map((b) => {
-      const j = toApi(b);
-      if (j.phone) j.phone = normalizePhone(j.phone);
-      j.branchName = b.Branch?.name ?? j.branchName ?? null;
-      return j;
-    });
+    const items = await Promise.all(
+      rows.map(async (b) => {
+        const j = toApi(b);
+        if (j.phone) j.phone = normalizePhone(j.phone);
+        j.branchName = b.Branch?.name ?? j.branchName ?? null;
+        j.officerName = officerPrettyName(b.loanOfficer) ?? j.officerName ?? null;
 
-    return res.json({ items, total: count });
+        const d = await computeBorrowerDerived(b.id);
+        return { ...j, outstanding: d.outstanding };
+      })
+    );
+
+    res.json({ items, total: count });
   } catch (error) {
     console.error("getAllBorrowers error:", error);
     res.status(500).json({ error: "Failed to fetch borrowers" });
@@ -266,13 +399,22 @@ exports.createBorrower = async (req, res) => {
     const existingCols = await getExistingColumns(Borrower);
     const b = req.body || {};
     const firstName = (b.firstName || "").trim();
-    const lastName  = (b.lastName || "").trim();
+    const lastName = (b.lastName || "").trim();
     const displayName = (b.name || b.fullName || `${firstName} ${lastName}`.trim()).trim();
     if (!displayName) return res.status(400).json({ error: "name is required" });
 
-    const needsBranchId = !!Borrower.rawAttributes.branchId && Borrower.rawAttributes.branchId.allowNull === false;
-    const incomingBranchId = b.branchId || req.headers["x-branch-id"] || req.user?.branchId || null;
-    if (needsBranchId && !incomingBranchId) return res.status(400).json({ error: "branchId is required" });
+    // Branch handling and validation
+    const needsBranchId =
+      !!Borrower.rawAttributes.branchId && Borrower.rawAttributes.branchId.allowNull === false;
+    let branchIdToUse =
+      b.branchId || req.headers["x-branch-id"] || req.user?.branchId || null;
+    if (branchIdToUse === "") branchIdToUse = null;
+
+    if ((needsBranchId && !branchIdToUse) || (branchIdToUse != null && Branch)) {
+      if (!branchIdToUse) return res.status(400).json({ error: "branchId is required" });
+      const exists = await Branch.findByPk(branchIdToUse);
+      if (!exists) return res.status(400).json({ error: "branchId not found", branchId: branchIdToUse });
+    }
 
     // Officer assignment
     let desiredOfficerId = b.loanOfficerId || b.officerId || null;
@@ -299,57 +441,68 @@ exports.createBorrower = async (req, res) => {
         (officer.Roles || []).some((r) => (String(r.name) || "").toLowerCase() === "loan officer");
 
       if (!isOfficer) return res.status(400).json({ error: "Selected user is not a Loan Officer" });
-      if (incomingBranchId && officer.branchId && String(officer.branchId) !== String(incomingBranchId)) {
+      if (branchIdToUse && officer.branchId && String(officer.branchId) !== String(branchIdToUse)) {
         return res.status(400).json({ error: "Loan Officer not in selected branch" });
       }
     }
 
     if (!desiredOfficerId) {
-      const candidates = await findOfficerCandidates({ branchId: incomingBranchId });
+      const candidates = await findOfficerCandidates({ branchId: branchIdToUse || null });
       if (candidates.length) {
         const counts = {};
         for (const u of candidates) {
           counts[u.id] = Loan
             ? await Loan.count({
-                where: { loanOfficerId: u.id, status: { [Op.notIn]: ["closed", "rejected", "cancelled"] } },
+                where: {
+                  loanOfficerId: u.id,
+                  status: { [Op.notIn]: ["closed", "rejected", "cancelled"] },
+                },
               })
             : 0;
         }
-        desiredOfficerId = candidates.sort((a, b) => (counts[a.id] - counts[b.id]))[0]?.id ?? null;
+        desiredOfficerId =
+          candidates.sort((a, b) => counts[a.id] - counts[b.id])[0]?.id ?? null;
       }
     }
 
-    // Build payload guarded by existing columns
+    // Payload (guard by existing columns)
     const payload = {};
-    if (existingCols.includes("name"))        payload.name = displayName;
-    if (existingCols.includes("nationalId"))  payload.nationalId = b.nationalId || b.idNumber || null;
-    if (existingCols.includes("phone"))       payload.phone = normalizePhone(b.phone || null);
-    if (existingCols.includes("email"))       payload.email = b.email || null;
-    if (existingCols.includes("address"))     payload.address = b.addressLine || b.address || null;
-    if (existingCols.includes("status"))      payload.status = "active";
-    if (existingCols.includes("branch_id") || existingCols.includes("branchId")) {
-      if (incomingBranchId) payload.branchId = incomingBranchId;
-    }
-    if (existingCols.includes("gender"))                  payload.gender = b.gender || null;
-    if (existingCols.includes("birthDate"))               payload.birthDate = b.birthDate || null;
-    if (existingCols.includes("employmentStatus"))        payload.employmentStatus = b.employmentStatus || null;
-    if (existingCols.includes("occupation"))              payload.occupation = b.occupation || b.businessType || null;
-    if (existingCols.includes("idType"))                  payload.idType = b.idType || null;
-    if (existingCols.includes("idIssuedDate"))            payload.idIssuedDate = b.idIssuedDate || null;
-    if (existingCols.includes("idExpiryDate"))            payload.idExpiryDate = b.idExpiryDate || null;
-    if (existingCols.includes("nextKinName"))             payload.nextKinName = b.nextKinName || null;
-    if (existingCols.includes("nextKinPhone"))            payload.nextKinPhone = normalizePhone(b.nextKinPhone || null);
-    if (existingCols.includes("nextOfKinRelationship"))   payload.nextOfKinRelationship = b.nextOfKinRelationship || b.kinRelationship || null;
+    if (existingCols.includes("name")) payload.name = displayName;
+    if (existingCols.includes("nationalId"))
+      payload.nationalId = b.nationalId || b.idNumber || null;
+    if (existingCols.includes("phone")) payload.phone = normalizePhone(b.phone || null);
+    if (existingCols.includes("email")) payload.email = b.email || null;
+    if (existingCols.includes("address")) payload.address = b.addressLine || b.address || null;
+    if (existingCols.includes("status")) payload.status = b.status || "active";
+    if ((existingCols.includes("branch_id") || existingCols.includes("branchId")) && branchIdToUse != null)
+      payload.branchId = branchIdToUse;
 
-    // NEW / previously missing fields
-    if (existingCols.includes("maritalStatus"))           payload.maritalStatus = b.maritalStatus ?? null;
-    if (existingCols.includes("educationLevel"))          payload.educationLevel = b.educationLevel ?? null;
-    if (existingCols.includes("customerNumber"))          payload.customerNumber = b.customerNumber ?? b.customerNo ?? null;
-    if (existingCols.includes("tin"))                     payload.tin = b.tin ?? null;
-    if (existingCols.includes("nationality"))             payload.nationality = b.nationality ?? null;
-    if (existingCols.includes("loanType"))                payload.loanType = b.loanType ?? null;
-    if (existingCols.includes("regDate"))                 payload.regDate = b.regDate ?? b.registrationDate ?? null;
-    if (existingCols.includes("groupId"))                 payload.groupId = (b.loanType === "group") ? (b.groupId || null) : (b.groupId ?? null);
+    if (existingCols.includes("gender")) payload.gender = b.gender || null;
+    if (existingCols.includes("birthDate")) payload.birthDate = b.birthDate || null;
+    if (existingCols.includes("employmentStatus"))
+      payload.employmentStatus = b.employmentStatus || null;
+    if (existingCols.includes("occupation")) payload.occupation = b.occupation || b.businessType || null;
+    if (existingCols.includes("idType")) payload.idType = b.idType || null;
+    if (existingCols.includes("idIssuedDate")) payload.idIssuedDate = b.idIssuedDate || null;
+    if (existingCols.includes("idExpiryDate")) payload.idExpiryDate = b.idExpiryDate || null;
+    if (existingCols.includes("nextKinName")) payload.nextKinName = b.nextKinName || null;
+    if (existingCols.includes("nextKinPhone"))
+      payload.nextKinPhone = normalizePhone(b.nextKinPhone || null);
+    if (existingCols.includes("nextOfKinRelationship"))
+      payload.nextOfKinRelationship = b.nextOfKinRelationship || b.kinRelationship || null;
+
+    // NEWs
+    if (existingCols.includes("maritalStatus")) payload.maritalStatus = b.maritalStatus ?? null;
+    if (existingCols.includes("educationLevel")) payload.educationLevel = b.educationLevel ?? null;
+    if (existingCols.includes("customerNumber"))
+      payload.customerNumber = b.customerNumber ?? b.customerNo ?? null;
+    if (existingCols.includes("tin")) payload.tin = b.tin ?? null;
+    if (existingCols.includes("nationality")) payload.nationality = b.nationality ?? null;
+    if (existingCols.includes("loanType")) payload.loanType = b.loanType ?? "individual";
+    if (existingCols.includes("regDate"))
+      payload.regDate = b.regDate ?? b.registrationDate ?? null;
+    if (existingCols.includes("groupId"))
+      payload.groupId = b.loanType === "group" ? b.groupId || null : b.groupId ?? null;
 
     if (existingCols.includes("loanOfficerId") || existingCols.includes("loan_officer_id")) {
       payload.loanOfficerId = desiredOfficerId || null;
@@ -357,7 +510,7 @@ exports.createBorrower = async (req, res) => {
 
     const created = await Borrower.create(payload);
 
-    // photo: support req.file or req.files
+    // Photo
     const file =
       req.file ||
       (Array.isArray(req.files) && req.files.find((f) => f.fieldname === "photo")) ||
@@ -365,13 +518,18 @@ exports.createBorrower = async (req, res) => {
     const photoUrl = await maybePersistPhoto(created.id, file);
     if (photoUrl && existingCols.includes("photoUrl")) await created.update({ photoUrl });
 
-    // eager names
-    let branchName = null, officerName = null;
-    if (Branch && Borrower.associations?.Branch) {
+    // include names
+    let branchName = null,
+      officerName = null;
+    if ((Branch && Borrower.associations?.Branch) || (User && Borrower.associations?.loanOfficer)) {
       const reloaded = await Borrower.findByPk(created.id, {
         include: [
-          { model: Branch, as: "Branch", attributes: ["id", "name"] },
-          { model: User, as: "loanOfficer", attributes: ["id", "name", "firstName", "lastName"] },
+          ...(Branch && Borrower.associations?.Branch
+            ? [{ model: Branch, as: "Branch", attributes: ["id", "name"] }]
+            : []),
+          ...(User && Borrower.associations?.loanOfficer
+            ? [{ model: User, as: "loanOfficer", attributes: ["id", "name", "firstName", "lastName"] }]
+            : []),
         ],
       });
       branchName = reloaded?.Branch?.name ?? null;
@@ -437,31 +595,36 @@ exports.updateBorrower = async (req, res) => {
           method: "DELETE",
         });
       }
+      // if assigning first time, validate existence
+      if (!current && Branch && branchId != null) {
+        const exists = await Branch.findByPk(branchId);
+        if (!exists) return res.status(400).json({ error: "branchId not found", branchId });
+      }
     }
 
     const cols = await getExistingColumns(Borrower);
     const body = req.body || {};
     const patch = {};
-
     const setIf = (key, value) => {
       if (cols.includes(key) && typeof value !== "undefined") patch[key] = value;
     };
 
-    // Core fields
+    // Core
     setIf("name", body.name ?? body.fullName);
     setIf("nationalId", body.nationalId ?? body.idNumber);
     if (typeof body.phone !== "undefined") setIf("phone", normalizePhone(body.phone));
     setIf("email", body.email);
     setIf("address", body.address ?? body.addressLine);
+    setIf("status", body.status);
 
-    // Assignment
+    // Assignment (first set)
     if (Borrower.rawAttributes.branchId) {
       if (!b.branchId && typeof body.branchId !== "undefined") {
         if (cols.includes("branchId") || cols.includes("branch_id")) patch.branchId = body.branchId;
       }
     }
 
-    // Officer (uuid or int depending on schema)
+    // Officer
     const wantOfficer = body.officerId ?? body.loanOfficerId;
     if (typeof wantOfficer !== "undefined") {
       if (cols.includes("loanOfficerId") || cols.includes("loan_officer_id")) {
@@ -469,8 +632,7 @@ exports.updateBorrower = async (req, res) => {
       }
     }
 
-    // Status + KYC-ish
-    setIf("status", body.status);
+    // KYC-ish
     setIf("gender", body.gender);
     setIf("birthDate", body.birthDate || null);
     setIf("employmentStatus", body.employmentStatus);
@@ -478,16 +640,17 @@ exports.updateBorrower = async (req, res) => {
     setIf("idType", body.idType);
     setIf("idIssuedDate", body.idIssuedDate || null);
     setIf("idExpiryDate", body.idExpiryDate || null);
-    if (typeof body.nextKinPhone !== "undefined") setIf("nextKinPhone", normalizePhone(body.nextKinPhone));
+    if (typeof body.nextKinPhone !== "undefined")
+      setIf("nextKinPhone", normalizePhone(body.nextKinPhone));
     setIf("nextKinName", body.nextKinName);
     setIf("nextOfKinRelationship", body.nextOfKinRelationship);
 
-    // Assignment / misc
+    // misc
     setIf("groupId", body.groupId);
     setIf("loanType", body.loanType);
     setIf("regDate", body.regDate ?? body.registrationDate ?? null);
 
-    // NEW / previously missing fields
+    // new fields
     setIf("maritalStatus", body.maritalStatus);
     setIf("educationLevel", body.educationLevel);
     setIf("customerNumber", body.customerNumber ?? body.customerNo);
@@ -549,17 +712,24 @@ exports.deleteBorrower = async (req, res) => {
   }
 };
 
-/* ---------- Explicit Branch Assign/Unassign (Additive) ---------- */
+/* ---------- Explicit Branch Assign/Unassign ---------- */
 exports.assignBranch = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
-    if (!Borrower.rawAttributes.branchId) return res.status(422).json({ error: "Borrower model has no branchId column" });
+    if (!Borrower.rawAttributes.branchId)
+      return res.status(422).json({ error: "Borrower model has no branchId column" });
 
     const b = await Borrower.findByPk(req.params.id);
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     const newBranchId = Number.parseInt(String(req.body?.branchId), 10);
-    if (!Number.isFinite(newBranchId)) return res.status(400).json({ error: "branchId must be an integer" });
+    if (!Number.isFinite(newBranchId))
+      return res.status(400).json({ error: "branchId must be an integer" });
+
+    if (Branch) {
+      const exists = await Branch.findByPk(newBranchId);
+      if (!exists) return res.status(400).json({ error: "branchId not found", branchId: newBranchId });
+    }
 
     const current = b.branchId ?? null;
 
@@ -573,12 +743,15 @@ exports.assignBranch = async (req, res) => {
       });
     }
 
-    if (!current) {
-      await b.update({ branchId: newBranchId });
-    }
+    if (!current) await b.update({ branchId: newBranchId });
 
     const derived = await computeBorrowerDerived(b.id);
-    return res.json({ ok: true, borrowerId: b.id, branchId: b.branchId ?? newBranchId, ...derived });
+    return res.json({
+      ok: true,
+      borrowerId: b.id,
+      branchId: b.branchId ?? newBranchId,
+      ...derived,
+    });
   } catch (error) {
     console.error("assignBranch error:", error);
     return res.status(500).json({ error: "Failed to assign branch" });
@@ -588,13 +761,13 @@ exports.assignBranch = async (req, res) => {
 exports.unassignBranch = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
-    if (!Borrower.rawAttributes.branchId) return res.status(422).json({ error: "Borrower model has no branchId column" });
+    if (!Borrower.rawAttributes.branchId)
+      return res.status(422).json({ error: "Borrower model has no branchId column" });
 
     const b = await Borrower.findByPk(req.params.id);
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     const allowNull = Borrower.rawAttributes.branchId.allowNull !== false;
-
     if (!allowNull) {
       return res.status(422).json({
         error: "This environment does not allow unassign (branchId is NOT NULL).",
@@ -602,7 +775,7 @@ exports.unassignBranch = async (req, res) => {
       });
     }
 
-    if (b.branchId === null || typeof b.branchId === "undefined") {
+    if (b.branchId == null) {
       return res.json({ ok: true, borrowerId: b.id, branchId: null });
     }
 
@@ -635,7 +808,14 @@ exports.getRepaymentsByBorrower = async (req, res) => {
   try {
     if (!Loan || !LoanRepayment) return res.json([]);
     const repayAttrs = await safeAttributes(LoanRepayment, [
-      "id", "loanId", "amount", "amountPaid", "status", "dueDate", "date", "createdAt",
+      "id",
+      "loanId",
+      "amount",
+      "amountPaid",
+      "status",
+      "dueDate",
+      "date",
+      "createdAt",
     ]);
     const rows = await LoanRepayment.findAll({
       attributes: repayAttrs,
@@ -705,7 +885,7 @@ exports.getSavingsByBorrower = async (req, res) => {
       return res.json({
         balance: 0,
         transactions: [],
-                totals: { deposits: 0, withdrawals: 0, charges: 0, interest: 0 },
+        totals: { deposits: 0, withdrawals: 0, charges: 0, interest: 0 },
       });
     }
 
@@ -729,9 +909,7 @@ exports.getSavingsByBorrower = async (req, res) => {
     const txs = await SavingsTransaction.findAll({
       where: { borrowerId: req.params.id },
       attributes: txAttrs,
-      order: hasDate
-        ? [["date", "DESC"], ["createdAt", "DESC"]]
-        : [["createdAt", "DESC"]],
+      order: hasDate ? [["date", "DESC"], ["createdAt", "DESC"]] : [["createdAt", "DESC"]],
       limit: 500,
     });
 
@@ -1089,20 +1267,18 @@ exports.importBorrowers = async (req, res) => {
       if (!name) continue;
 
       const phone = phoneIdx !== -1 ? normalizePhone(cols[phoneIdx]) : null;
-      const nationalId = nidIdx !== -1 ? (cols[nidIdx] || null) : null;
+      const nationalId = nidIdx !== -1 ? cols[nidIdx] || null : null;
 
       const payload = { status: "active" };
       if (existingCols.includes("name")) payload.name = name;
       if (existingCols.includes("phone")) payload.phone = phone;
       if (existingCols.includes("nationalId")) payload.nationalId = nationalId;
 
-      // branchId: integer
       if (existingCols.includes("branch_id") || existingCols.includes("branchId")) {
         const raw = branchIdIdx !== -1 ? cols[branchIdIdx] : null;
         if (raw && Number.isFinite(Number(raw))) payload.branchId = Number(raw);
       }
 
-      // loanOfficerId: accept UUID (preferred) or numeric (legacy)
       if (existingCols.includes("loanOfficerId") || existingCols.includes("loan_officer_id")) {
         const raw = officerIdIdx !== -1 ? cols[officerIdIdx] : null;
         if (raw) {
@@ -1115,29 +1291,27 @@ exports.importBorrowers = async (req, res) => {
         payload.status = String(cols[statusIdx]).toLowerCase();
       }
 
-      // Prefer findOrCreate if nationalId exists
-      let b;
+      let row;
       if (existingCols.includes("nationalId") && nationalId) {
-        const [row, createdFlag] = await Borrower.findOrCreate({
+        const [r, createdFlag] = await Borrower.findOrCreate({
           where: { nationalId },
           defaults: payload,
         });
         if (!createdFlag) {
           const patch = {};
-          if (existingCols.includes("phone") && phone && !row.phone) patch.phone = phone;
-          if (existingCols.includes("name") && name && row.name !== name) patch.name = name;
-          if (Object.keys(patch).length) await row.update(patch);
+          if (existingCols.includes("phone") && phone && !r.phone) patch.phone = phone;
+          if (existingCols.includes("name") && name && r.name !== name) patch.name = name;
+          if (Object.keys(patch).length) await r.update(patch);
         }
-        b = row;
+        row = r;
       } else {
-        b = await Borrower.create(payload);
+        row = await Borrower.create(payload);
       }
 
-      created.push(toApi(b));
-      if (created.length >= 5000) break; // safety cap
+      created.push(toApi(row));
+      if (created.length >= 5000) break;
     }
 
-    // Normalize phone in response
     const items = created.map((j) => {
       const x = { ...j };
       if (x.phone) x.phone = normalizePhone(x.phone);
@@ -1197,9 +1371,7 @@ exports.summaryReport = async (req, res) => {
       const txs = await SavingsTransaction.findAll({
         where: { borrowerId: b.id },
         attributes: txAttrs,
-        order: hasDate
-          ? [["date", "DESC"], ["createdAt", "DESC"]]
-          : [["createdAt", "DESC"]],
+        order: hasDate ? [["date", "DESC"], ["createdAt", "DESC"]] : [["createdAt", "DESC"]],
       });
       txCount = txs.length;
 
