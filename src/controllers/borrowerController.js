@@ -340,11 +340,20 @@ exports.createBorrower = async (req, res) => {
     if (existingCols.includes("nextKinName"))             payload.nextKinName = b.nextKinName || null;
     if (existingCols.includes("nextKinPhone"))            payload.nextKinPhone = normalizePhone(b.nextKinPhone || null);
     if (existingCols.includes("nextOfKinRelationship"))   payload.nextOfKinRelationship = b.nextOfKinRelationship || b.kinRelationship || null;
-    if (existingCols.includes("regDate"))                 payload.regDate = b.regDate || null;
+
+    // NEW / previously missing fields
+    if (existingCols.includes("maritalStatus"))           payload.maritalStatus = b.maritalStatus ?? null;
+    if (existingCols.includes("educationLevel"))          payload.educationLevel = b.educationLevel ?? null;
+    if (existingCols.includes("customerNumber"))          payload.customerNumber = b.customerNumber ?? b.customerNo ?? null;
+    if (existingCols.includes("tin"))                     payload.tin = b.tin ?? null;
+    if (existingCols.includes("nationality"))             payload.nationality = b.nationality ?? null;
+    if (existingCols.includes("loanType"))                payload.loanType = b.loanType ?? null;
+    if (existingCols.includes("regDate"))                 payload.regDate = b.regDate ?? b.registrationDate ?? null;
+    if (existingCols.includes("groupId"))                 payload.groupId = (b.loanType === "group") ? (b.groupId || null) : (b.groupId ?? null);
+
     if (existingCols.includes("loanOfficerId") || existingCols.includes("loan_officer_id")) {
       payload.loanOfficerId = desiredOfficerId || null;
     }
-    if (existingCols.includes("groupId"))                 payload.groupId = b.loanType === "group" ? (b.groupId || null) : null;
 
     const created = await Borrower.create(payload);
 
@@ -440,10 +449,10 @@ exports.updateBorrower = async (req, res) => {
 
     // Core fields
     setIf("name", body.name ?? body.fullName);
-    setIf("nationalId", body.nationalId);
+    setIf("nationalId", body.nationalId ?? body.idNumber);
     if (typeof body.phone !== "undefined") setIf("phone", normalizePhone(body.phone));
     setIf("email", body.email);
-    setIf("address", body.address);
+    setIf("address", body.address ?? body.addressLine);
 
     // Assignment
     if (Borrower.rawAttributes.branchId) {
@@ -472,8 +481,18 @@ exports.updateBorrower = async (req, res) => {
     if (typeof body.nextKinPhone !== "undefined") setIf("nextKinPhone", normalizePhone(body.nextKinPhone));
     setIf("nextKinName", body.nextKinName);
     setIf("nextOfKinRelationship", body.nextOfKinRelationship);
+
+    // Assignment / misc
     setIf("groupId", body.groupId);
-    setIf("regDate", body.regDate);
+    setIf("loanType", body.loanType);
+    setIf("regDate", body.regDate ?? body.registrationDate ?? null);
+
+    // NEW / previously missing fields
+    setIf("maritalStatus", body.maritalStatus);
+    setIf("educationLevel", body.educationLevel);
+    setIf("customerNumber", body.customerNumber ?? body.customerNo);
+    setIf("tin", body.tin);
+    setIf("nationality", body.nationality);
 
     await b.update(patch);
 
@@ -686,12 +705,22 @@ exports.getSavingsByBorrower = async (req, res) => {
       return res.json({
         balance: 0,
         transactions: [],
-        totals: { deposits: 0, withdrawals: 0, charges: 0, interest: 0 },
+                totals: { deposits: 0, withdrawals: 0, charges: 0, interest: 0 },
       });
     }
 
     const txAttrs = await safeAttributes(SavingsTransaction, [
-      "id", "borrowerId", "type", "amount", "date", "notes", "reference", "status", "reversed", "createdAt", "updatedAt",
+      "id",
+      "borrowerId",
+      "type",
+      "amount",
+      "date",
+      "notes",
+      "reference",
+      "status",
+      "reversed",
+      "createdAt",
+      "updatedAt",
     ]);
 
     const existingCols = await getExistingColumns(SavingsTransaction);
@@ -700,7 +729,9 @@ exports.getSavingsByBorrower = async (req, res) => {
     const txs = await SavingsTransaction.findAll({
       where: { borrowerId: req.params.id },
       attributes: txAttrs,
-      order: hasDate ? [["date", "DESC"], ["createdAt", "DESC"]] : [["createdAt", "DESC"]],
+      order: hasDate
+        ? [["date", "DESC"], ["createdAt", "DESC"]]
+        : [["createdAt", "DESC"]],
       limit: 500,
     });
 
@@ -711,11 +742,24 @@ exports.getSavingsByBorrower = async (req, res) => {
       if (t.reversed === true) continue;
       const amt = safeNum(t.amount);
       switch (t.type) {
-        case "deposit": totals.deposits += amt; balance += amt; break;
-        case "withdrawal": totals.withdrawals += amt; balance -= amt; break;
-        case "charge": totals.charges += amt; balance -= amt; break;
-        case "interest": totals.interest += amt; balance += amt; break;
-        default: break;
+        case "deposit":
+          totals.deposits += amt;
+          balance += amt;
+          break;
+        case "withdrawal":
+          totals.withdrawals += amt;
+          balance -= amt;
+          break;
+        case "charge":
+          totals.charges += amt;
+          balance -= amt;
+          break;
+        case "interest":
+          totals.interest += amt;
+          balance += amt;
+          break;
+        default:
+          break;
       }
     }
 
@@ -947,10 +991,12 @@ exports.groupReports = async (_req, res) => {
         const memberIds = (g.GroupMembers || []).map((m) => m.borrowerId);
         const membersCount = memberIds.length;
 
-        let totalLoans = 0, totalLoanAmount = 0;
+        let totalLoans = 0,
+          totalLoanAmount = 0;
         if (Loan && membersCount) {
           totalLoans = await Loan.count({ where: { borrowerId: memberIds } });
-          totalLoanAmount = (await Loan.sum("amount", { where: { borrowerId: memberIds } })) || 0;
+          totalLoanAmount =
+            (await Loan.sum("amount", { where: { borrowerId: memberIds } })) || 0;
         }
         return { id: g.id, name: g.name, membersCount, totalLoans, totalLoanAmount };
       })
@@ -1124,13 +1170,26 @@ exports.summaryReport = async (req, res) => {
         include: [{ model: Loan, where: { borrowerId: b.id }, attributes: [] }],
       });
     }
-    const totalRepayments = reps.reduce((acc, r) => acc + safeNum(r.amountPaid ?? r.amount), 0);
+    const totalRepayments = reps.reduce(
+      (acc, r) => acc + safeNum(r.amountPaid ?? r.amount),
+      0
+    );
 
     let balance = 0;
     let txCount = 0;
     if (SavingsTransaction) {
       const txAttrs = await safeAttributes(SavingsTransaction, [
-        "id", "borrowerId", "type", "amount", "date", "notes", "reference", "status", "reversed", "createdAt", "updatedAt",
+        "id",
+        "borrowerId",
+        "type",
+        "amount",
+        "date",
+        "notes",
+        "reference",
+        "status",
+        "reversed",
+        "createdAt",
+        "updatedAt",
       ]);
       const existingCols = await getExistingColumns(SavingsTransaction);
       const hasDate = existingCols.includes("date");
@@ -1138,11 +1197,14 @@ exports.summaryReport = async (req, res) => {
       const txs = await SavingsTransaction.findAll({
         where: { borrowerId: b.id },
         attributes: txAttrs,
-        order: hasDate ? [["date", "DESC"], ["createdAt", "DESC"]] : [["createdAt", "DESC"]],
+        order: hasDate
+          ? [["date", "DESC"], ["createdAt", "DESC"]]
+          : [["createdAt", "DESC"]],
       });
       txCount = txs.length;
 
-      let dep = 0, wdr = 0;
+      let dep = 0,
+        wdr = 0;
       for (const t of txs) {
         if (t.reversed === true) continue;
         if (t.type === "deposit") dep += safeNum(t.amount);
@@ -1180,7 +1242,9 @@ exports.globalBorrowerReport = async (req, res) => {
       borrowers.map(async (b) => {
         const id = b.id;
         const loansCount = Loan ? await Loan.count({ where: { borrowerId: id } }) : 0;
-        const loansTotal = Loan ? (await Loan.sum("amount", { where: { borrowerId: id } })) || 0 : 0;
+        const loansTotal = Loan
+          ? (await Loan.sum("amount", { where: { borrowerId: id } })) || 0
+          : 0;
 
         let repaymentsTotal = 0;
         if (LoanRepayment && Loan) {
@@ -1189,7 +1253,14 @@ exports.globalBorrowerReport = async (req, res) => {
               include: [{ model: Loan, where: { borrowerId: id }, attributes: [] }],
             })) || 0;
         }
-        return { id, name: b.name, status: b.status, loansCount, loansTotal, repaymentsTotal };
+        return {
+          id,
+          name: b.name,
+          status: b.status,
+          loansCount,
+          loansTotal,
+          repaymentsTotal,
+        };
       })
     );
 
