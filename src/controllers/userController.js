@@ -38,12 +38,38 @@ const normalizeUserInput = (body = {}) => {
   return clean;
 };
 
-const deriveRoleFields = (json) => {
-  const rolesArr = Array.isArray(json.Roles) ? json.Roles : [];
-  const roleCodes = rolesArr.map(r => r.code || r.slug || r.name).filter(Boolean);
-  const roleNames = rolesArr.map(r => r.name).filter(Boolean);
-  const primary = roleCodes[0] || json.role || null;
-  return { role: primary, roles: roleCodes, roleNames };
+/* ---------- New: consistent display fields for FE ---------- */
+const titleize = (s) => String(s || '')
+  .replace(/[_\-]+/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .replace(/\b\w/g, (c) => c.toUpperCase());
+
+const withDisplayFields = (json) => {
+  // Name fallback chain so the table never shows "—"
+  const name =
+    json.name ||
+    json.fullName ||
+    json.username ||
+    (json.email ? String(json.email).split('@')[0] : null) ||
+    null;
+
+  // Roles
+  const rolesArr  = Array.isArray(json.Roles) ? json.Roles : [];
+  const roleCodes = rolesArr.map((r) => r.code || r.slug || r.name).filter(Boolean);
+  const roleNames = rolesArr.map((r) => r.name).filter(Boolean);
+
+  const primaryCode  = roleCodes[0] || json.role || null;
+  const primaryLabel = (roleNames[0] || (primaryCode ? titleize(primaryCode) : null)) || null;
+
+  return {
+    ...json,
+    name,
+    role: primaryCode,       // machine-friendly (code/slug or legacy name)
+    roleLabel: primaryLabel, // human label for the table
+    roles: roleCodes,        // list of codes
+    roleNames,               // list of human names
+  };
 };
 
 const buildIncludes = ({ roleId, roleCode, branchId }) => {
@@ -211,11 +237,7 @@ exports.getUsers = async (req, res) => {
       distinct: true,
     });
 
-    const out = rows.map((u) => {
-      const json = sanitizeUser(u);
-      return { ...json, ...deriveRoleFields(json) };
-    });
-
+    const out = rows.map((u) => withDisplayFields(sanitizeUser(u)));
     res.json(out);
   } catch (err) {
     console.error('getUsers error:', err);
@@ -232,7 +254,7 @@ exports.getUserById = async (req, res) => {
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
     const json = sanitizeUser(user);
-    return res.json({ ...json, ...deriveRoleFields(json) });
+    return res.json(withDisplayFields(json));
   } catch (err) {
     console.error('getUserById error:', err);
     res.status(500).json({ error: 'Failed to fetch user' });
@@ -271,7 +293,7 @@ exports.createUser = async (req, res) => {
     });
 
     const json = sanitizeUser(fresh);
-    return res.status(201).json({ ...json, ...deriveRoleFields(json) });
+    return res.status(201).json(withDisplayFields(json));
   } catch (err) {
     await safeRollback(t);
     console.error('createUser error:', err);
@@ -314,7 +336,7 @@ exports.updateUser = async (req, res) => {
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
     });
     const json = sanitizeUser(fresh);
-    res.json({ ...json, ...deriveRoleFields(json) });
+    res.json(withDisplayFields(json));
   } catch (err) {
     await safeRollback(t);
     console.error('updateUser error:', err);
@@ -416,7 +438,6 @@ exports.assignRoles = async (req, res) => {
     let codeToId = new Map();
     const wanted = [...new Set([...codesReplace, ...codesAdd, ...codesRemove])];
     if (wanted.length) {
-      // Fetch minimal role data and map by code (or by name if code doesn't exist)
       const attrs = ['id', 'name'].concat(hasCode ? ['code'] : []);
       const all = await Role.findAll({ attributes: attrs });
       const makeKey = (r) => String((hasCode ? r.code : r.name) || '').toLowerCase();
@@ -431,7 +452,6 @@ exports.assignRoles = async (req, res) => {
     const idsAdd    = [...asArray(add),    ...codesAdd.map(c => codeToId.get(c)).filter(Boolean)];
     const idsRemove = [...asArray(remove), ...codesRemove.map(c => codeToId.get(c)).filter(Boolean)];
 
-    // Validate helper
     const validateIds = async (ids) => {
       if (!ids?.length) return null;
       const found = await Role.findAll({ where: { id: ids } });
@@ -489,7 +509,7 @@ exports.assignRoles = async (req, res) => {
     });
 
     const json = sanitizeUser(fresh);
-    return res.json({ ...json, ...deriveRoleFields(json) });
+    return res.json(withDisplayFields(json));
   } catch (err) {
     await safeRollback(t);
     console.error('assignRoles error:', err);
