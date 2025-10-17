@@ -1,41 +1,33 @@
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
-  const Role = sequelize.define(
-    'Role',
-    {
-      id:         { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
-      name:       { type: DataTypes.STRING(120), allowNull: false, unique: true },
-      description:{ type: DataTypes.TEXT, allowNull: true, defaultValue: '' },
-      isSystem:   { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false, field: 'is_system' },
-    },
-    {
-      tableName: 'roles',
-      underscored: true,
-      timestamps: true,
-      indexes: [{ unique: true, fields: ['name'] }],
-    }
-  );
+  const Role = sequelize.define('Role', {
+    id:          { type: DataTypes.UUID, primaryKey: true, defaultValue: DataTypes.UUIDV4 },
+    name:        { type: DataTypes.STRING(120), allowNull: false, unique: true },
+    description: { type: DataTypes.STRING(255), allowNull: false, defaultValue: '' },
+    isSystem:    { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false, field: 'is_system' },
+  }, {
+    tableName: 'roles',
+    underscored: true,           // this table actually uses snake_case columns (created_at, etc.)
+    timestamps: true,
+    indexes: [{ unique: true, fields: ['name'] }],
+  });
 
   Role.associate = (models) => {
-    // Users: primary role (users.role_id)
     if (models.User) {
-      Role.hasMany(models.User, { foreignKey: 'roleId', sourceKey: 'id', as: 'primaryUsers' });
       Role.belongsToMany(models.User, {
         through: models.UserRole || 'user_roles',
-        foreignKey: 'roleId',
-        otherKey: 'userId',
-        as: 'users',
+        foreignKey: { name: 'roleId', field: 'role_id' },
+        otherKey:   { name: 'userId', field: 'user_id' },
+        as: 'Users',
       });
     }
-
-    // Roles ↔ Permissions (optional, only if present)
-    if (models.Permission && (models.RolePermission || sequelize.models.RolePermission)) {
+    if (models.Permission && models.RolePermission) {
       Role.belongsToMany(models.Permission, {
-        through: models.RolePermission || 'role_permissions',
-        foreignKey: 'roleId',
-        otherKey: 'permissionId',
-        as: 'permissions',
+        through: models.RolePermission,
+        foreignKey: { name: 'roleId', field: 'role_id' },
+        otherKey:   { name: 'permissionId', field: 'permission_id' },
+        as: 'Permissions',
       });
     }
   };
