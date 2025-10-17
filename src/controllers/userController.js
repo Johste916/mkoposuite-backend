@@ -1,7 +1,7 @@
 'use strict';
 
 const bcrypt = require('bcryptjs');
-const { Op } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
 const {
   sequelize,
   User,
@@ -38,7 +38,7 @@ const normalizeUserInput = (body = {}) => {
   return clean;
 };
 
-/* ---------- New: consistent display fields for FE ---------- */
+/* ---------- Consistent display fields (name + role) ---------- */
 const titleize = (s) => String(s || '')
   .replace(/[_\-]+/g, ' ')
   .replace(/\s+/g, ' ')
@@ -46,7 +46,6 @@ const titleize = (s) => String(s || '')
   .replace(/\b\w/g, (c) => c.toUpperCase());
 
 const withDisplayFields = (json) => {
-  // Name fallback chain so the table never shows "—"
   const name =
     json.name ||
     json.fullName ||
@@ -54,24 +53,33 @@ const withDisplayFields = (json) => {
     (json.email ? String(json.email).split('@')[0] : null) ||
     null;
 
-  // Roles
   const rolesArr  = Array.isArray(json.Roles) ? json.Roles : [];
   const roleCodes = rolesArr.map((r) => r.code || r.slug || r.name).filter(Boolean);
   const roleNames = rolesArr.map((r) => r.name).filter(Boolean);
 
-  const primaryCode  = roleCodes[0] || json.role || null;
-  const primaryLabel = (roleNames[0] || (primaryCode ? titleize(primaryCode) : null)) || null;
+  const primaryCode  = roleCodes[0] || (json.role ? String(json.role).toLowerCase() : null) || null;
+  const primaryName  = roleNames[0] || (json.role ? titleize(json.role) : null) || null;
+
+  const roleLabel   = primaryName || (primaryCode ? titleize(primaryCode) : null);
+  const roleDisplay = roleLabel || primaryCode || null;
 
   return {
     ...json,
     name,
-    role: primaryCode,       // machine-friendly (code/slug or legacy name)
-    roleLabel: primaryLabel, // human label for the table
-    roles: roleCodes,        // list of codes
-    roleNames,               // list of human names
+    // keep backward-compat `role` as machine-ish, but don't leave it empty if only name is known
+    role: primaryCode || primaryName || null,
+    roleCode: primaryCode,
+    roleLabel,         // pretty
+    roleDisplay,       // best possible for UI
+    roles: roleCodes,  // list of codes
+    roleNames,         // list of names
+    // also add snake_case for any legacy FE that might read them
+    role_name: roleLabel,
+    role_code: primaryCode,
   };
 };
 
+/* ---------- Include builders ---------- */
 const buildIncludes = ({ roleId, roleCode, branchId }) => {
   const asns = User.associations || {};
   const includes = [];
@@ -107,6 +115,7 @@ const buildIncludes = ({ roleId, roleCode, branchId }) => {
   return includes;
 };
 
+/* ---------- Role & Branch setters ---------- */
 const setUserRoles = async (user, roleIds, t) => {
   if (!Array.isArray(roleIds)) return;
   if (typeof user.setRoles === 'function') {
@@ -148,7 +157,7 @@ const setUserBranches = async (user, branchIds, t) => {
   }
 };
 
-// avoid double-hash & re-hash of an already-hashed value
+/* ---------- Password hashing ---------- */
 const hashAndAssignPassword = async (payload) => {
   const pwCol = resolvePasswordHashColumn();
   if (!pwCol) return payload;
@@ -187,6 +196,45 @@ const validateCreate = (data) => {
   else if (String(data.password).length < 6) errors.push('Password must be at least 6 characters.');
 
   return errors;
+};
+
+/* ---------- Helper: fallback hydrate roles for many users ---------- */
+const hydrateRolesForUsers = async (users) => {
+  try {
+    const ids = users.map((u) => (u.id || (u.get ? u.get('id') : null))).filter(Boolean);
+    if (!ids.length || !sequelize) return;
+
+    const rows = await sequelize.query(
+      `
+      SELECT ur."userId" as "userId", r.id as "id", r.name as "name", ${hasAttr(Role, 'code') ? 'r.code as "code",' : "NULL as \"code\","}
+             ROW_NUMBER() OVER (PARTITION BY ur."userId" ORDER BY r.name) as rn
+      FROM "UserRoles" ur
+      JOIN "Roles" r ON r.id = ur."roleId"
+      WHERE ur."userId" IN (:ids)
+      `,
+      { replacements: { ids }, type: QueryTypes.SELECT }
+    );
+
+    const map = new Map();
+    for (const r of rows) {
+      const list = map.get(r.userId) || [];
+      list.push({ id: r.id, name: r.name, ...(r.code ? { code: r.code } : {}) });
+      map.set(r.userId, list);
+    }
+
+    for (const u of users) {
+      const uid = u.id || (u.get ? u.get('id') : null);
+      if (!uid) continue;
+      const has = u.Roles && Array.isArray(u.Roles) && u.Roles.length > 0;
+      if (!has) {
+        const roles = map.get(uid) || [];
+        if (u.setDataValue) u.setDataValue('Roles', roles);
+        else u.Roles = roles;
+      }
+    }
+  } catch {
+    // ignore—fallback best effort
+  }
 };
 
 /* --------------------------------- GET /api/users --------------------------------- */
@@ -237,6 +285,9 @@ exports.getUsers = async (req, res) => {
       distinct: true,
     });
 
+    // If Roles didn't hydrate, fetch them in one shot and attach
+    await hydrateRolesForUsers(rows);
+
     const out = rows.map((u) => withDisplayFields(sanitizeUser(u)));
     res.json(out);
   } catch (err) {
@@ -253,6 +304,9 @@ exports.getUserById = async (req, res) => {
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    await hydrateRolesForUsers([user]);
+
     const json = sanitizeUser(user);
     return res.json(withDisplayFields(json));
   } catch (err) {
@@ -291,6 +345,8 @@ exports.createUser = async (req, res) => {
       include: buildIncludes({}),
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
     });
+
+    await hydrateRolesForUsers([fresh]);
 
     const json = sanitizeUser(fresh);
     return res.status(201).json(withDisplayFields(json));
@@ -335,6 +391,9 @@ exports.updateUser = async (req, res) => {
       include: buildIncludes({}),
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
     });
+
+    await hydrateRolesForUsers([fresh]);
+
     const json = sanitizeUser(fresh);
     res.json(withDisplayFields(json));
   } catch (err) {
@@ -433,12 +492,11 @@ exports.assignRoles = async (req, res) => {
     const codesAdd    = asArray(addCodes).filter(Boolean).map(s => String(s).toLowerCase());
     const codesRemove = asArray(removeCodes).filter(Boolean).map(s => String(s).toLowerCase());
 
-    // Resolve codes -> IDs.
     const hasCode = !!(Role?.rawAttributes?.code);
     let codeToId = new Map();
     const wanted = [...new Set([...codesReplace, ...codesAdd, ...codesRemove])];
     if (wanted.length) {
-      const attrs = ['id', 'name'].concat(hasCode ? ['code'] : []);
+      const attrs = ['id', 'name'].concat(hasAttr(Role, 'code') ? ['code'] : []);
       const all = await Role.findAll({ attributes: attrs });
       const makeKey = (r) => String((hasCode ? r.code : r.name) || '').toLowerCase();
       codeToId = new Map(all.map(r => [makeKey(r), r.id]));
@@ -507,6 +565,8 @@ exports.assignRoles = async (req, res) => {
     const fresh = await User.findByPk(user.id, {
       include: [{ model: Role, as: 'Roles', attributes: ['id', 'name'].concat(hasAttr(Role, 'code') ? ['code'] : []), through: { attributes: [] } }],
     });
+
+    await hydrateRolesForUsers([fresh]);
 
     const json = sanitizeUser(fresh);
     return res.json(withDisplayFields(json));
