@@ -139,7 +139,7 @@ async function getUserRoleCodes(userId) {
     );
     return rows.map(r => r.code).filter(Boolean);
   } catch (e) {
-    // table missing or column missing — ignore silently
+    // table/column might be missing — ignore
     return [];
   }
 }
@@ -152,13 +152,11 @@ exports.login = async (req, res) => {
     return res.status(400).json({ message: 'Email and password are required' });
   }
 
-  // If running in production with the fallback secret, refuse to proceed.
   if ((!process.env.JWT_SECRET && NODE_ENV === 'production') || !JWT_SECRET) {
     return res.status(500).json({ message: 'Server misconfigured (missing JWT secret)' });
   }
 
   if (!sequelize || !QueryTypes) {
-    // Without models/DB, new signups won’t persist → they cannot log in later.
     return res.status(500).json({
       message:
         'Database not available. Ensure models are loaded and DB is connected (NODE_ENV=production with DATABASE_URL/SSL for Supabase).',
@@ -166,7 +164,6 @@ exports.login = async (req, res) => {
   }
 
   try {
-    // SELECT * to tolerate column differences across environments
     const rows = await sequelize.query(
       `SELECT *
          FROM "Users"

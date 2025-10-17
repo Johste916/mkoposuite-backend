@@ -8,7 +8,7 @@ const {
   Role,
   Branch,
   UserRole,
-  UserBranch, // ✅ use your actual join model
+  UserBranch,
 } = require('../models');
 
 /* ---------------------------- helpers ---------------------------- */
@@ -21,18 +21,16 @@ const sanitizeUser = (u) => {
   delete json.passwordHash; delete json.password_hash; delete json.password;
   return json;
 };
+const hasAttr = (model, attr) => !!(model?.rawAttributes?.[attr]);
 
 const normalizeUserInput = (body = {}) => {
   const clean = { ...body };
 
-  // Map possible frontend fields to what DB expects
   clean.name = clean.name || clean.fullName || clean.username || '';
   if (!clean.name && clean.email && typeof clean.email === 'string') {
-    // fallback: use email local part as name
     clean.name = clean.email.split('@')[0];
   }
 
-  // trim strings
   ['name', 'email', 'password', 'role'].forEach((k) => {
     if (clean[k] && typeof clean[k] === 'string') clean[k] = clean[k].trim();
   });
@@ -40,7 +38,13 @@ const normalizeUserInput = (body = {}) => {
   return clean;
 };
 
-const hasAttr = (model, attr) => !!(model?.rawAttributes?.[attr]);
+const deriveRoleFields = (json) => {
+  const rolesArr = Array.isArray(json.Roles) ? json.Roles : [];
+  const roleCodes = rolesArr.map(r => r.code || r.slug || r.name).filter(Boolean);
+  const roleNames = rolesArr.map(r => r.name).filter(Boolean);
+  const primary = roleCodes[0] || json.role || null;
+  return { role: primary, roles: roleCodes, roleNames };
+};
 
 const buildIncludes = ({ roleId, roleCode, branchId }) => {
   const asns = User.associations || {};
@@ -111,7 +115,6 @@ const setUserBranches = async (user, branchIds, t) => {
     }
   }
 
-  // Fallback: single branchId column on Users
   const userBranchFk = pickFirstKey(User.rawAttributes, ['branchId', 'BranchId', 'branch_id']);
   if (userBranchFk) {
     const first = Array.isArray(branchIds) ? branchIds[0] : branchIds;
@@ -119,12 +122,10 @@ const setUserBranches = async (user, branchIds, t) => {
   }
 };
 
-// SAFE: avoid double-hash & re-hash of an already-hashed value
+// avoid double-hash & re-hash of an already-hashed value
 const hashAndAssignPassword = async (payload) => {
   const pwCol = resolvePasswordHashColumn();
   if (!pwCol) return payload;
-
-  // if already has password_hash, assume trusted (do NOT rehash)
   if (payload[pwCol]) return payload;
 
   if (payload.password) {
@@ -140,7 +141,6 @@ const hashAndAssignPassword = async (payload) => {
 const asArray = (v) =>
   Array.isArray(v) ? v : v == null ? [] : typeof v === 'string' ? [v] : [v];
 
-/* --------- NEW: safe rollback helper to avoid "finished with state: commit" --------- */
 const safeRollback = async (t) => {
   try {
     if (t && typeof t.rollback === 'function' && !t.finished) {
@@ -183,16 +183,13 @@ exports.getUsers = async (req, res) => {
     if (typeof isActive !== 'undefined' && activeCol) {
       const attr = User.rawAttributes[activeCol];
       const truthy = String(isActive) === 'true' || String(isActive) === '1';
-      // boolean column → true/false
       if (attr?.type?.key === 'BOOLEAN') {
         where[activeCol] = truthy;
       } else {
-        // enum/string column → 'active'/'inactive'
         where[activeCol] = truthy ? 'active' : 'inactive';
       }
     }
 
-    // role filtering: prefer include filter on Role.code if M:N, fall back to legacy Users.role
     const roleCode = role && hasAttr(Role, 'code') ? String(role).toLowerCase() : null;
     if (!roleId && !roleCode && role) {
       where.role = role; // legacy
@@ -214,7 +211,12 @@ exports.getUsers = async (req, res) => {
       distinct: true,
     });
 
-    res.json(rows.map(sanitizeUser));
+    const out = rows.map((u) => {
+      const json = sanitizeUser(u);
+      return { ...json, ...deriveRoleFields(json) };
+    });
+
+    res.json(out);
   } catch (err) {
     console.error('getUsers error:', err);
     res.status(500).json({ error: 'Failed to list users' });
@@ -229,7 +231,8 @@ exports.getUserById = async (req, res) => {
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
-    res.json(sanitizeUser(user));
+    const json = sanitizeUser(user);
+    return res.json({ ...json, ...deriveRoleFields(json) });
   } catch (err) {
     console.error('getUserById error:', err);
     res.status(500).json({ error: 'Failed to fetch user' });
@@ -248,10 +251,8 @@ exports.createUser = async (req, res) => {
       return res.status(400).json({ error: errors[0], errors });
     }
 
-    // pre-hash if "password" provided; model hook will also hash if needed
     const payload = await hashAndAssignPassword(rest);
 
-    // Unique email guard (cleaner 409 vs generic 400)
     const existing = await User.findOne({ where: { email: payload.email } });
     if (existing) {
       await safeRollback(t);
@@ -268,7 +269,9 @@ exports.createUser = async (req, res) => {
       include: buildIncludes({}),
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
     });
-    res.status(201).json(sanitizeUser(fresh));
+
+    const json = sanitizeUser(fresh);
+    return res.status(201).json({ ...json, ...deriveRoleFields(json) });
   } catch (err) {
     await safeRollback(t);
     console.error('createUser error:', err);
@@ -295,7 +298,6 @@ exports.updateUser = async (req, res) => {
 
     const payload = password ? await hashAndAssignPassword({ ...rest, password }) : rest;
 
-    // prevent accidental email collision
     if (payload.email && payload.email !== user.email) {
       const dup = await User.findOne({ where: { email: payload.email } });
       if (dup) { await safeRollback(t); return res.status(409).json({ error: 'Email already in use.' }); }
@@ -311,7 +313,8 @@ exports.updateUser = async (req, res) => {
       include: buildIncludes({}),
       attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
     });
-    res.json(sanitizeUser(fresh));
+    const json = sanitizeUser(fresh);
+    res.json({ ...json, ...deriveRoleFields(json) });
   } catch (err) {
     await safeRollback(t);
     console.error('updateUser error:', err);
@@ -371,8 +374,10 @@ exports.toggleStatus = async (req, res) => {
 /* ------------------------- assignRoles ------------------------- */
 /**
  * Accepts any of the following in body:
+ * - roleId: UUID (single)
  * - roleIds: UUID[]
- * - roles / roleCodes: string[] of role codes (e.g., ["admin","manager"])
+ * - role / role_code: single role code
+ * - roles / roleCodes: string[] of role codes
  * - add / remove: UUID[] (incremental)
  * - addCodes / removeCodes: string[] (incremental by code)
  * - branchIds: number[] | number (optional)
@@ -388,8 +393,11 @@ exports.assignRoles = async (req, res) => {
     }
 
     const {
+      roleId,
       roleIds,
-      roles: roleCodesRaw,
+      role,
+      role_code,
+      roles,
       roleCodes,
       add,
       remove,
@@ -398,47 +406,53 @@ exports.assignRoles = async (req, res) => {
       branchIds,
     } = req.body || {};
 
-    const codesFromBody = asArray(roleCodesRaw).concat(asArray(roleCodes)).map((s) => String(s).toLowerCase());
-    const addCodesArr = asArray(addCodes).map((s) => String(s).toLowerCase());
-    const removeCodesArr = asArray(removeCodes).map((s) => String(s).toLowerCase());
+    const codesReplace = [...asArray(role), ...asArray(role_code), ...asArray(roles), ...asArray(roleCodes)]
+      .filter(Boolean).map(s => String(s).toLowerCase());
+    const codesAdd    = asArray(addCodes).filter(Boolean).map(s => String(s).toLowerCase());
+    const codesRemove = asArray(removeCodes).filter(Boolean).map(s => String(s).toLowerCase());
 
-    // Resolve codes to IDs if Role has code
-    const needsLookup = codesFromBody.length || addCodesArr.length || removeCodesArr.length;
-    let codeMap = new Map();
-    if (needsLookup && Role && hasAttr(Role, 'code')) {
-      const want = [...new Set([...codesFromBody, ...addCodesArr, ...removeCodesArr])];
-      if (want.length) {
-        const found = await Role.findAll({ where: { code: want } });
-        codeMap = new Map(found.map(r => [r.code, r.id]));
-      }
+    // Resolve codes -> IDs.
+    const hasCode = !!(Role?.rawAttributes?.code);
+    let codeToId = new Map();
+    const wanted = [...new Set([...codesReplace, ...codesAdd, ...codesRemove])];
+    if (wanted.length) {
+      // Fetch minimal role data and map by code (or by name if code doesn't exist)
+      const attrs = ['id', 'name'].concat(hasCode ? ['code'] : []);
+      const all = await Role.findAll({ attributes: attrs });
+      const makeKey = (r) => String((hasCode ? r.code : r.name) || '').toLowerCase();
+      codeToId = new Map(all.map(r => [makeKey(r), r.id]));
     }
 
-    const idsFromCodes = codesFromBody.map(c => codeMap.get(c)).filter(Boolean);
-    const addFromCodes = addCodesArr.map(c => codeMap.get(c)).filter(Boolean);
-    const removeFromCodes = removeCodesArr.map(c => codeMap.get(c)).filter(Boolean);
+    const idsReplace = [
+      ...asArray(roleId),
+      ...asArray(roleIds),
+      ...codesReplace.map(c => codeToId.get(c)).filter(Boolean),
+    ];
+    const idsAdd    = [...asArray(add),    ...codesAdd.map(c => codeToId.get(c)).filter(Boolean)];
+    const idsRemove = [...asArray(remove), ...codesRemove.map(c => codeToId.get(c)).filter(Boolean)];
 
-    const toAdd = new Set([...asArray(add), ...addFromCodes].filter(Boolean));
-    const toRemove = new Set([...asArray(remove), ...removeFromCodes].filter(Boolean));
+    // Validate helper
+    const validateIds = async (ids) => {
+      if (!ids?.length) return null;
+      const found = await Role.findAll({ where: { id: ids } });
+      const foundIds = new Set(found.map(r => r.id));
+      const missing = ids.filter(id => !foundIds.has(id));
+      return missing.length ? missing : null;
+    };
 
-    // If explicit roleIds provided → replace mode
-    if (Array.isArray(roleIds) || idsFromCodes.length) {
-      const finalIds = Array.from(new Set([...(roleIds || []), ...idsFromCodes]));
-      // validate
-      if (finalIds.length) {
-        const found = await Role.findAll({ where: { id: finalIds } });
-        const foundIds = new Set(found.map(r => r.id));
-        const missing = finalIds.filter(id => !foundIds.has(id));
-        if (missing.length) { await safeRollback(t); return res.status(400).json({ error: 'Unknown role(s)', missing }); }
-      }
-      await setUserRoles(user, finalIds, t);
-    } else if (toAdd.size || toRemove.size) {
-      // incremental mode
+    if (idsReplace.length) {
+      const missing = await validateIds(idsReplace);
+      if (missing) { await safeRollback(t); return res.status(400).json({ error: 'Unknown role(s)', missing }); }
+      await setUserRoles(user, Array.from(new Set(idsReplace)), t);
+    } else if (idsAdd.length || idsRemove.length) {
+      const missingAdd = await validateIds(idsAdd);
+      if (missingAdd) { await safeRollback(t); return res.status(400).json({ error: 'Unknown role(s)', missing: missingAdd }); }
+
       if (typeof user.addRoles === 'function' && typeof user.removeRoles === 'function') {
-        if (toAdd.size)    await user.addRoles(Array.from(toAdd),    { transaction: t });
-        if (toRemove.size) await user.removeRoles(Array.from(toRemove), { transaction: t });
+        if (idsAdd.length)    await user.addRoles(idsAdd,    { transaction: t });
+        if (idsRemove.length) await user.removeRoles(idsRemove, { transaction: t });
       } else if (UserRole) {
-        // infer column names
-        const { roleId, userId } = await (async () => {
+        const { roleId: roleIdCol, userId: userIdCol } = await (async () => {
           const defaults = { roleId: 'roleId', userId: 'userId' };
           try {
             const qi = sequelize.getQueryInterface();
@@ -451,14 +465,14 @@ exports.assignRoles = async (req, res) => {
           }
         })();
 
-        if (toAdd.size) {
+        if (idsAdd.length) {
           await UserRole.bulkCreate(
-            Array.from(toAdd).map(rid => ({ [userId]: user.id, [roleId]: rid })),
+            idsAdd.map(rid => ({ [userIdCol]: user.id, [roleIdCol]: rid })),
             { transaction: t, ignoreDuplicates: true }
           );
         }
-        if (toRemove.size) {
-          await UserRole.destroy({ where: { [userId]: user.id, [roleId]: Array.from(toRemove) }, transaction: t });
+        if (idsRemove.length) {
+          await UserRole.destroy({ where: { [userIdCol]: user.id, [roleIdCol]: idsRemove }, transaction: t });
         }
       }
     }
@@ -473,7 +487,9 @@ exports.assignRoles = async (req, res) => {
     const fresh = await User.findByPk(user.id, {
       include: [{ model: Role, as: 'Roles', attributes: ['id', 'name'].concat(hasAttr(Role, 'code') ? ['code'] : []), through: { attributes: [] } }],
     });
-    res.json(sanitizeUser(fresh));
+
+    const json = sanitizeUser(fresh);
+    return res.json({ ...json, ...deriveRoleFields(json) });
   } catch (err) {
     await safeRollback(t);
     console.error('assignRoles error:', err);
@@ -502,7 +518,6 @@ exports.deleteUser = async (req, res) => {
           roleIdCol = desc.roleId ? 'roleId' : (desc.role_id ? 'role_id' : 'roleId');
         } catch {}
         await UserRole.destroy({ where: { [userIdCol]: user.id }, transaction: t });
-        // Optionally also clean branches
         if (UserBranch) {
           await UserBranch.destroy({ where: { userId: user.id }, transaction: t });
         }
