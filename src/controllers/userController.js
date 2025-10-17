@@ -25,26 +25,23 @@ const hasAttr = (model, attr) => !!(model?.rawAttributes?.[attr]);
 
 const normalizeUserInput = (body = {}) => {
   const clean = { ...body };
-
   clean.name = clean.name || clean.fullName || clean.username || '';
   if (!clean.name && clean.email && typeof clean.email === 'string') {
     clean.name = clean.email.split('@')[0];
   }
-
   ['name', 'email', 'password', 'role'].forEach((k) => {
     if (clean[k] && typeof clean[k] === 'string') clean[k] = clean[k].trim();
   });
-
   return clean;
 };
 
-/* ---------- Consistent display fields (name + role) ---------- */
 const titleize = (s) => String(s || '')
   .replace(/[_\-]+/g, ' ')
   .replace(/\s+/g, ' ')
   .trim()
   .replace(/\b\w/g, (c) => c.toUpperCase());
 
+/* ---------- build a rich set of role fields for the UI ---------- */
 const withDisplayFields = (json) => {
   const name =
     json.name ||
@@ -63,23 +60,32 @@ const withDisplayFields = (json) => {
   const roleLabel   = primaryName || (primaryCode ? titleize(primaryCode) : null);
   const roleDisplay = roleLabel || primaryCode || null;
 
+  // aggregated variants some UIs expect (based on your earlier SQL with role_codes)
+  const role_codes = roleCodes.join(',');
+  const role_names = roleNames.join(',');
+
   return {
     ...json,
     name,
-    // keep backward-compat `role` as machine-ish, but don't leave it empty if only name is known
+    // keep legacy `role` populated
     role: primaryCode || primaryName || null,
     roleCode: primaryCode,
-    roleLabel,         // pretty
-    roleDisplay,       // best possible for UI
-    roles: roleCodes,  // list of codes
-    roleNames,         // list of names
-    // also add snake_case for any legacy FE that might read them
-    role_name: roleLabel,
+    roleLabel,
+    roleDisplay,
+    roleName: roleLabel,
+    roles: roleCodes,
+    roleNames,
+    // snake_case mirrors + aggregated strings
     role_code: primaryCode,
+    role_label: roleLabel,
+    role_display: roleDisplay,
+    role_name: roleLabel,
+    role_codes,
+    role_names,
   };
 };
 
-/* ---------- Include builders ---------- */
+/* ---------- include builders ---------- */
 const buildIncludes = ({ roleId, roleCode, branchId }) => {
   const asns = User.associations || {};
   const includes = [];
@@ -115,7 +121,7 @@ const buildIncludes = ({ roleId, roleCode, branchId }) => {
   return includes;
 };
 
-/* ---------- Role & Branch setters ---------- */
+/* ---------- role/branch setters ---------- */
 const setUserRoles = async (user, roleIds, t) => {
   if (!Array.isArray(roleIds)) return;
   if (typeof user.setRoles === 'function') {
@@ -157,7 +163,7 @@ const setUserBranches = async (user, branchIds, t) => {
   }
 };
 
-/* ---------- Password hashing ---------- */
+/* ---------- password hashing ---------- */
 const hashAndAssignPassword = async (payload) => {
   const pwCol = resolvePasswordHashColumn();
   if (!pwCol) return payload;
@@ -184,21 +190,7 @@ const safeRollback = async (t) => {
   } catch {}
 };
 
-/* ------------------------------- Validators ------------------------------- */
-const validateCreate = (data) => {
-  const errors = [];
-
-  if (!data.name) errors.push('Name is required.');
-  if (!data.email) errors.push('Email is required.');
-  else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) errors.push('Email is invalid.');
-
-  if (!data.password) errors.push('Password is required.');
-  else if (String(data.password).length < 6) errors.push('Password must be at least 6 characters.');
-
-  return errors;
-};
-
-/* ---------- Helper: fallback hydrate roles for many users ---------- */
+/* ---------- fallback: hydrate roles if include missed ---------- */
 const hydrateRolesForUsers = async (users) => {
   try {
     const ids = users.map((u) => (u.id || (u.get ? u.get('id') : null))).filter(Boolean);
@@ -206,7 +198,10 @@ const hydrateRolesForUsers = async (users) => {
 
     const rows = await sequelize.query(
       `
-      SELECT ur."userId" as "userId", r.id as "id", r.name as "name", ${hasAttr(Role, 'code') ? 'r.code as "code",' : "NULL as \"code\","}
+      SELECT ur."userId" as "userId",
+             r.id        as "id",
+             r.name      as "name",
+             ${hasAttr(Role, 'code') ? 'r.code as "code",' : "NULL as \"code\","}
              ROW_NUMBER() OVER (PARTITION BY ur."userId" ORDER BY r.name) as rn
       FROM "UserRoles" ur
       JOIN "Roles" r ON r.id = ur."roleId"
@@ -233,7 +228,7 @@ const hydrateRolesForUsers = async (users) => {
       }
     }
   } catch {
-    // ignore—fallback best effort
+    // best-effort
   }
 };
 
@@ -285,7 +280,6 @@ exports.getUsers = async (req, res) => {
       distinct: true,
     });
 
-    // If Roles didn't hydrate, fetch them in one shot and attach
     await hydrateRolesForUsers(rows);
 
     const out = rows.map((u) => withDisplayFields(sanitizeUser(u)));
@@ -453,16 +447,6 @@ exports.toggleStatus = async (req, res) => {
 };
 
 /* ------------------------- assignRoles ------------------------- */
-/**
- * Accepts any of the following in body:
- * - roleId: UUID (single)
- * - roleIds: UUID[]
- * - role / role_code: single role code
- * - roles / roleCodes: string[] of role codes
- * - add / remove: UUID[] (incremental)
- * - addCodes / removeCodes: string[] (incremental by code)
- * - branchIds: number[] | number (optional)
- */
 exports.assignRoles = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
@@ -487,6 +471,8 @@ exports.assignRoles = async (req, res) => {
       branchIds,
     } = req.body || {};
 
+    const asArray = (v) => Array.isArray(v) ? v : (v == null ? [] : [v]);
+
     const codesReplace = [...asArray(role), ...asArray(role_code), ...asArray(roles), ...asArray(roleCodes)]
       .filter(Boolean).map(s => String(s).toLowerCase());
     const codesAdd    = asArray(addCodes).filter(Boolean).map(s => String(s).toLowerCase());
@@ -498,8 +484,8 @@ exports.assignRoles = async (req, res) => {
     if (wanted.length) {
       const attrs = ['id', 'name'].concat(hasAttr(Role, 'code') ? ['code'] : []);
       const all = await Role.findAll({ attributes: attrs });
-      const makeKey = (r) => String((hasCode ? r.code : r.name) || '').toLowerCase();
-      codeToId = new Map(all.map(r => [makeKey(r), r.id]));
+      const keyOf = (r) => String((hasCode ? r.code : r.name) || '').toLowerCase();
+      codeToId = new Map(all.map(r => [keyOf(r), r.id]));
     }
 
     const idsReplace = [
