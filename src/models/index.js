@@ -1,5 +1,6 @@
 'use strict';
 const { Sequelize, DataTypes } = require('sequelize');
+const path = require('path');
 require('dotenv').config();
 
 /* ---------- Connection / global model defaults tuned for Postgres ---------- */
@@ -76,7 +77,7 @@ db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes),
 /* 🆕 Ensure LoanSchedule is registered regardless of file casing */
 db.LoanSchedule =
   tryLoad(() => require('./loanSchedule')(sequelize, DataTypes), 'LoanSchedule') ||
-  tryLoad(() => require('./loanSchedule')(sequelize, DataTypes), 'LoanSchedule');
+  tryLoad(() => require('./loanSchedule')(sequelize, DataTypes), 'LoanSchedule'); 
 
 db.Setting       = require('./setting')(sequelize, DataTypes);
 db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes), 'LoanProduct');
@@ -94,9 +95,10 @@ db.Tenant     = tryLoad(() => require('./Tenant')(sequelize, DataTypes), 'Tenant
 db.TenantUser = tryLoad(() => require('./TenantUser')(sequelize, DataTypes), 'TenantUser');
 
 /* Access control (optional) */
-db.Role       = tryLoad(() => require('./Role')(sequelize, DataTypes), 'Role');
-db.UserRole   = tryLoad(() => require('./UserRole')(sequelize, DataTypes), 'UserRole');
-db.Permission = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
+db.Role           = tryLoad(() => require('./Role')(sequelize, DataTypes), 'Role');
+db.UserRole       = tryLoad(() => require('./UserRole')(sequelize, DataTypes), 'UserRole');
+db.Permission     = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
+db.RolePermission = tryLoad(() => require('./RolePermission')(sequelize, DataTypes), 'RolePermission');
 
 /* Savings (required) */
 db.SavingsTransaction = tryLoad(() => require('./savingstransaction')(sequelize, DataTypes), 'SavingsTransaction');
@@ -162,51 +164,51 @@ try {
 
 /* ---------------- Associations (core) ---------------- */
 if (db.User && db.Branch) {
-  db.User.belongsTo(db.Branch,   { foreignKey: 'branchId' });
-  db.Branch.hasMany(db.User,     { foreignKey: 'branchId' });
+  db.User.belongsTo(db.Branch,   { foreignKey: 'branchId', as: 'Branch', onDelete: 'SET NULL', onUpdate: 'CASCADE' });
+  db.Branch.hasMany(db.User,     { foreignKey: 'branchId', as: 'users' });
 }
 
 if (db.Borrower && db.Branch) {
-  db.Borrower.belongsTo(db.Branch, { foreignKey: 'branchId' });
-  db.Branch.hasMany(db.Borrower,   { foreignKey: 'branchId' });
+  db.Borrower.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
+  db.Branch.hasMany(db.Borrower,   { foreignKey: 'branchId', as: 'borrowers' });
 }
 
 if (db.Loan && db.Borrower) {
-  db.Loan.belongsTo(db.Borrower, { foreignKey: 'borrowerId' });
-  db.Borrower.hasMany(db.Loan,   { foreignKey: 'borrowerId' });
+  db.Loan.belongsTo(db.Borrower, { foreignKey: 'borrowerId', as: 'borrower' });
+  db.Borrower.hasMany(db.Loan,   { foreignKey: 'borrowerId', as: 'loans' });
 }
 
 if (db.Loan && db.Branch) {
-  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId' });
-  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
+  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId' });                  // default alias 'Branch'
+  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });    // explicit alias
   db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId' });
   db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId', as: 'loans' });
 }
 
 /* 🆕 LoanSchedule associations (only if model loaded) */
 if (db.LoanSchedule && db.Loan) {
-  db.LoanSchedule.belongsTo(db.Loan, { foreignKey: 'loanId' });
-  db.Loan.hasMany(db.LoanSchedule,   { foreignKey: 'loanId' });
+  db.LoanSchedule.belongsTo(db.Loan, { foreignKey: 'loanId', as: 'loan' });
+  db.Loan.hasMany(db.LoanSchedule,   { foreignKey: 'loanId', as: 'schedules' });
 }
 
 if (db.LoanRepayment && db.Loan) {
-  db.LoanRepayment.belongsTo(db.Loan, { foreignKey: 'loanId' });
-  db.Loan.hasMany(db.LoanRepayment,   { foreignKey: 'loanId' });
+  db.LoanRepayment.belongsTo(db.Loan, { foreignKey: 'loanId', as: 'loan' });
+  db.Loan.hasMany(db.LoanRepayment,   { foreignKey: 'loanId', as: 'repayments' });
 }
 
 if (db.LoanPayment && db.Loan) {
-  db.LoanPayment.belongsTo(db.Loan, { foreignKey: 'loanId' });
-  db.Loan.hasMany(db.LoanPayment,   { foreignKey: 'loanId' });
+  db.LoanPayment.belongsTo(db.Loan, { foreignKey: 'loanId', as: 'loan' });
+  db.Loan.hasMany(db.LoanPayment,   { foreignKey: 'loanId', as: 'payments' });
 }
 
 if (db.LoanPayment && db.User) {
-  db.LoanPayment.belongsTo(db.User, { foreignKey: 'userId' });
-  db.User.hasMany(db.LoanPayment,   { foreignKey: 'userId' });
+  db.LoanPayment.belongsTo(db.User, { foreignKey: 'userId', as: 'user' });
+  db.User.hasMany(db.LoanPayment,   { foreignKey: 'userId', as: 'loanPayments' });
 }
 
 if (db.Loan && db.LoanProduct) {
-  db.Loan.belongsTo(db.LoanProduct, { foreignKey: 'productId' });
-  db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId' });
+  db.Loan.belongsTo(db.LoanProduct, { foreignKey: 'productId', as: 'product' });
+  db.LoanProduct.hasMany(db.Loan,   { foreignKey: 'productId', as: 'loans' });
 }
 
 /* Loan ↔ User workflow (guarded) */
@@ -298,12 +300,12 @@ if (db.ActivityAssignment && db.User) {
 
 /* ---------- Accounting associations ---------- */
 if (db.Account && db.LedgerEntry) {
-  db.Account.hasMany(db.LedgerEntry, { foreignKey: 'accountId' });
-  db.LedgerEntry.belongsTo(db.Account, { foreignKey: 'accountId' });
+  db.Account.hasMany(db.LedgerEntry, { foreignKey: 'accountId', as: 'entries' });
+  db.LedgerEntry.belongsTo(db.Account, { foreignKey: 'accountId', as: 'account' });
 }
 if (db.JournalEntry && db.LedgerEntry) {
-  db.JournalEntry.hasMany(db.LedgerEntry, { foreignKey: 'journalEntryId' });
-  db.LedgerEntry.belongsTo(db.JournalEntry, { foreignKey: 'journalEntryId' });
+  db.JournalEntry.hasMany(db.LedgerEntry, { foreignKey: 'journalEntryId', as: 'entries' });
+  db.LedgerEntry.belongsTo(db.JournalEntry, { foreignKey: 'journalEntryId', as: 'journalEntry' });
 }
 
 /* ---------- HR & Payroll associations ---------- */
@@ -423,6 +425,55 @@ if (db.BorrowerGroup && db.Borrower && db.BorrowerGroupMember) {
     foreignKey: 'borrowerId',
     otherKey: 'groupId',
     as: 'groups',
+  });
+}
+
+/* ---------- RBAC associations (THIS FIXES YOUR INCLUDE ISSUE) ---------- */
+if (db.User && db.Role) {
+  const throughUR = db.UserRole || 'UserRoles';
+  db.User.belongsToMany(db.Role, {
+    through: throughUR,
+    foreignKey: 'userId',
+    otherKey: 'roleId',
+    as: 'Roles',
+  });
+  db.Role.belongsToMany(db.User, {
+    through: throughUR,
+    foreignKey: 'roleId',
+    otherKey: 'userId',
+    as: 'Users',
+  });
+}
+
+if (db.Role && db.Permission) {
+  const throughRP = db.RolePermission || 'RolePermissions';
+  db.Role.belongsToMany(db.Permission, {
+    through: throughRP,
+    foreignKey: 'roleId',
+    otherKey: 'permissionId',
+    as: 'Permissions',
+  });
+  db.Permission.belongsToMany(db.Role, {
+    through: throughRP,
+    foreignKey: 'permissionId',
+    otherKey: 'roleId',
+    as: 'Roles',
+  });
+}
+
+/* Optional: multi-branch mapping via user_branches_rt (UserBranch) */
+if (db.User && db.Branch && db.UserBranch) {
+  db.User.belongsToMany(db.Branch, {
+    through: db.UserBranch,
+    foreignKey: 'userId',
+    otherKey: 'branchId',
+    as: 'Branches',
+  });
+  db.Branch.belongsToMany(db.User, {
+    through: db.UserBranch,
+    foreignKey: 'branchId',
+    otherKey: 'userId',
+    as: 'Users',
   });
 }
 

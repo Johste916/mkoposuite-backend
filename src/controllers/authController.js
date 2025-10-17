@@ -123,6 +123,27 @@ async function findTenantIdForUser(userId) {
   return DEFAULT_TENANT_ID;
 }
 
+/** Try to fetch role codes for a user (tolerant: will no-op if tables missing) */
+async function getUserRoleCodes(userId) {
+  if (!sequelize || !QueryTypes) return [];
+  try {
+    const rows = await sequelize.query(
+      `
+      SELECT r.code
+      FROM "UserRoles" ur
+      JOIN "Roles" r ON r.id = ur."roleId"
+      WHERE ur."userId" = :uid
+      ORDER BY r.code ASC
+      `,
+      { replacements: { uid: userId }, type: QueryTypes.SELECT }
+    );
+    return rows.map(r => r.code).filter(Boolean);
+  } catch (e) {
+    // table missing or column missing — ignore silently
+    return [];
+  }
+}
+
 /* ───────────────────────────── LOGIN ───────────────────────────── */
 exports.login = async (req, res) => {
   const { email, password } = req.body || {};
@@ -172,12 +193,17 @@ exports.login = async (req, res) => {
     }
 
     const tenantId = await findTenantIdForUser(user.id);
+    const roleCodes = await getUserRoleCodes(user.id); // may be []
 
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role, tenantId },
-      JWT_SECRET,
-      { expiresIn: '2h' }
-    );
+    const tokenPayload = {
+      userId: user.id,
+      email: user.email,
+      role: user.role,     // legacy single-role string, keep for compatibility
+      roles: roleCodes,    // preferred multi-role codes if available
+      tenantId,
+    };
+
+    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '2h' });
 
     return res.status(200).json({
       message: 'Login successful',
@@ -188,6 +214,7 @@ exports.login = async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        roles: roleCodes,
         tenantId,
       },
     });
@@ -197,7 +224,7 @@ exports.login = async (req, res) => {
     if (pg === '42P01') {
       return res.status(500).json({
         message:
-          'Users table missing. Run DB migrations (e.g. `npx sequelize-cli db:migrate`).',
+          'Users (or role tables) missing. Run DB migrations (e.g. `npx sequelize-cli db:migrate`).',
       });
     }
     if (pg === '42703') {

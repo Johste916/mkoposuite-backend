@@ -40,8 +40,8 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
+  // Optional: if your app ever calls model.associate
   User.associate = (models) => {
-    // M:N Roles — alias must match includes ("Roles")
     if (models.Role) {
       User.belongsToMany(models.Role, {
         through: models.UserRole || 'UserRoles',
@@ -59,7 +59,6 @@ module.exports = (sequelize, DataTypes) => {
         onDelete: 'SET NULL',
       });
 
-      // Optional multi-branch legacy support if view/table exists
       const through = models.UserBranch || models.UserBranches || 'UserBranches';
       User.belongsToMany(models.Branch, {
         through,

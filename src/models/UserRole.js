@@ -14,15 +14,15 @@ module.exports = (sequelize, DataTypes) => {
       indexes: [
         { fields: ['userId'] },
         { fields: ['roleId'] },
-        { unique: true, fields: ['userId', 'roleId'] },
+        { unique: true, fields: ['userId', 'roleId'], name: 'user_roles_unique_pair' },
       ],
     }
   );
 
-  // Optional, but helps with includes when debugging
+  // Optional, helpful for debugging includes
   UserRole.associate = (models) => {
-    if (models.User) UserRole.belongsTo(models.User, { foreignKey: 'userId' });
-    if (models.Role) UserRole.belongsTo(models.Role, { foreignKey: 'roleId' });
+    if (models.User) UserRole.belongsTo(models.User, { foreignKey: 'userId', as: 'user' });
+    if (models.Role) UserRole.belongsTo(models.Role, { foreignKey: 'roleId', as: 'role' });
   };
 
   return UserRole;

@@ -21,13 +21,29 @@ function getTokenFromReq(req) {
 
 function pickAttrs(model, names) {
   const raw = model?.rawAttributes || {};
-  return names.filter((n) => !!raw[n]);
+  const fields = new Set(
+    Object.keys(raw).concat(
+      Object.values(raw).map((a) => a.field).filter(Boolean)
+    )
+  );
+  return names.filter((n) => fields.has(n));
 }
 
 function pickFirstAssocName(model, candidates = []) {
   const m = model || {};
   const assoc = Object.keys(m.associations || {});
   return candidates.find((x) => assoc.includes(x)) || null;
+}
+
+// prevent log spam on hot paths
+const __logOnce = new Map();
+function logOnce(key, msg, windowMs = 60000) {
+  const now = Date.now();
+  const prev = __logOnce.get(key) || 0;
+  if (now - prev > windowMs) {
+    console.warn(msg);
+    __logOnce.set(key, now);
+  }
 }
 
 /* --------------------------- core middleware ------------------------- */
@@ -38,7 +54,6 @@ async function authenticateUser(req, res, next) {
 
     const secret = process.env.JWT_SECRET || process.env.JWT_KEY;
     if (!secret) {
-      // explicit error to avoid silent auth bypass
       console.error('JWT secret is not set (JWT_SECRET or JWT_KEY).');
       return res.status(500).json({ error: 'Server misconfigured: JWT secret missing' });
     }
@@ -47,7 +62,7 @@ async function authenticateUser(req, res, next) {
     try {
       payload = jwt.verify(token, secret);
     } catch {
-      // invalid/expired token -> treat as anonymous; do not hard error here
+      // invalid/expired token -> treat as anonymous; do not hard error
       return next();
     }
 
@@ -73,25 +88,27 @@ async function authenticateUser(req, res, next) {
         'status',
       ]);
 
-      // detect associations safely
-      const rolesAlias = pickFirstAssocName(User, ['roles', 'Roles', 'Role']);
-      const branchAlias = pickFirstAssocName(User, ['homeBranch', 'Branch']); // your model uses 'homeBranch'
+      // detect associations safely (prefer 'Roles' / 'Branch')
+      const rolesAlias = pickFirstAssocName(User, ['Roles', 'roles', 'Role']);
+      const branchAlias = pickFirstAssocName(User, ['Branch', 'homeBranch']);
 
       const include = [];
       if (Role && rolesAlias) {
+        const roleAttrs = pickAttrs(Role, ['id', 'name', 'code', 'slug']); // will drop missing columns
         include.push({
           model: Role,
           as: rolesAlias,
-          attributes: ['id', 'name', 'code', 'slug'],
+          attributes: roleAttrs.length ? roleAttrs : ['id', 'name', 'code'],
           through: { attributes: [] },
           required: false,
         });
       }
       if (Branch && branchAlias) {
+        const branchAttrs = pickAttrs(Branch, ['id', 'name', 'code']);
         include.push({
           model: Branch,
           as: branchAlias,
-          attributes: ['id', 'name', 'code'],
+          attributes: branchAttrs.length ? branchAttrs : ['id', 'name'],
           required: false,
         });
       }
@@ -99,7 +116,7 @@ async function authenticateUser(req, res, next) {
       try {
         dbUser = await User.findByPk(normalizedId, { attributes: attrs, include });
       } catch (e) {
-        console.warn('authMiddleware: enrich include failed, retrying without include:', e.message);
+        logOnce('auth.include.fail', `authMiddleware: enrich include failed, retrying without include: ${e.message}`);
         dbUser = await User.findByPk(normalizedId, { attributes: attrs });
       }
 
@@ -110,7 +127,9 @@ async function authenticateUser(req, res, next) {
           dbUser.Roles ||
           [];
         const names = Array.isArray(assoc)
-          ? assoc.map((r) => r?.name || r?.code || r?.slug).filter(Boolean)
+          ? assoc
+              .map((r) => r?.code || r?.name) // prefer code
+              .filter(Boolean)
           : [];
 
         if (!roleName) roleName = names[0] || dbUser.role || null;
@@ -123,7 +142,6 @@ async function authenticateUser(req, res, next) {
       email: dbUser?.email ?? payload.email ?? null,
       name: dbUser?.name ?? dbUser?.fullName ?? payload.name ?? payload.fullName ?? null,
       role: roleName || null,
-      // 👇 broaden tenant/branch extraction so downstream guards see it
       tenantId:
         dbUser?.tenantId ??
         payload.tenantId ??
@@ -142,7 +160,6 @@ async function authenticateUser(req, res, next) {
 
     if (Array.isArray(rolesList)) {
       userObj.roles = rolesList;
-      // keep a Roles array to not break code expecting that shape
       userObj.Roles = rolesList.map((name) => ({ name }));
     }
 
@@ -172,23 +189,16 @@ function authorizeRoles(...roles) {
 
     if (!primary && all.length === 0) return res.status(401).json({ error: 'Unauthorized' });
     const ok = allow.length === 0 || allow.includes(primary) || all.some((r) => allow.includes(r));
-
     if (!ok) return res.status(403).json({ error: 'Access denied: insufficient role' });
     next();
   };
 }
 
 /* ------------------------------- /auth/me --------------------------------- */
-/**
- * Handler to return the current user, with optional Roles/Branch and computed permissions.
- * Mount like:
- *   router.get('/me', authenticateUser, requireAuth, me);
- */
 async function me(req, res) {
   try {
     if (!req.user?.id) return res.status(401).json({ error: 'Unauthorized' });
 
-    // Try to hydrate from DB to include associations; fall back to req.user
     let user = null;
 
     if (User && typeof User.findByPk === 'function') {
@@ -206,31 +216,33 @@ async function me(req, res) {
         'updatedAt',
       ]);
 
-      const rolesAlias = pickFirstAssocName(User, ['roles', 'Roles', 'Role']);
-      const branchAlias = pickFirstAssocName(User, ['homeBranch', 'Branch']);
+      const rolesAlias = pickFirstAssocName(User, ['Roles', 'roles', 'Role']);
+      const branchAlias = pickFirstAssocName(User, ['Branch', 'homeBranch']);
 
       const include = [];
       if (Role && rolesAlias) {
+        const roleAttrs = pickAttrs(Role, ['id', 'name', 'code', 'slug']);
         include.push({
           model: Role,
           as: rolesAlias,
-          attributes: ['id', 'name', 'code', 'slug'],
+          attributes: roleAttrs.length ? roleAttrs : ['id', 'name', 'code'],
           through: { attributes: [] },
           required: false,
         });
       }
       if (Branch && branchAlias) {
+        const branchAttrs = pickAttrs(Branch, ['id', 'name', 'code']);
         include.push({
           model: Branch,
           as: branchAlias,
-          attributes: ['id', 'name', 'code'],
+          attributes: branchAttrs.length ? branchAttrs : ['id', 'name'],
           required: false,
         });
       }
 
       try {
         user = await User.findByPk(req.user.id, { attributes: attrs, include });
-      } catch (e) {
+      } catch {
         user = await User.findByPk(req.user.id, { attributes: attrs });
       }
     }
@@ -240,7 +252,7 @@ async function me(req, res) {
     // Normalize role string
     base.role = base.role || base.Roles?.[0]?.name || base.roles?.[0] || 'user';
 
-    // Compute permissions from Permission table if present (action + roles[] JSONB)
+    // Compute permissions from Permission table if present
     let permissions = [];
     try {
       if (Permission && typeof Permission.findAll === 'function') {
@@ -271,5 +283,5 @@ module.exports = {
   authenticateUser,
   requireAuth,
   authorizeRoles,
-  me, // export for /api/auth/me
+  me,
 };
