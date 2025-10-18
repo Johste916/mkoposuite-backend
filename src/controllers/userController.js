@@ -51,6 +51,14 @@ const titleize = (s) =>
     .trim()
     .replace(/\b\w/g, (c) => c.toUpperCase());
 
+/* canonical code from name (e.g., "Loan Officer" -> "loan_officer") */
+const toCode = (v) =>
+  String(v || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '') || null;
+
 const asArray = (v) =>
   Array.isArray(v) ? v : v == null ? [] : typeof v === 'string' ? [v] : [v];
 
@@ -64,40 +72,42 @@ const withDisplayFields = (json) => {
     null;
 
   const rolesArr = Array.isArray(json.Roles) ? json.Roles : [];
-  const roleCodes = rolesArr
-    .map((r) => r.code || r.slug || r.name)
-    .filter(Boolean);
   const roleNames = rolesArr.map((r) => r.name).filter(Boolean);
+  // Prefer explicit code; otherwise derive from name so UI always has a code
+  const roleCodes = rolesArr
+    .map((r) => r.code || r.slug || toCode(r.name))
+    .filter(Boolean);
 
   const primaryCode =
-    roleCodes[0] || (json.role ? String(json.role).toLowerCase() : null) || null;
-  const primaryName = roleNames[0] || (json.role ? titleize(json.role) : null) || null;
+    roleCodes[0] ||
+    (json.role ? toCode(json.role) : null) || // legacy Users.role
+    null;
+
+  const primaryName =
+    roleNames[0] ||
+    (json.role ? titleize(json.role) : null) ||
+    null;
 
   const roleLabel = primaryName || (primaryCode ? titleize(primaryCode) : null);
   const roleDisplay = roleLabel || primaryCode || null;
 
-  // aggregated variants some UIs expect
-  const role_codes = roleCodes.join(',');
-  const role_names = roleNames.join(',');
-
   return {
     ...json,
     name,
-    // keep legacy `role` populated
-    role: primaryCode || primaryName || null,
-    roleCode: primaryCode,
-    roleLabel,
-    roleDisplay,
-    roleName: roleLabel,
-    roles: roleCodes,
-    roleNames,
-    // snake_case mirrors + aggregated strings
+    // canonical single values
+    role: primaryCode,          // ← UI filter-friendly (loan_officer)
     role_code: primaryCode,
-    role_label: roleLabel,
+    role_name: roleLabel,       // ← pretty label (“Loan Officer”)
     role_display: roleDisplay,
-    role_name: roleLabel,
-    role_codes,
-    role_names,
+    // arrays + csv mirrors (some UIs use these)
+    roles: roleCodes,
+    roleCodes: roleCodes,
+    roleNames: roleNames,
+    role_codes: roleCodes.join(','),
+    role_names: roleNames.join(','),
+    // keep legacy-ish fields too
+    roleLabel,
+    roleName: roleLabel,
   };
 };
 
@@ -265,7 +275,7 @@ const hydrateRolesForUsers = async (users) => {
     const map = new Map();
     for (const r of rows) {
       const list = map.get(r.userId) || [];
-      list.push({ id: r.id, name: r.name, ...(r.code ? { code: r.code } : {}) });
+      list.push({ id: r.id, name: r.name, code: r.code || toCode(r.name) });
       map.set(r.userId, list);
     }
 
@@ -296,7 +306,7 @@ const rawListUsers = async ({ q = '', limitNum = 200, offset = 0 }) => {
       u.email,
       u.role AS legacy_role,
       COALESCE(ARRAY_REMOVE(ARRAY_AGG(DISTINCT r.name), NULL), '{}') AS role_names_array,
-      COALESCE(ARRAY_REMOVE(ARRAY_AGG(DISTINCT LOWER(REGEXP_REPLACE(r.name, '[^a-zA-Z0-9]+','_','g'))), NULL), '{}')
+      COALESCE(ARRAY_REMOVE(ARRAY_AGG(DISTINCT ${hasAttr(Role,'code') ? 'r.code' : "LOWER(REGEXP_REPLACE(r.name,'[^a-zA-Z0-9]+','_','g'))"}), NULL), '{}')
         AS role_codes_array
     FROM "Users" u
     LEFT JOIN "UserRoles" ur ON ur."userId" = u.id
@@ -316,13 +326,13 @@ const rawListUsers = async ({ q = '', limitNum = 200, offset = 0 }) => {
     const Roles = (r.role_names_array || []).map((name, i) => ({
       id: null,
       name,
-      code: (r.role_codes_array || [])[i] || null,
+      code: (r.role_codes_array || [])[i] || toCode(name),
     }));
     const base = {
       id: r.id,
       name: r.name,
       email: r.email,
-      role: r.legacy_role,
+      role: r.legacy_role ? toCode(r.legacy_role) : null,
       Roles,
     };
     const json = sanitizeUser(base);
@@ -354,8 +364,8 @@ exports.getUsers = async (req, res) => {
       else where[activeCol] = truthy ? 'active' : 'inactive';
     }
 
-    const roleCode = role && hasAttr(Role, 'code') ? String(role).toLowerCase() : null;
-    if (!roleId && !roleCode && role) where.role = role; // legacy fallback
+    const roleCode = role ? toCode(role) : null;
+    if (!roleId && !roleCode && role) where.role = toCode(role); // legacy fallback
 
     const include = buildIncludes({ roleId, roleCode, branchId });
 
@@ -586,9 +596,9 @@ exports.assignRoles = async (req, res) => {
 
     const codesReplace = [...asArray(role), ...asArray(role_code), ...asArray(roles), ...asArray(roleCodes)]
       .filter(Boolean)
-      .map((s) => String(s).toLowerCase());
-    const codesAdd = asArray(addCodes).filter(Boolean).map((s) => String(s).toLowerCase());
-    const codesRemove = asArray(removeCodes).filter(Boolean).map((s) => String(s).toLowerCase());
+      .map((s) => toCode(s));
+    const codesAdd = asArray(addCodes).filter(Boolean).map((s) => toCode(s));
+    const codesRemove = asArray(removeCodes).filter(Boolean).map((s) => toCode(s));
 
     // Resolve codes -> IDs
     const hasCode = !!(Role?.rawAttributes?.code);
@@ -597,7 +607,7 @@ exports.assignRoles = async (req, res) => {
     if (wanted.length) {
       const attrs = ['id', 'name'].concat(hasAttr(Role, 'code') ? ['code'] : []);
       const all = await Role.findAll({ attributes: attrs });
-      const keyOf = (r) => String((hasCode ? r.code : r.name) || '').toLowerCase();
+      const keyOf = (r) => (hasCode ? r.code : toCode(r.name));
       codeToId = new Map(all.map((r) => [keyOf(r), r.id]));
     }
 
