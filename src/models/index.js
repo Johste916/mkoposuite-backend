@@ -179,9 +179,8 @@ if (db.Loan && db.Borrower) {
 }
 
 if (db.Loan && db.Branch) {
-  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId' });                  // default alias 'Branch'
-  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });    // explicit alias
-  db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId' });
+  // Keep the explicit alias only to avoid ambiguity
+  db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
   db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId', as: 'loans' });
 }
 
@@ -476,6 +475,112 @@ if (db.User && db.Branch && db.UserBranch) {
     as: 'Users',
   });
 }
+
+/* ------------------------------------------------------------------
+   ✅ Runtime auto-alias shim
+   - If an include has a model but no `as`, we fill the correct alias
+     based on defined associations for the source model.
+   - Covers findAll, findOne, findAndCountAll, count, aggregate.
+   - This unblocks queries like:
+       LoanPayment.findAll({ include: [{ model: Loan }] })
+     even though LoanPayment↔Loan is defined with { as: 'loan' }.
+------------------------------------------------------------------- */
+(() => {
+  try {
+    const { Model } = require('sequelize');
+    if (!Model) return;
+    if (Model.__autoAliasPatched) return; // idempotent
+    Model.__autoAliasPatched = true;
+
+    const dbg = (process.env.DEBUG_AUTO_ALIAS === '1');
+    if (dbg || process.env.NODE_ENV !== 'production') {
+      console.log('[sequelize-auto-alias] enabled');
+    }
+
+    const normalizeArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+
+    function resolveAliasFor(sourceModel, inc) {
+      // Already has alias? keep it.
+      if (!sourceModel || inc.as || !inc.model) return inc;
+
+      const assocs = sourceModel.associations || {};
+      const all = Object.values(assocs);
+
+      // If foreignKey is provided, prefer match on both target + foreignKey
+      if (inc.foreignKey) {
+        const byFK = all.find(a =>
+          a && a.target === inc.model && String(a.foreignKey) === String(inc.foreignKey)
+        );
+        if (byFK) { inc.as = byFK.as; return inc; }
+      }
+
+      // Otherwise, pick the first association whose target matches this model
+      const byTarget = all.find(a => a && a.target === inc.model);
+      if (byTarget) {
+        inc.as = byTarget.as;
+        return inc;
+      }
+      return inc; // leave as-is
+    }
+
+    function isModelClass(x) {
+      try {
+        return x && x.prototype && x.prototype instanceof Model;
+      } catch { return false; }
+    }
+
+    function fixIncludesTree(include, sourceModel) {
+      const list = normalizeArray(include).map(raw => {
+        // Allow shorthand form: { model: X } or X
+        const inc = (raw && raw.model)
+          ? { ...raw }
+          : isModelClass(raw)
+            ? { model: raw }
+            : { ...(raw || {}) };
+
+        resolveAliasFor(sourceModel, inc);
+
+        // Recurse for nested includes
+        if (inc.include) inc.include = fixIncludesTree(inc.include, inc.model);
+        return inc;
+      });
+      return Array.isArray(include) ? list : list[0];
+    }
+
+    const wrap = (orig) => function(options = {}, ...rest) {
+      if (options && options.include) {
+        options.include = fixIncludesTree(options.include, this);
+      }
+      return orig.call(this, options, ...rest);
+    };
+
+    if (Model.findAll)           Model.findAll           = wrap(Model.findAll);
+    if (Model.findOne)           Model.findOne           = wrap(Model.findOne);
+    if (Model.findAndCountAll)   Model.findAndCountAll   = wrap(Model.findAndCountAll);
+
+    if (Model.count) {
+      const orig = Model.count;
+      Model.count = function(options = {}, ...rest) {
+        if (options && options.include) {
+          options.include = fixIncludesTree(options.include, this);
+        }
+        return orig.call(this, options, ...rest);
+      };
+    }
+
+    if (Model.aggregate) {
+      const orig = Model.aggregate;
+      Model.aggregate = function(fn, field, options = {}, ...rest) {
+        if (options && options.include) {
+          options.include = fixIncludesTree(options.include, this);
+        }
+        return orig.call(this, fn, field, options, ...rest);
+      };
+    }
+  } catch (e) {
+    console.warn('⚠️  auto-alias shim not applied:', e.message);
+  }
+})();
 
 /* ---------- Export ---------- */
 db.sequelize = sequelize;
