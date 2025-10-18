@@ -12,15 +12,24 @@ const {
 } = require('../models');
 
 /* ---------------------------- helpers ---------------------------- */
-const pickFirstKey = (obj, keys) => keys.find((k) => obj && Object.prototype.hasOwnProperty.call(obj, k));
-const resolveActiveColumn = () => pickFirstKey(User.rawAttributes, ['status', 'isActive', 'active', 'enabled']); // prefer 'status'
-const resolvePasswordHashColumn = () => pickFirstKey(User.rawAttributes, ['passwordHash', 'password_hash', 'password']);
+const pickFirstKey = (obj, keys) =>
+  keys.find((k) => obj && Object.prototype.hasOwnProperty.call(obj, k));
+
+const resolveActiveColumn = () =>
+  pickFirstKey(User.rawAttributes, ['status', 'isActive', 'active', 'enabled']); // prefer 'status'
+
+const resolvePasswordHashColumn = () =>
+  pickFirstKey(User.rawAttributes, ['passwordHash', 'password_hash', 'password']);
+
 const sanitizeUser = (u) => {
   if (!u) return u;
   const json = u.toJSON ? u.toJSON() : u;
-  delete json.passwordHash; delete json.password_hash; delete json.password;
+  delete json.passwordHash;
+  delete json.password_hash;
+  delete json.password;
   return json;
 };
+
 const hasAttr = (model, attr) => !!(model?.rawAttributes?.[attr]);
 
 const normalizeUserInput = (body = {}) => {
@@ -35,11 +44,15 @@ const normalizeUserInput = (body = {}) => {
   return clean;
 };
 
-const titleize = (s) => String(s || '')
-  .replace(/[_\-]+/g, ' ')
-  .replace(/\s+/g, ' ')
-  .trim()
-  .replace(/\b\w/g, (c) => c.toUpperCase());
+const titleize = (s) =>
+  String(s || '')
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+
+const asArray = (v) =>
+  Array.isArray(v) ? v : v == null ? [] : typeof v === 'string' ? [v] : [v];
 
 /* ---------- build a rich set of role fields for the UI ---------- */
 const withDisplayFields = (json) => {
@@ -50,17 +63,20 @@ const withDisplayFields = (json) => {
     (json.email ? String(json.email).split('@')[0] : null) ||
     null;
 
-  const rolesArr  = Array.isArray(json.Roles) ? json.Roles : [];
-  const roleCodes = rolesArr.map((r) => r.code || r.slug || r.name).filter(Boolean);
+  const rolesArr = Array.isArray(json.Roles) ? json.Roles : [];
+  const roleCodes = rolesArr
+    .map((r) => r.code || r.slug || r.name)
+    .filter(Boolean);
   const roleNames = rolesArr.map((r) => r.name).filter(Boolean);
 
-  const primaryCode  = roleCodes[0] || (json.role ? String(json.role).toLowerCase() : null) || null;
-  const primaryName  = roleNames[0] || (json.role ? titleize(json.role) : null) || null;
+  const primaryCode =
+    roleCodes[0] || (json.role ? String(json.role).toLowerCase() : null) || null;
+  const primaryName = roleNames[0] || (json.role ? titleize(json.role) : null) || null;
 
-  const roleLabel   = primaryName || (primaryCode ? titleize(primaryCode) : null);
+  const roleLabel = primaryName || (primaryCode ? titleize(primaryCode) : null);
   const roleDisplay = roleLabel || primaryCode || null;
 
-  // aggregated variants some UIs expect (based on your earlier SQL with role_codes)
+  // aggregated variants some UIs expect
   const role_codes = roleCodes.join(',');
   const role_names = roleNames.join(',');
 
@@ -85,6 +101,17 @@ const withDisplayFields = (json) => {
   };
 };
 
+/* ------------------------------- Validators ------------------------------- */
+const validateCreate = (data) => {
+  const errors = [];
+  if (!data.name) errors.push('Name is required.');
+  if (!data.email) errors.push('Email is required.');
+  else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) errors.push('Email is invalid.');
+  if (!data.password) errors.push('Password is required.');
+  else if (String(data.password).length < 6) errors.push('Password must be at least 6 characters.');
+  return errors;
+};
+
 /* ---------- include builders ---------- */
 const buildIncludes = ({ roleId, roleCode, branchId }) => {
   const asns = User.associations || {};
@@ -92,26 +119,43 @@ const buildIncludes = ({ roleId, roleCode, branchId }) => {
 
   if (Role) {
     const roleAssoc =
-      asns.roles || asns.Roles || asns.role || asns.Role ||
+      asns.roles ||
+      asns.Roles ||
+      asns.role ||
+      asns.Role ||
       Object.values(asns).find((a) => a.target && a.target.name === Role.name);
     if (roleAssoc) {
       const isBTM = roleAssoc.associationType === 'BelongsToMany';
       const roleAttrs = ['id', 'name'].concat(hasAttr(Role, 'code') ? ['code'] : []);
-      const inc = { model: Role, as: roleAssoc.as, attributes: roleAttrs, required: !!(roleId || roleCode) };
+      const inc = {
+        model: Role,
+        as: roleAssoc.as,
+        attributes: roleAttrs,
+        required: !!(roleId || roleCode),
+      };
       if (isBTM) inc.through = { attributes: [] };
       if (roleId) inc.where = { ...(inc.where || {}), id: roleId };
-      if (roleCode && hasAttr(Role, 'code')) inc.where = { ...(inc.where || {}), code: String(roleCode).toLowerCase() };
+      if (roleCode && hasAttr(Role, 'code'))
+        inc.where = { ...(inc.where || {}), code: String(roleCode).toLowerCase() };
       includes.push(inc);
     }
   }
 
   if (Branch) {
     const branchAssoc =
-      asns.branches || asns.Branches || asns.branch || asns.Branch ||
+      asns.branches ||
+      asns.Branches ||
+      asns.branch ||
+      asns.Branch ||
       Object.values(asns).find((a) => a.target && a.target.name === Branch.name);
     if (branchAssoc) {
       const isBTM = branchAssoc.associationType === 'BelongsToMany';
-      const inc = { model: Branch, as: branchAssoc.as, attributes: ['id', 'name', 'code'], required: !!branchId };
+      const inc = {
+        model: Branch,
+        as: branchAssoc.as,
+        attributes: ['id', 'name', 'code'],
+        required: !!branchId,
+      };
       if (isBTM) inc.through = { attributes: [] };
       if (branchId) inc.where = { id: branchId };
       includes.push(inc);
@@ -129,7 +173,10 @@ const setUserRoles = async (user, roleIds, t) => {
   } else if (UserRole) {
     await UserRole.destroy({ where: { userId: user.id }, transaction: t });
     if (roleIds.length) {
-      await UserRole.bulkCreate(roleIds.map((roleId) => ({ userId: user.id, roleId })), { transaction: t });
+      await UserRole.bulkCreate(
+        roleIds.map((roleId) => ({ userId: user.id, roleId })),
+        { transaction: t }
+      );
     }
   }
 };
@@ -138,7 +185,10 @@ const setUserBranches = async (user, branchIds, t) => {
   if (branchIds == null) return;
   const asns = User.associations || {};
   const branchAssoc =
-    asns.branches || asns.Branches || asns.branch || asns.Branch ||
+    asns.branches ||
+    asns.Branches ||
+    asns.branch ||
+    asns.Branch ||
     Object.values(asns).find((a) => a.target && a.target.name === (Branch && Branch.name));
 
   if (branchAssoc && branchAssoc.associationType === 'BelongsToMany') {
@@ -150,7 +200,10 @@ const setUserBranches = async (user, branchIds, t) => {
       await UserBranch.destroy({ where: { userId: user.id }, transaction: t });
       const list = Array.isArray(branchIds) ? branchIds : [branchIds];
       if (list.length) {
-        await UserBranch.bulkCreate(list.map((branchId) => ({ userId: user.id, branchId })), { transaction: t });
+        await UserBranch.bulkCreate(
+          list.map((branchId) => ({ userId: user.id, branchId })),
+          { transaction: t }
+        );
       }
       return;
     }
@@ -179,9 +232,6 @@ const hashAndAssignPassword = async (payload) => {
   return payload;
 };
 
-const asArray = (v) =>
-  Array.isArray(v) ? v : v == null ? [] : typeof v === 'string' ? [v] : [v];
-
 const safeRollback = async (t) => {
   try {
     if (t && typeof t.rollback === 'function' && !t.finished) {
@@ -193,7 +243,9 @@ const safeRollback = async (t) => {
 /* ---------- fallback: hydrate roles if include missed ---------- */
 const hydrateRolesForUsers = async (users) => {
   try {
-    const ids = users.map((u) => (u.id || (u.get ? u.get('id') : null))).filter(Boolean);
+    const ids = users
+      .map((u) => u.id || (u.get ? u.get('id') : null))
+      .filter(Boolean);
     if (!ids.length || !sequelize) return;
 
     const rows = await sequelize.query(
@@ -201,7 +253,7 @@ const hydrateRolesForUsers = async (users) => {
       SELECT ur."userId" as "userId",
              r.id        as "id",
              r.name      as "name",
-             ${hasAttr(Role, 'code') ? 'r.code as "code",' : "NULL as \"code\","}
+             ${hasAttr(Role, 'code') ? 'r.code as "code",' : 'NULL as "code",'}
              ROW_NUMBER() OVER (PARTITION BY ur."userId" ORDER BY r.name) as rn
       FROM "UserRoles" ur
       JOIN "Roles" r ON r.id = ur."roleId"
@@ -232,6 +284,52 @@ const hydrateRolesForUsers = async (users) => {
   }
 };
 
+/* ---------- raw SQL list fallback (always returns an array) ---------- */
+const rawListUsers = async ({ q = '', limitNum = 200, offset = 0 }) => {
+  const qpat = q ? `%${q}%` : '';
+
+  const rows = await sequelize.query(
+    `
+    SELECT
+      u.id,
+      COALESCE(u.name, '') AS name,
+      u.email,
+      u.role AS legacy_role,
+      COALESCE(ARRAY_REMOVE(ARRAY_AGG(DISTINCT r.name), NULL), '{}') AS role_names_array,
+      COALESCE(ARRAY_REMOVE(ARRAY_AGG(DISTINCT LOWER(REGEXP_REPLACE(r.name, '[^a-zA-Z0-9]+','_','g'))), NULL), '{}')
+        AS role_codes_array
+    FROM "Users" u
+    LEFT JOIN "UserRoles" ur ON ur."userId" = u.id
+    LEFT JOIN "Roles" r      ON r.id        = ur."roleId"
+    WHERE (:q = '' OR u.name ILIKE :qpat OR u.email ILIKE :qpat)
+    GROUP BY u.id
+    ORDER BY u.name NULLS LAST, u.email
+    LIMIT :limitNum OFFSET :offset
+    `,
+    {
+      type: QueryTypes.SELECT,
+      replacements: { q, qpat, limitNum, offset },
+    }
+  );
+
+  return rows.map((r) => {
+    const Roles = (r.role_names_array || []).map((name, i) => ({
+      id: null,
+      name,
+      code: (r.role_codes_array || [])[i] || null,
+    }));
+    const base = {
+      id: r.id,
+      name: r.name,
+      email: r.email,
+      role: r.legacy_role,
+      Roles,
+    };
+    const json = sanitizeUser(base);
+    return withDisplayFields(json);
+  });
+};
+
 /* --------------------------------- GET /api/users --------------------------------- */
 exports.getUsers = async (req, res) => {
   try {
@@ -252,17 +350,12 @@ exports.getUsers = async (req, res) => {
     if (typeof isActive !== 'undefined' && activeCol) {
       const attr = User.rawAttributes[activeCol];
       const truthy = String(isActive) === 'true' || String(isActive) === '1';
-      if (attr?.type?.key === 'BOOLEAN') {
-        where[activeCol] = truthy;
-      } else {
-        where[activeCol] = truthy ? 'active' : 'inactive';
-      }
+      if (attr?.type?.key === 'BOOLEAN') where[activeCol] = truthy;
+      else where[activeCol] = truthy ? 'active' : 'inactive';
     }
 
     const roleCode = role && hasAttr(Role, 'code') ? String(role).toLowerCase() : null;
-    if (!roleId && !roleCode && role) {
-      where.role = role; // legacy
-    }
+    if (!roleId && !roleCode && role) where.role = role; // legacy fallback
 
     const include = buildIncludes({ roleId, roleCode, branchId });
 
@@ -270,23 +363,30 @@ exports.getUsers = async (req, res) => {
     const limitNum = Math.min(1000, Math.max(1, Number(limit) || 200));
     const offset = (pageNum - 1) * limitNum;
 
-    const { rows } = await User.findAndCountAll({
-      where,
-      include,
-      attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
-      order: [['name', 'ASC']],
-      limit: limitNum,
-      offset,
-      distinct: true,
-    });
+    try {
+      // ORM path
+      const { rows } = await User.findAndCountAll({
+        where,
+        include,
+        attributes: { exclude: ['password', 'passwordHash', 'password_hash'] },
+        order: [['name', 'ASC']],
+        limit: limitNum,
+        offset,
+        distinct: true,
+      });
 
-    await hydrateRolesForUsers(rows);
-
-    const out = rows.map((u) => withDisplayFields(sanitizeUser(u)));
-    res.json(out);
+      await hydrateRolesForUsers(rows);
+      const out = rows.map((u) => withDisplayFields(sanitizeUser(u)));
+      return res.json(out);
+    } catch (ormErr) {
+      // Fallback if eager-loading/associations fail
+      console.warn('getUsers: ORM include failed, using raw fallback →', ormErr.message);
+      const out = await rawListUsers({ q, limitNum, offset });
+      return res.json(out);
+    }
   } catch (err) {
-    console.error('getUsers error:', err);
-    res.status(500).json({ error: 'Failed to list users' });
+    console.error('getUsers fatal error:', err);
+    return res.status(500).json({ error: 'Failed to list users' });
   }
 };
 
@@ -300,12 +400,11 @@ exports.getUserById = async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     await hydrateRolesForUsers([user]);
-
     const json = sanitizeUser(user);
     return res.json(withDisplayFields(json));
   } catch (err) {
     console.error('getUserById error:', err);
-    res.status(500).json({ error: 'Failed to fetch user' });
+    return res.status(500).json({ error: 'Failed to fetch user' });
   }
 };
 
@@ -347,14 +446,15 @@ exports.createUser = async (req, res) => {
   } catch (err) {
     await safeRollback(t);
     console.error('createUser error:', err);
-
     if (err.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ error: 'Email already in use.' });
     }
     if (err.name === 'SequelizeValidationError') {
-      return res.status(400).json({ error: err.errors?.[0]?.message || 'Validation error', details: err.errors });
+      return res
+        .status(400)
+        .json({ error: err.errors?.[0]?.message || 'Validation error', details: err.errors });
     }
-    res.status(400).json({ error: 'Failed to create user' });
+    return res.status(400).json({ error: 'Failed to create user' });
   }
 };
 
@@ -366,18 +466,25 @@ exports.updateUser = async (req, res) => {
     const rest = normalizeUserInput(restRaw);
 
     const user = await User.findByPk(id);
-    if (!user) { await safeRollback(t); return res.status(404).json({ error: 'User not found' }); }
+    if (!user) {
+      await safeRollback(t);
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     const payload = password ? await hashAndAssignPassword({ ...rest, password }) : rest;
 
     if (payload.email && payload.email !== user.email) {
       const dup = await User.findOne({ where: { email: payload.email } });
-      if (dup) { await safeRollback(t); return res.status(409).json({ error: 'Email already in use.' }); }
+      if (dup) {
+        await safeRollback(t);
+        return res.status(409).json({ error: 'Email already in use.' });
+      }
     }
 
     await user.update(payload, { transaction: t });
     if (Array.isArray(roleIds)) await setUserRoles(user, roleIds, t);
-    if (Array.isArray(branchIds) || typeof branchIds === 'number') await setUserBranches(user, branchIds, t);
+    if (Array.isArray(branchIds) || typeof branchIds === 'number')
+      await setUserBranches(user, branchIds, t);
     await t.commit();
     t.finished = t.finished || 'commit';
 
@@ -389,14 +496,16 @@ exports.updateUser = async (req, res) => {
     await hydrateRolesForUsers([fresh]);
 
     const json = sanitizeUser(fresh);
-    res.json(withDisplayFields(json));
+    return res.json(withDisplayFields(json));
   } catch (err) {
     await safeRollback(t);
     console.error('updateUser error:', err);
     if (err.name === 'SequelizeValidationError') {
-      return res.status(400).json({ error: err.errors?.[0]?.message || 'Validation error', details: err.errors });
+      return res
+        .status(400)
+        .json({ error: err.errors?.[0]?.message || 'Validation error', details: err.errors });
     }
-    res.status(400).json({ error: 'Failed to update user' });
+    return res.status(400).json({ error: 'Failed to update user' });
   }
 };
 
@@ -411,10 +520,10 @@ exports.resetPassword = async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
     const payload = await hashAndAssignPassword({ password });
     await user.update(payload);
-    res.json({ message: 'Password updated' });
+    return res.json({ message: 'Password updated' });
   } catch (err) {
     console.error('resetPassword error:', err);
-    res.status(400).json({ error: 'Failed to reset password' });
+    return res.status(400).json({ error: 'Failed to reset password' });
   }
 };
 
@@ -430,19 +539,20 @@ exports.toggleStatus = async (req, res) => {
     if (meta?.type?.key === 'BOOLEAN') {
       const bodyVal = req.body[activeCol];
       if (typeof bodyVal === 'boolean') next = bodyVal;
-      else if (typeof bodyVal === 'string') next = ['1','true','yes','active'].includes(bodyVal.toLowerCase());
+      else if (typeof bodyVal === 'string')
+        next = ['1', 'true', 'yes', 'active'].includes(bodyVal.toLowerCase());
       else next = !Boolean(user[activeCol]);
     } else {
       const current = (user[activeCol] || 'active').toString().toLowerCase();
       const bodyVal = (req.body[activeCol] || '').toString().toLowerCase();
-      next = bodyVal ? bodyVal : (current === 'active' ? 'inactive' : 'active');
+      next = bodyVal ? bodyVal : current === 'active' ? 'inactive' : 'active';
     }
 
     await user.update({ [activeCol]: next });
-    res.json({ id: user.id, [activeCol]: next });
+    return res.json({ id: user.id, [activeCol]: next });
   } catch (err) {
     console.error('toggleStatus error:', err);
-    res.status(400).json({ error: 'Failed to update status' });
+    return res.status(400).json({ error: 'Failed to update status' });
   }
 };
 
@@ -451,7 +561,10 @@ exports.assignRoles = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
     const user = await User.findByPk(req.params.id);
-    if (!user) { await safeRollback(t); return res.status(404).json({ error: 'User not found' }); }
+    if (!user) {
+      await safeRollback(t);
+      return res.status(404).json({ error: 'User not found' });
+    }
     if (!UserRole && typeof user.setRoles !== 'function') {
       await safeRollback(t);
       return res.status(501).json({ error: 'Role assignment not available' });
@@ -471,13 +584,13 @@ exports.assignRoles = async (req, res) => {
       branchIds,
     } = req.body || {};
 
-    const asArray = (v) => Array.isArray(v) ? v : (v == null ? [] : [v]);
-
     const codesReplace = [...asArray(role), ...asArray(role_code), ...asArray(roles), ...asArray(roleCodes)]
-      .filter(Boolean).map(s => String(s).toLowerCase());
-    const codesAdd    = asArray(addCodes).filter(Boolean).map(s => String(s).toLowerCase());
-    const codesRemove = asArray(removeCodes).filter(Boolean).map(s => String(s).toLowerCase());
+      .filter(Boolean)
+      .map((s) => String(s).toLowerCase());
+    const codesAdd = asArray(addCodes).filter(Boolean).map((s) => String(s).toLowerCase());
+    const codesRemove = asArray(removeCodes).filter(Boolean).map((s) => String(s).toLowerCase());
 
+    // Resolve codes -> IDs
     const hasCode = !!(Role?.rawAttributes?.code);
     let codeToId = new Map();
     const wanted = [...new Set([...codesReplace, ...codesAdd, ...codesRemove])];
@@ -485,35 +598,41 @@ exports.assignRoles = async (req, res) => {
       const attrs = ['id', 'name'].concat(hasAttr(Role, 'code') ? ['code'] : []);
       const all = await Role.findAll({ attributes: attrs });
       const keyOf = (r) => String((hasCode ? r.code : r.name) || '').toLowerCase();
-      codeToId = new Map(all.map(r => [keyOf(r), r.id]));
+      codeToId = new Map(all.map((r) => [keyOf(r), r.id]));
     }
 
     const idsReplace = [
       ...asArray(roleId),
       ...asArray(roleIds),
-      ...codesReplace.map(c => codeToId.get(c)).filter(Boolean),
+      ...codesReplace.map((c) => codeToId.get(c)).filter(Boolean),
     ];
-    const idsAdd    = [...asArray(add),    ...codesAdd.map(c => codeToId.get(c)).filter(Boolean)];
-    const idsRemove = [...asArray(remove), ...codesRemove.map(c => codeToId.get(c)).filter(Boolean)];
+    const idsAdd = [...asArray(add), ...codesAdd.map((c) => codeToId.get(c)).filter(Boolean)];
+    const idsRemove = [...asArray(remove), ...codesRemove.map((c) => codeToId.get(c)).filter(Boolean)];
 
     const validateIds = async (ids) => {
       if (!ids?.length) return null;
       const found = await Role.findAll({ where: { id: ids } });
-      const foundIds = new Set(found.map(r => r.id));
-      const missing = ids.filter(id => !foundIds.has(id));
+      const foundIds = new Set(found.map((r) => r.id));
+      const missing = ids.filter((id) => !foundIds.has(id));
       return missing.length ? missing : null;
     };
 
     if (idsReplace.length) {
       const missing = await validateIds(idsReplace);
-      if (missing) { await safeRollback(t); return res.status(400).json({ error: 'Unknown role(s)', missing }); }
+      if (missing) {
+        await safeRollback(t);
+        return res.status(400).json({ error: 'Unknown role(s)', missing });
+      }
       await setUserRoles(user, Array.from(new Set(idsReplace)), t);
     } else if (idsAdd.length || idsRemove.length) {
       const missingAdd = await validateIds(idsAdd);
-      if (missingAdd) { await safeRollback(t); return res.status(400).json({ error: 'Unknown role(s)', missing: missingAdd }); }
+      if (missingAdd) {
+        await safeRollback(t);
+        return res.status(400).json({ error: 'Unknown role(s)', missing: missingAdd });
+      }
 
       if (typeof user.addRoles === 'function' && typeof user.removeRoles === 'function') {
-        if (idsAdd.length)    await user.addRoles(idsAdd,    { transaction: t });
+        if (idsAdd.length) await user.addRoles(idsAdd, { transaction: t });
         if (idsRemove.length) await user.removeRoles(idsRemove, { transaction: t });
       } else if (UserRole) {
         const { roleId: roleIdCol, userId: userIdCol } = await (async () => {
@@ -521,8 +640,8 @@ exports.assignRoles = async (req, res) => {
           try {
             const qi = sequelize.getQueryInterface();
             const desc = await qi.describeTable('UserRoles');
-            const roleId = desc.roleId ? 'roleId' : (desc.role_id ? 'role_id' : defaults.roleId);
-            const userId = desc.userId ? 'userId' : (desc.user_id ? 'user_id' : defaults.userId);
+            const roleId = desc.roleId ? 'roleId' : desc.role_id ? 'role_id' : defaults.roleId;
+            const userId = desc.userId ? 'userId' : desc.user_id ? 'user_id' : defaults.userId;
             return { roleId, userId };
           } catch {
             return defaults;
@@ -531,12 +650,15 @@ exports.assignRoles = async (req, res) => {
 
         if (idsAdd.length) {
           await UserRole.bulkCreate(
-            idsAdd.map(rid => ({ [userIdCol]: user.id, [roleIdCol]: rid })),
+            idsAdd.map((rid) => ({ [userIdCol]: user.id, [roleIdCol]: rid })),
             { transaction: t, ignoreDuplicates: true }
           );
         }
         if (idsRemove.length) {
-          await UserRole.destroy({ where: { [userIdCol]: user.id, [roleIdCol]: idsRemove }, transaction: t });
+          await UserRole.destroy({
+            where: { [userIdCol]: user.id, [roleIdCol]: idsRemove },
+            transaction: t,
+          });
         }
       }
     }
@@ -549,17 +671,23 @@ exports.assignRoles = async (req, res) => {
     t.finished = t.finished || 'commit';
 
     const fresh = await User.findByPk(user.id, {
-      include: [{ model: Role, as: 'Roles', attributes: ['id', 'name'].concat(hasAttr(Role, 'code') ? ['code'] : []), through: { attributes: [] } }],
+      include: [
+        {
+          model: Role,
+          as: 'Roles',
+          attributes: ['id', 'name'].concat(hasAttr(Role, 'code') ? ['code'] : []),
+          through: { attributes: [] },
+        },
+      ],
     });
 
     await hydrateRolesForUsers([fresh]);
-
     const json = sanitizeUser(fresh);
     return res.json(withDisplayFields(json));
   } catch (err) {
     await safeRollback(t);
     console.error('assignRoles error:', err);
-    res.status(500).json({ error: 'Failed to assign roles' });
+    return res.status(500).json({ error: 'Failed to assign roles' });
   }
 };
 
@@ -568,10 +696,13 @@ exports.deleteUser = async (req, res) => {
   const t = await (sequelize?.transaction ? sequelize.transaction() : User.sequelize.transaction());
   try {
     const user = await User.findByPk(req.params.id);
-    if (!user) { await safeRollback(t); return res.status(404).json({ error: 'User not found' }); }
+    if (!user) {
+      await safeRollback(t);
+      return res.status(404).json({ error: 'User not found' });
+    }
 
-    const force = ['1','true','yes'].includes(String(req.query.force||'').toLowerCase());
-    const hard  = ['1','true','yes'].includes(String(req.query.hard ||'').toLowerCase());
+    const force = ['1', 'true', 'yes'].includes(String(req.query.force || '').toLowerCase());
+    const hard = ['1', 'true', 'yes'].includes(String(req.query.hard || '').toLowerCase());
 
     if (force) {
       if (UserRole) {
@@ -580,8 +711,8 @@ exports.deleteUser = async (req, res) => {
         let roleIdCol = 'roleId';
         try {
           const desc = await qi.describeTable('UserRoles');
-          userIdCol = desc.userId ? 'userId' : (desc.user_id ? 'user_id' : 'userId');
-          roleIdCol = desc.roleId ? 'roleId' : (desc.role_id ? 'role_id' : 'roleId');
+          userIdCol = desc.userId ? 'userId' : desc.user_id ? 'user_id' : 'userId';
+          roleIdCol = desc.roleId ? 'roleId' : desc.role_id ? 'role_id' : 'roleId';
         } catch {}
         await UserRole.destroy({ where: { [userIdCol]: user.id }, transaction: t });
         if (UserBranch) {
@@ -595,10 +726,10 @@ exports.deleteUser = async (req, res) => {
     await user.destroy({ force: hard, transaction: t });
     await t.commit();
     t.finished = t.finished || 'commit';
-    res.json({ ok: true });
+    return res.json({ ok: true });
   } catch (err) {
     await safeRollback(t);
     console.error('deleteUser error:', err);
-    res.status(500).json({ error: 'Failed to delete user' });
+    return res.status(500).json({ error: 'Failed to delete user' });
   }
 };
