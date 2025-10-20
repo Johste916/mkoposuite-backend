@@ -241,6 +241,12 @@ function safeLoadFirst(paths, dummyRouter) {
 const SUPPORT_STORE = { TICKETS: new Map(), nextId: 1 };
 const SMS_LOGS = [];
 
+// 👇 add this with your other route loaders
+const groupsRoutes = safeLoadRoutes('./routes/groupsRoutes', makeDummyRouter([]));
+app.use('/api/groups',       ...auth, ...active, groupsRoutes);
+app.use('/api/v1/groups',    ...auth, ...active, groupsRoutes); // legacy alias for the UI
+
+
 /* Alias: /api/tickets/:id/comments → Support store */
 const ticketsCommentsAlias = express.Router();
 ticketsCommentsAlias.get('/:id/comments', (req, res) => {
