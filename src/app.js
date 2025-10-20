@@ -241,11 +241,9 @@ function safeLoadFirst(paths, dummyRouter) {
 const SUPPORT_STORE = { TICKETS: new Map(), nextId: 1 };
 const SMS_LOGS = [];
 
-// 👇 add this with your other route loaders
+/* Load groups router early, but DO NOT mount it yet to avoid TDZ with auth/active */
 const groupsRoutes = safeLoadRoutes('./routes/groupsRoutes', makeDummyRouter([]));
-app.use('/api/groups',       ...auth, ...active, groupsRoutes);
-app.use('/api/v1/groups',    ...auth, ...active, groupsRoutes); // legacy alias for the UI
-
+// ⬆️ Mounts for /api/groups are moved to the Mounting section (after auth/active are defined).
 
 /* Alias: /api/tickets/:id/comments → Support store */
 const ticketsCommentsAlias = express.Router();
@@ -1302,6 +1300,10 @@ app.use('/api/branches',       ...auth, ...active, branchRoutes);
 app.use('/api/user-roles',     ...auth, ...active, userRoleRoutes);
 app.use('/api/user-branches',  ...auth, ...active, userBranchRoutes);
 app.use('/api/loan-products',  ...auth, ...active, loanProductRoutes);
+
+/* ✅ Groups mounts (moved here to avoid TDZ for auth/active) */
+app.use('/api/groups',    ...auth, ...active, groupsRoutes);
+app.use('/api/v1/groups', ...auth, ...active, groupsRoutes);
 
 /* New modules */
 app.use('/api/collateral',           ...auth, ...active, ...ent('collateral'),   collateralRoutes);

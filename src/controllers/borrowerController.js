@@ -221,7 +221,37 @@ async function computeBorrowerDerived(borrowerId) {
 
 function officerPrettyName(officer) {
   if (!officer) return null;
-  return officer.name || [officer.firstName, officer.lastName].filter(Boolean).join(" ") || null;
+
+  // Prefer explicit names if they look human (contain a space, not a handle)
+  const explicit =
+    officer.name ||
+    [officer.firstName, officer.lastName].filter(Boolean).join(" ") ||
+    null;
+
+  const titleizeLocal = (s) =>
+    String(s || "")
+      .replace(/[_\.\-]+/g, " ")   // jane.doe -> jane doe
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\b\w/g, (c) => c.toUpperCase()); // jane doe -> Jane Doe
+
+  // If we already have a human-looking name, keep it.
+  if (explicit && /\s/.test(explicit) && !/^[a-z0-9._-]+$/i.test(explicit)) {
+    return explicit.trim();
+  }
+
+  // If the "name" is a handle (jane.doe / jdoe), humanize it.
+  if (explicit && !explicit.includes("@")) {
+    return titleizeLocal(explicit);
+  }
+
+  // Last resort: derive from email local-part
+  if (officer.email) {
+    const local = String(officer.email).split("@")[0];
+    return titleizeLocal(local);
+  }
+
+  return null;
 }
 
 /* ---------- Officer candidate lookup (include-safe) ---------- */
