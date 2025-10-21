@@ -1119,6 +1119,9 @@ exports.blacklist = async (req, res) => {
     res.json({
       id: b.id,
       status: b.status,
+      reason: b.blacklistReason,
+      until:  b.blacklistUntil,
+      
       blacklistReason: b.blacklistReason,
       blacklistUntil:  b.blacklistUntil,
       blacklistedAt:   b.blacklistedAt,
@@ -1162,11 +1165,8 @@ exports.listBlacklisted = async (_req, res) => {
 
     const items = borrowers.map((b) => {
       const j = b.toJSON ? b.toJSON() : b;
-
-      // keep phone normalized for display
       const phone = j.phone ? normalizePhone(j.phone) : null;
 
-      // Map to FE-expected keys
       return {
         id: j.id,
         name: j.name || null,
@@ -1174,14 +1174,14 @@ exports.listBlacklisted = async (_req, res) => {
         lastName: j.lastName || null,
         phone,
 
-        // FE expects these names:
+        // what the FE wants:
         reason: j.blacklistReason || null,
-        until: j.blacklistUntil || null,
+        until:  j.blacklistUntil  || null,
 
-        // keep originals too (harmless; can help other screens)
+        // keep originals too (harmless)
         blacklistReason: j.blacklistReason || null,
-        blacklistUntil: j.blacklistUntil || null,
-        blacklistedAt: j.blacklistedAt || null,
+        blacklistUntil:  j.blacklistUntil  || null,
+        blacklistedAt:   j.blacklistedAt   || null,
 
         status: j.status || "blacklisted",
       };
@@ -1193,8 +1193,6 @@ exports.listBlacklisted = async (_req, res) => {
     res.status(500).json({ error: "Failed to fetch blacklisted borrowers" });
   }
 };
-
-
 
 /* -------------------- KYC -------------------- */
 exports.uploadKyc = async (req, res) => {
