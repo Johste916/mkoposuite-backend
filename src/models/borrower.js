@@ -40,6 +40,13 @@ module.exports = (sequelize, DataTypes) => {
       nextKinPhone:         { type: DataTypes.STRING, allowNull: true },
       nextOfKinRelationship:{ type: DataTypes.STRING, allowNull: true },
 
+      // ...existing fields...
+blacklistReason: { type: DataTypes.TEXT,     allowNull: true },
+blacklistUntil:  { type: DataTypes.DATEONLY, allowNull: true },
+blacklistedAt:   { type: DataTypes.DATE,     allowNull: true },
+// ...status...
+
+
       // additional fields used by FE
       groupId:        { type: DataTypes.STRING, allowNull: true },
       loanType:       { type: DataTypes.STRING(32), allowNull: true, defaultValue: 'individual' },

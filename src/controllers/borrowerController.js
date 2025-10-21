@@ -1083,9 +1083,27 @@ exports.blacklist = async (req, res) => {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
     const b = await Borrower.findByPk(req.params.id);
     if (!b) return res.status(404).json({ error: "Borrower not found" });
-    await b.update({ status: "blacklisted" });
+
+    // read from body; tolerate empty strings
+    const reason = (req.body?.reason || "").trim() || null;
+    const until  = req.body?.until ? new Date(req.body.until) : null;
+
+    await b.update({
+      status: "blacklisted",
+      blacklistReason: reason,
+      blacklistUntil:  until,
+      blacklistedAt:   new Date(),
+    });
+
     const derived = await computeBorrowerDerived(b.id);
-    res.json({ id: b.id, status: b.status, ...derived });
+    res.json({
+      id: b.id,
+      status: b.status,
+      blacklistReason: b.blacklistReason,
+      blacklistUntil:  b.blacklistUntil,
+      blacklistedAt:   b.blacklistedAt,
+      ...derived,
+    });
   } catch (error) {
     console.error("blacklist error:", error);
     res.status(500).json({ error: "Failed to blacklist borrower" });
@@ -1097,7 +1115,14 @@ exports.unblacklist = async (req, res) => {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
     const b = await Borrower.findByPk(req.params.id);
     if (!b) return res.status(404).json({ error: "Borrower not found" });
-    await b.update({ status: "active" });
+
+    await b.update({
+      status: "active",
+      blacklistReason: null,
+      blacklistUntil:  null,
+      blacklistedAt:   null,
+    });
+
     const derived = await computeBorrowerDerived(b.id);
     res.json({ id: b.id, status: b.status, ...derived });
   } catch (error) {
@@ -1106,22 +1131,25 @@ exports.unblacklist = async (req, res) => {
   }
 };
 
+
 exports.listBlacklisted = async (_req, res) => {
   try {
     if (!Borrower) return res.json([]);
-    const borrowers = await Borrower.findAll({ where: { status: "blacklisted" } });
-    res.json(
-      borrowers.map((b) => {
-        const j = toApi(b);
-        if (j.phone) j.phone = normalizePhone(j.phone);
-        return j;
-      })
-    );
+    const borrowers = await Borrower.findAll({
+      where: { status: "blacklisted" },
+      order: [["blacklistedAt", "DESC"]],
+    });
+    res.json(borrowers.map((b) => {
+      const j = toApi(b);
+      if (j.phone) j.phone = normalizePhone(j.phone);
+      return j;
+    }));
   } catch (error) {
     console.error("listBlacklisted error:", error);
     res.status(500).json({ error: "Failed to fetch blacklisted borrowers" });
   }
 };
+
 
 /* -------------------- KYC -------------------- */
 exports.uploadKyc = async (req, res) => {
