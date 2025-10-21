@@ -350,6 +350,8 @@ exports.getAllBorrowers = async (req, res) => {
         { name: { [likeOp]: `%${q}%` } },
         { phone: { [likeOp]: `%${q}%` } },
         { nationalId: { [likeOp]: `%${q}%` } },
+        { idNumber: { [likeOp]: `%${q}%` } },
+        { customerNumber: { [likeOp]: `%${q}%` } },
       ];
     }
 
@@ -432,6 +434,16 @@ exports.createBorrower = async (req, res) => {
     const lastName = (b.lastName || "").trim();
     const displayName = (b.name || b.fullName || `${firstName} ${lastName}`.trim()).trim();
     if (!displayName) return res.status(400).json({ error: "name is required" });
+    // NEW (optional but aligns with your DB):
+if (existingCols.includes("firstName")) payload.firstName = b.firstName || null;
+if (existingCols.includes("lastName"))  payload.lastName  = b.lastName  || null;
+if (existingCols.includes("secondaryPhone"))
+  payload.secondaryPhone = normalizePhone(b.secondaryPhone || null);
+
+// if your DB has addressLine separate from address
+if (existingCols.includes("addressLine"))
+  payload.addressLine = b.addressLine || null;
+
 
     // Branch handling and validation
     const needsBranchId =
@@ -674,6 +686,14 @@ exports.updateBorrower = async (req, res) => {
       setIf("nextKinPhone", normalizePhone(body.nextKinPhone));
     setIf("nextKinName", body.nextKinName);
     setIf("nextOfKinRelationship", body.nextOfKinRelationship);
+
+    // NEW: names, extra contact, and address line
+setIf("firstName", body.firstName);
+setIf("lastName",  body.lastName);
+if (typeof body.secondaryPhone !== "undefined")
+  setIf("secondaryPhone", normalizePhone(body.secondaryPhone));
+setIf("addressLine", body.addressLine);
+
 
     // misc
     setIf("groupId", body.groupId);
@@ -1139,16 +1159,41 @@ exports.listBlacklisted = async (_req, res) => {
       where: { status: "blacklisted" },
       order: [["blacklistedAt", "DESC"]],
     });
-    res.json(borrowers.map((b) => {
-      const j = toApi(b);
-      if (j.phone) j.phone = normalizePhone(j.phone);
-      return j;
-    }));
+
+    const items = borrowers.map((b) => {
+      const j = b.toJSON ? b.toJSON() : b;
+
+      // keep phone normalized for display
+      const phone = j.phone ? normalizePhone(j.phone) : null;
+
+      // Map to FE-expected keys
+      return {
+        id: j.id,
+        name: j.name || null,
+        firstName: j.firstName || null,
+        lastName: j.lastName || null,
+        phone,
+
+        // FE expects these names:
+        reason: j.blacklistReason || null,
+        until: j.blacklistUntil || null,
+
+        // keep originals too (harmless; can help other screens)
+        blacklistReason: j.blacklistReason || null,
+        blacklistUntil: j.blacklistUntil || null,
+        blacklistedAt: j.blacklistedAt || null,
+
+        status: j.status || "blacklisted",
+      };
+    });
+
+    res.json(items);
   } catch (error) {
     console.error("listBlacklisted error:", error);
     res.status(500).json({ error: "Failed to fetch blacklisted borrowers" });
   }
 };
+
 
 
 /* -------------------- KYC -------------------- */
