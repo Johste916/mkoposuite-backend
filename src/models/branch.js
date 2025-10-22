@@ -1,3 +1,4 @@
+// models/branch.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
@@ -6,16 +7,22 @@ module.exports = (sequelize, DataTypes) => {
     {
       id:   { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
       name: { type: DataTypes.STRING, allowNull: false },
-      // Keep the model minimal to match your live table ("Branches": id, name)
-      // Add optional fields here only if they truly exist in the DB.
-      // code: DataTypes.STRING,
-      // phone: DataTypes.STRING,
-      // address: DataTypes.TEXT,
+
+      // 🔧 Compatibility shim: some queries select Branch.code, but the DB column doesn't exist.
+      // Expose it as a VIRTUAL so Sequelize won't try to read a physical column.
+      code: {
+        type: DataTypes.VIRTUAL,
+        get() {
+          // If you want to synthesize a value, do it here.
+          // e.g. return String(this.getDataValue('id')).padStart(3, '0');
+          return null;
+        },
+      },
     },
     {
-      tableName: 'Branches',   // matches your live DB
-      timestamps: true,        // createdAt/updatedAt exist in your BorrowerGroups; ok to keep for Branch too
-      paranoid: false,         // <-- critical: stop adding "deletedAt IS NULL"
+      tableName: 'Branches',  // matches your live table name (capitalized)
+      paranoid: false,        // don't add deletedAt filters
+      timestamps: false,      // flip to true only if your table really has createdAt/updatedAt
     }
   );
 
