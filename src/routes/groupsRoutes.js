@@ -1,3 +1,4 @@
+// routes/groups.js  (mount under /api/groups and /api/borrowers/groups)
 'use strict';
 
 const express = require('express');
@@ -20,10 +21,12 @@ const clean = (v) => (v === '' ? null : v);
 const officerFromBody = (b) =>
   b?.officerId ?? b?.loanOfficerId ?? b?.loan_officer_id ?? null;
 
-const buildGroupInclude = (models, includeMembers = false) => {
+const pickArray = (x) =>
+  Array.isArray(x) ? x : (x?.items || x?.rows || x?.data || x?.results || x?.members || x?.memberIds || x?.borrowers || x?.ids || []);
+
+const buildInclude = (models, includeMembers) => {
   const { BorrowerGroup, BorrowerGroupMember, Borrower, Branch, User } = models;
   const inc = [];
-
   if (includeMembers && BorrowerGroupMember) {
     const mem = {
       model: BorrowerGroupMember,
@@ -39,7 +42,6 @@ const buildGroupInclude = (models, includeMembers = false) => {
     }
     inc.push(mem);
   }
-
   if (Branch && hasAttr(BorrowerGroup, 'branchId')) {
     inc.push({ model: Branch, as: 'branch', attributes: ['id', 'name'] });
   }
@@ -49,7 +51,7 @@ const buildGroupInclude = (models, includeMembers = false) => {
   return inc;
 };
 
-const shapeGroup = (g) => {
+const shapeOne = (g) => {
   const members = Array.isArray(g.groupMembers)
     ? g.groupMembers.map((m) => {
         const b = m.borrower || {};
@@ -81,7 +83,7 @@ router.get('/', async (req, res) => {
   try {
     const models = getModels(req);
     const { BorrowerGroup, Sequelize } = models;
-    if (!BorrowerGroup) return res.ok ? res.ok([]) : res.json([]);
+    if (!BorrowerGroup) return res.json([]);
 
     const { Op } = Sequelize || {};
     const where = {};
@@ -95,7 +97,7 @@ router.get('/', async (req, res) => {
     if (q && Op) where[Op.or] = [{ name: { [Op.iLike]: `%${q}%` } }];
 
     const includeMembers = String(req.query.include || '').split(',').includes('members');
-    const include = buildGroupInclude(models, includeMembers);
+    const include = buildInclude(models, includeMembers);
 
     const attrs = ['id','name'].concat(
       ['branchId','officerId','status','meetingDay','createdAt','updatedAt']
@@ -104,7 +106,7 @@ router.get('/', async (req, res) => {
 
     const rows = await BorrowerGroup.findAll({ where, attributes: attrs, include, order: [['name','ASC']] });
 
-    if (!includeMembers) return res.ok ? res.ok(rows) : res.json(rows);
+    if (!includeMembers) return res.json(rows);
 
     const shaped = rows.map((g) => ({
       id: g.id,
@@ -114,9 +116,9 @@ router.get('/', async (req, res) => {
       loanCount: 0,
       outstanding: 0,
     }));
-    return res.ok ? res.ok({ items: shaped, total: shaped.length }) : res.json({ items: shaped, total: shaped.length });
+    return res.json({ items: shaped, total: shaped.length });
   } catch (e) {
-    return res.fail ? res.fail(500, e.message) : res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
@@ -125,28 +127,28 @@ router.get('/:id', async (req, res) => {
   try {
     const models = getModels(req);
     const { BorrowerGroup } = models;
-    if (!BorrowerGroup) return res.ok ? res.ok(null) : res.json(null);
+    if (!BorrowerGroup) return res.json(null);
 
     const row = await BorrowerGroup.findByPk(String(req.params.id), {
-      include: buildGroupInclude(models, true),
+      include: buildInclude(models, true),
     });
     if (!row) return res.status(404).json({ error: 'Group not found' });
-
-    return res.ok ? res.ok(shapeGroup(row)) : res.json(shapeGroup(row));
+    return res.json(shapeOne(row));
   } catch (e) {
-    return res.fail ? res.fail(500, e.message) : res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
-// CREATE
+// CREATE (supports initial members)
 router.post('/', async (req, res) => {
-  try {
-    const { BorrowerGroup } = getModels(req);
-    if (!BorrowerGroup) return res.status(501).json({ error: 'BorrowerGroup model not available' });
+  const { BorrowerGroup, BorrowerGroupMember, sequelize } = getModels(req);
+  if (!BorrowerGroup) return res.status(501).json({ error: 'BorrowerGroup model not available' });
 
+  const t = await sequelize.transaction();
+  try {
     const b = req.body || {};
     const name = String(b.name || '').trim();
-    if (!name) return res.status(400).json({ error: 'name is required' });
+    if (!name) { await t.rollback(); return res.status(400).json({ error: 'name is required' }); }
 
     const payload = { name };
     const setIf = (k, val) => { if (hasAttr(BorrowerGroup, k) && val !== undefined) payload[k] = clean(val); };
@@ -159,20 +161,39 @@ router.post('/', async (req, res) => {
 
     if (payload.meetingDay) {
       payload.meetingDay = String(payload.meetingDay).toLowerCase();
-      if (!allowedDays.includes(payload.meetingDay)) return res.status(400).json({ error: 'meetingDay must be monday…sunday' });
+      if (!allowedDays.includes(payload.meetingDay)) { await t.rollback(); return res.status(400).json({ error: 'meetingDay must be monday…sunday' }); }
     }
     if (payload.status) {
       payload.status = String(payload.status).toLowerCase();
-      if (!allowedStatus.includes(payload.status)) return res.status(400).json({ error: 'status must be active|inactive' });
+      if (!allowedStatus.includes(payload.status)) { await t.rollback(); return res.status(400).json({ error: 'status must be active|inactive' }); }
     }
 
     const tId = req.headers['x-tenant-id'];
     if (tId && hasAttr(BorrowerGroup, 'tenantId')) payload.tenantId = tId;
 
-    const row = await BorrowerGroup.create(payload);
-    return res.status(201).json(shapeGroup(row));
+    const row = await BorrowerGroup.create(payload, { transaction: t });
+
+    // optional initial members
+    const ids = pickArray(b).map((x) => Number(x)).filter(Boolean);
+    if (ids.length && BorrowerGroupMember) {
+      const rows = ids.map((borrowerId) => ({
+        groupId: row.id, borrowerId, role: 'member', joinedAt: new Date(),
+      }));
+      // insert with unique check
+      for (const r of rows) {
+        await BorrowerGroupMember.findOrCreate({
+          where: { groupId: r.groupId, borrowerId: r.borrowerId },
+          defaults: r,
+          transaction: t,
+        });
+      }
+    }
+
+    await t.commit();
+    return res.status(201).json({ id: row.id, name: row.name });
   } catch (e) {
-    return res.fail ? res.fail(500, e.message) : res.status(500).json({ error: e.message });
+    await t.rollback();
+    return res.status(500).json({ error: e.message });
   }
 });
 
@@ -189,12 +210,10 @@ router.patch('/:id', async (req, res) => {
     const up = {};
     if (b.name !== undefined) up.name = String(b.name || '').trim();
     if (hasAttr(BorrowerGroup, 'branchId') && b.branchId !== undefined) up.branchId = clean(b.branchId);
-
     if (hasAttr(BorrowerGroup, 'officerId') &&
         (b.officerId !== undefined || b.loanOfficerId !== undefined || b.loan_officer_id !== undefined)) {
       up.officerId = clean(officerFromBody(b));
     }
-
     if (b.meetingDay !== undefined && hasAttr(BorrowerGroup, 'meetingDay')) {
       up.meetingDay = clean(b.meetingDay);
       if (up.meetingDay) {
@@ -202,7 +221,6 @@ router.patch('/:id', async (req, res) => {
         if (!allowedDays.includes(up.meetingDay)) return res.status(400).json({ error: 'meetingDay must be monday…sunday' });
       }
     }
-
     if (b.status !== undefined && hasAttr(BorrowerGroup, 'status')) {
       up.status = clean(b.status);
       if (up.status) {
@@ -210,36 +228,19 @@ router.patch('/:id', async (req, res) => {
         if (!allowedStatus.includes(up.status)) return res.status(400).json({ error: 'status must be active|inactive' });
       }
     }
-
     if (b.notes !== undefined && hasAttr(BorrowerGroup, 'notes')) up.notes = clean(b.notes);
 
     await row.update(up);
     const fresh = await BorrowerGroup.findByPk(String(req.params.id), {
-      include: buildGroupInclude(getModels(req), true),
+      include: buildInclude(getModels(req), true),
     });
-    return res.ok ? res.ok(shapeGroup(fresh)) : res.json(shapeGroup(fresh));
+    return res.json(shapeOne(fresh));
   } catch (e) {
-    return res.fail ? res.fail(500, e.message) : res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
-// DELETE
-router.delete('/:id', async (req, res) => {
-  try {
-    const { BorrowerGroup } = getModels(req);
-    if (!BorrowerGroup) return res.status(501).json({ error: 'BorrowerGroup model not available' });
-
-    const row = await BorrowerGroup.findByPk(String(req.params.id));
-    if (!row) return res.status(404).json({ error: 'Group not found' });
-
-    await row.destroy();
-    return res.status(204).end();
-  } catch (e) {
-    return res.fail ? res.fail(500, e.message) : res.status(500).json({ error: e.message });
-  }
-});
-
-// ADD MEMBER
+// ADD MEMBER (single)
 router.post('/:id/members', async (req, res) => {
   const { BorrowerGroup, BorrowerGroupMember, sequelize } = getModels(req) || {};
   if (!BorrowerGroup || !BorrowerGroupMember) {
@@ -261,10 +262,43 @@ router.post('/:id/members', async (req, res) => {
     });
 
     await t.commit();
-    return res.status(201).json({ groupId, borrowerId });
+    return res.status(201).json({ groupId: Number(groupId), borrowerId: Number(borrowerId) });
   } catch (e) {
     await t.rollback();
-    return res.fail ? res.fail(500, e.message) : res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ADD MEMBERS (bulk)
+router.post('/:id/members/bulk', async (req, res) => {
+  const { BorrowerGroup, BorrowerGroupMember, sequelize } = getModels(req) || {};
+  if (!BorrowerGroup || !BorrowerGroupMember) {
+    return res.status(501).json({ error: 'Group/Member model not available' });
+  }
+  const t = await sequelize.transaction();
+  try {
+    const groupId = String(req.params.id);
+    const ids = pickArray(req.body).map((x) => Number(x)).filter(Boolean);
+    if (!ids.length) { await t.rollback(); return res.status(400).json({ error: 'No borrower IDs provided' }); }
+
+    const group = await BorrowerGroup.findByPk(groupId, { transaction: t });
+    if (!group) { await t.rollback(); return res.status(404).json({ error: 'Group not found' }); }
+
+    let created = 0, skipped = 0;
+    for (const borrowerId of ids) {
+      const [, wasCreated] = await BorrowerGroupMember.findOrCreate({
+        where: { groupId, borrowerId },
+        defaults: { role: 'member', joinedAt: new Date() },
+        transaction: t,
+      });
+      wasCreated ? created++ : skipped++;
+    }
+
+    await t.commit();
+    return res.json({ created, skipped, total: ids.length });
+  } catch (e) {
+    await t.rollback();
+    return res.status(500).json({ error: e.message });
   }
 });
 
@@ -279,14 +313,14 @@ router.delete('/:id/members/:borrowerId', async (req, res) => {
     const cnt = await BorrowerGroupMember.destroy({ where: { groupId, borrowerId }, transaction: t });
     await t.commit();
     if (!cnt) return res.status(404).json({ error: 'Member not found in this group' });
-    return res.ok ? res.ok({ success: true }) : res.json({ success: true });
+    return res.json({ success: true });
   } catch (e) {
     await t.rollback();
-    return res.fail ? res.fail(500, e.message) : res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
-// CSV IMPORT (optional)
+// CSV IMPORT
 router.post('/:id/members/import', upload.single('file'), async (req, res) => {
   const { BorrowerGroup, BorrowerGroupMember, sequelize } = getModels(req) || {};
   if (!BorrowerGroup || !BorrowerGroupMember) return res.status(501).json({ error: 'Group/Member model not available' });
@@ -314,10 +348,10 @@ router.post('/:id/members/import', upload.single('file'), async (req, res) => {
       wasCreated ? created++ : skipped++;
     }
     await t.commit();
-    return res.ok ? res.ok({ created, skipped, total: rows.length }) : res.json({ created, skipped, total: rows.length });
+    return res.json({ created, skipped, total: rows.length });
   } catch (e) {
     await t.rollback();
-    return res.fail ? res.fail(500, e.message) : res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
