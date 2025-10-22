@@ -4,20 +4,11 @@ module.exports = (sequelize, DataTypes) => {
   const BorrowerGroupMember = sequelize.define(
     "BorrowerGroupMember",
     {
-      id: {
-        type: DataTypes.UUID,
-        defaultValue: sequelize.literal("gen_random_uuid()"),
-        primaryKey: true,
-        allowNull: false,
-      },
-      groupId: { type: DataTypes.UUID, allowNull: false },
-      borrowerId: { type: DataTypes.UUID, allowNull: false },
+      // Composite primary key (groupId, borrowerId)
+      groupId: { type: DataTypes.BIGINT, allowNull: false, primaryKey: true },
+      borrowerId: { type: DataTypes.BIGINT, allowNull: false, primaryKey: true },
 
-      role: {
-        type: DataTypes.ENUM("member", "chair", "secretary", "treasurer"),
-        allowNull: false,
-        defaultValue: "member",
-      },
+      role: { type: DataTypes.STRING, allowNull: false, defaultValue: "member" },
       joinedAt: { type: DataTypes.DATE, allowNull: true },
       leftAt: { type: DataTypes.DATE, allowNull: true },
 
