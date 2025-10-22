@@ -8,27 +8,109 @@ module.exports = ({ models }) => {
   const {
     BorrowerGroup,
     BorrowerGroupMember,
-    Borrower, // expected
-    Branch,   // optional
-    User,     // optional (officer)
+    Borrower,
+    Branch,
+    User,
     sequelize,
     Sequelize,
   } = models;
 
   const allowedDays = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
   const allowedStatus = ["active","inactive"];
-
+  const clean = (v) => (v === "" ? null : v);
+  const toIntOrNull = (v) => (v === "" || v == null ? null : Number(v));
   const coalesceOfficerId = (body) =>
     body?.officerId ?? body?.loanOfficerId ?? body?.loan_officer_id ?? null;
 
-  const clean = (v) => (v === "" ? null : v);
-  const toIntOrNull = (v) => (v === "" || v == null ? null : Number(v));
+  // ---------- helpers ----------
+  // defensively compute outstanding per borrower from a Loans table if present
+  async function computeOutstandingForBorrowers(borrowerIds, t) {
+    const result = { perBorrower: {}, total: 0 };
+
+    if (!borrowerIds?.length) return result;
+
+    // find a model that looks like "Loans"
+    const Loan =
+      models.Loans ||
+      models.Loan ||
+      models.LoanApplication ||
+      models.LoanApplications ||
+      null;
+
+    if (!Loan) return result;
+
+    // We’ll try raw SQL to support multiple column names.
+    // SUM(COALESCE(outstanding, balance, remaining, amount_due, "amountRemaining", 0))
+    // and treat status not in ('closed','repaid') as active if column exists.
+    const qi = sequelize.getQueryInterface();
+    const table = Loan.getTableName(); // works for model
+    const tableName =
+      typeof table === "object" ? `"${table.schema || "public"}"."${table.tableName}"` : `"${table}"`;
+
+    const idList = borrowerIds.map((id) => Number(id)).filter((n) => Number.isFinite(n));
+    if (idList.length === 0) return result;
+
+    const sql = `
+      SELECT
+        "borrowerId",
+        SUM(
+          COALESCE(
+            try_outstanding,
+            try_balance,
+            try_remaining,
+            try_amount_due,
+            try_amountRemaining,
+            0
+          )
+        ) AS outstanding
+      FROM (
+        SELECT
+          "borrowerId",
+          -- Try common column names; missing columns come back as NULL
+          NULLIF((CASE WHEN true THEN "outstanding" END), NULL) AS try_outstanding,
+          NULLIF((CASE WHEN true THEN "balance" END), NULL)     AS try_balance,
+          NULLIF((CASE WHEN true THEN "remaining" END), NULL)   AS try_remaining,
+          NULLIF((CASE WHEN true THEN "amount_due" END), NULL)  AS try_amount_due,
+          NULLIF((CASE WHEN true THEN "amountRemaining" END), NULL) AS try_amountRemaining
+        FROM ${tableName}
+        WHERE "borrowerId" IN (:ids)
+          AND (
+            -- If status column exists, exclude closed/repaid; otherwise ignore
+            (CASE
+              WHEN EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema='public'
+                             AND table_name=split_part(${sequelize.escape(tableName)},'.',2)::text
+                             AND column_name='status')
+              THEN (COALESCE(LOWER(status), '') NOT IN ('closed','repaid'))
+              ELSE TRUE
+            END)
+          )
+      ) AS t
+      GROUP BY "borrowerId"
+    `;
+
+    try {
+      const [rows] = await sequelize.query(sql, {
+        replacements: { ids: idList },
+        transaction: t,
+      });
+      for (const r of rows) {
+        const o = Number(r.outstanding || 0);
+        result.perBorrower[String(r.borrowerId)] = o;
+        result.total += o;
+      }
+    } catch {
+      // If any error (e.g., table/columns don’t exist), return empty summary
+      return result;
+    }
+    return result;
+  }
 
   // ---------- list ----------
   const list = async (req, res) => {
     try {
       const groups = await BorrowerGroup.findAll({
-        paranoid: false, // <-- ensure no deletedAt check bleeds into includes
+        paranoid: false,
         include: [
           {
             model: BorrowerGroupMember,
@@ -91,7 +173,6 @@ module.exports = ({ models }) => {
         }
       }
 
-      // 🔐 FK sanity checks to avoid 23503
       if (payload.branchId != null && models.Branch) {
         const branch = await models.Branch.findByPk(payload.branchId, { transaction: t, paranoid: false });
         if (!branch) {
@@ -129,7 +210,7 @@ module.exports = ({ models }) => {
     try {
       const { id } = req.params;
       const group = await BorrowerGroup.findByPk(id, {
-        paranoid: false, // <-- see above
+        paranoid: false,
         include: [
           {
             model: BorrowerGroupMember,
@@ -177,7 +258,39 @@ module.exports = ({ models }) => {
     }
   };
 
-  // ---------- update (PATCH/PUT) ----------
+  // ---------- summary (per-borrower outstanding + group total) ----------
+  const summary = async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+      const { id } = req.params;
+      const group = await BorrowerGroup.findByPk(id, {
+        paranoid: false,
+        include: [
+          {
+            model: BorrowerGroupMember,
+            as: "groupMembers",
+            attributes: ["borrowerId"],
+            paranoid: false,
+          },
+        ],
+        transaction: t,
+      });
+      if (!group) {
+        await t.rollback();
+        return res.status(404).json({ error: "Group not found" });
+      }
+      const borrowerIds = (group.groupMembers || []).map((gm) => gm.borrowerId);
+      const { perBorrower, total } = await computeOutstandingForBorrowers(borrowerIds, t);
+      await t.commit();
+      return res.json({ perBorrower, outstandingTotal: total });
+    } catch (e) {
+      await t.rollback();
+      // fail-safe: return zeros
+      return res.json({ perBorrower: {}, outstandingTotal: 0 });
+    }
+  };
+
+  // ---------- update ----------
   const update = async (req, res) => {
     const t = await sequelize.transaction();
     try {
@@ -236,7 +349,6 @@ module.exports = ({ models }) => {
 
       await group.update(changes, { transaction: t });
       await t.commit();
-
       return getOne(req, res);
     } catch (e) {
       await t.rollback();
@@ -249,7 +361,7 @@ module.exports = ({ models }) => {
   const addMember = async (req, res) => {
     const t = await sequelize.transaction();
     try {
-      const { id } = req.params; // groupId
+      const { id } = req.params;
       const borrowerId = toIntOrNull(req.body?.borrowerId);
       if (!borrowerId) {
         await t.rollback();
@@ -298,5 +410,5 @@ module.exports = ({ models }) => {
     }
   };
 
-  return { list, create, getOne, update, addMember, removeMember };
+  return { list, create, getOne, summary, update, addMember, removeMember };
 };
