@@ -1,18 +1,19 @@
+// models/borrowergroupmember.js
 "use strict";
 
 module.exports = (sequelize, DataTypes) => {
   const BorrowerGroupMember = sequelize.define(
     "BorrowerGroupMember",
     {
-      // Composite PK — match DB design
-      groupId:    { type: DataTypes.INTEGER, allowNull: false, primaryKey: true },
-      borrowerId: { type: DataTypes.INTEGER, allowNull: false, primaryKey: true },
-      role:       { type: DataTypes.STRING(32), allowNull: false, defaultValue: "member" },
-      joinedAt:   { type: DataTypes.DATE, allowNull: true },
-      leftAt:     { type: DataTypes.DATE, allowNull: true },
-      createdAt:  { type: DataTypes.DATE, allowNull: false },
-      updatedAt:  { type: DataTypes.DATE, allowNull: false },
-      deletedAt:  { type: DataTypes.DATE, allowNull: true },
+      id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true, allowNull: false },
+      groupId: { type: DataTypes.INTEGER, allowNull: false },
+      borrowerId: { type: DataTypes.INTEGER, allowNull: false },
+      role: { type: DataTypes.STRING(32), allowNull: false, defaultValue: "member" },
+      joinedAt: { type: DataTypes.DATE, allowNull: true },
+      leftAt: { type: DataTypes.DATE, allowNull: true },
+      createdAt: { type: DataTypes.DATE, allowNull: false },
+      updatedAt: { type: DataTypes.DATE, allowNull: false },
+      deletedAt: { type: DataTypes.DATE, allowNull: true },
     },
     {
       tableName: "BorrowerGroupMembers",

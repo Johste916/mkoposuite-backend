@@ -28,13 +28,15 @@ module.exports = ({ models }) => {
   const list = async (req, res) => {
     try {
       const groups = await BorrowerGroup.findAll({
+        paranoid: false, // <-- ensure no deletedAt check bleeds into includes
         include: [
           {
             model: BorrowerGroupMember,
             as: "groupMembers",
             attributes: ["groupId", "borrowerId"],
+            paranoid: false,
           },
-          Branch ? { model: Branch, as: "branch", attributes: ["id", "name"] } : null,
+          Branch ? { model: Branch, as: "branch", attributes: ["id", "name"], paranoid: false } : null,
         ].filter(Boolean),
         order: [["createdAt", "DESC"]],
       });
@@ -91,7 +93,7 @@ module.exports = ({ models }) => {
 
       // 🔐 FK sanity checks to avoid 23503
       if (payload.branchId != null && models.Branch) {
-        const branch = await models.Branch.findByPk(payload.branchId, { transaction: t });
+        const branch = await models.Branch.findByPk(payload.branchId, { transaction: t, paranoid: false });
         if (!branch) {
           await t.rollback();
           return res.status(400).json({ error: `Invalid branchId: ${payload.branchId} (branch not found)` });
@@ -99,7 +101,7 @@ module.exports = ({ models }) => {
       }
 
       if (payload.officerId != null && models.User) {
-        const officer = await models.User.findByPk(payload.officerId, { transaction: t });
+        const officer = await models.User.findByPk(payload.officerId, { transaction: t, paranoid: false });
         if (!officer) {
           await t.rollback();
           return res.status(400).json({ error: `Invalid officerId: ${payload.officerId} (user not found)` });
@@ -127,19 +129,21 @@ module.exports = ({ models }) => {
     try {
       const { id } = req.params;
       const group = await BorrowerGroup.findByPk(id, {
+        paranoid: false, // <-- see above
         include: [
           {
             model: BorrowerGroupMember,
             as: "groupMembers",
             attributes: ["groupId", "borrowerId", "role", "joinedAt", "leftAt"],
+            paranoid: false,
             include: [
               Borrower
-                ? { model: Borrower, as: "borrower", attributes: ["id", "firstName", "lastName", "name", "phone"] }
+                ? { model: Borrower, as: "borrower", attributes: ["id", "firstName", "lastName", "name", "phone"], paranoid: false }
                 : null,
             ].filter(Boolean),
           },
-          Branch ? { model: Branch, as: "branch", attributes: ["id", "name"] } : null,
-          User ? { model: User, as: "officer", attributes: ["id", "name", "email"] } : null,
+          Branch ? { model: Branch, as: "branch", attributes: ["id", "name"], paranoid: false } : null,
+          User ? { model: User, as: "officer", attributes: ["id", "name", "email"], paranoid: false } : null,
         ].filter(Boolean),
       });
 
@@ -178,7 +182,7 @@ module.exports = ({ models }) => {
     const t = await sequelize.transaction();
     try {
       const { id } = req.params;
-      const group = await BorrowerGroup.findByPk(id, { transaction: t });
+      const group = await BorrowerGroup.findByPk(id, { transaction: t, paranoid: false });
       if (!group) {
         await t.rollback();
         return res.status(404).json({ error: "Group not found" });
@@ -215,16 +219,15 @@ module.exports = ({ models }) => {
         }
       }
 
-      // FK guards on update too
       if (changes.branchId != null && models.Branch) {
-        const branch = await models.Branch.findByPk(changes.branchId, { transaction: t });
+        const branch = await models.Branch.findByPk(changes.branchId, { transaction: t, paranoid: false });
         if (!branch) {
           await t.rollback();
           return res.status(400).json({ error: `Invalid branchId: ${changes.branchId} (branch not found)` });
         }
       }
       if (changes.officerId != null && models.User) {
-        const officer = await models.User.findByPk(changes.officerId, { transaction: t });
+        const officer = await models.User.findByPk(changes.officerId, { transaction: t, paranoid: false });
         if (!officer) {
           await t.rollback();
           return res.status(400).json({ error: `Invalid officerId: ${changes.officerId} (user not found)` });
@@ -254,7 +257,7 @@ module.exports = ({ models }) => {
       }
 
       const groupId = toIntOrNull(id);
-      const group = await BorrowerGroup.findByPk(groupId, { transaction: t });
+      const group = await BorrowerGroup.findByPk(groupId, { transaction: t, paranoid: false });
       if (!group) {
         await t.rollback();
         return res.status(404).json({ error: "Group not found" });

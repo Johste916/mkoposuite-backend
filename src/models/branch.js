@@ -6,15 +6,16 @@ module.exports = (sequelize, DataTypes) => {
     {
       id:   { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
       name: { type: DataTypes.STRING, allowNull: false },
-      // Keep extra attributes only if they exist in your DB. Safer to omit.
+      // Keep the model minimal to match your live table ("Branches": id, name)
+      // Add optional fields here only if they truly exist in the DB.
       // code: DataTypes.STRING,
       // phone: DataTypes.STRING,
       // address: DataTypes.TEXT,
     },
     {
-      tableName: 'Branches',   // <-- matches your live DB
-      timestamps: true,        // createdAt / updatedAt
-      paranoid: true,          // if deletedAt exists, it's used; otherwise ignored at runtime
+      tableName: 'Branches',   // matches your live DB
+      timestamps: true,        // createdAt/updatedAt exist in your BorrowerGroups; ok to keep for Branch too
+      paranoid: false,         // <-- critical: stop adding "deletedAt IS NULL"
     }
   );
 
