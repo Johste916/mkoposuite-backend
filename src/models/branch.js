@@ -4,22 +4,17 @@ module.exports = (sequelize, DataTypes) => {
   const Branch = sequelize.define(
     'Branch',
     {
-      id:        { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-      name:      { type: DataTypes.STRING, allowNull: false },
-      code:      { type: DataTypes.STRING },
-      phone:     { type: DataTypes.TEXT,   allowNull: true },
-      address:   { type: DataTypes.TEXT,   allowNull: true },
-      managerId: { type: DataTypes.STRING, field: 'manager', allowNull: true },
-      tenantId:  { type: DataTypes.BIGINT, field: 'tenant_id', allowNull: true },
+      id:   { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+      name: { type: DataTypes.STRING, allowNull: false },
+      // Keep extra attributes only if they exist in your DB. Safer to omit.
+      // code: DataTypes.STRING,
+      // phone: DataTypes.STRING,
+      // address: DataTypes.TEXT,
     },
     {
-      tableName: 'branches',
-      timestamps: true,
-      createdAt: 'created_at',
-      updatedAt: 'updated_at',
-      paranoid: true,
-      deletedAt: 'deletedAt',
-      underscored: false,
+      tableName: 'Branches',   // <-- matches your live DB
+      timestamps: true,        // createdAt / updatedAt
+      paranoid: true,          // if deletedAt exists, it's used; otherwise ignored at runtime
     }
   );
 
@@ -27,7 +22,6 @@ module.exports = (sequelize, DataTypes) => {
     if (models.User) {
       Branch.hasMany(models.User, { foreignKey: 'branchId', as: 'Users' });
     }
-    // ✅ Non-breaking: use the Borrower model attribute "branchId" (maps to DB column branch_id)
     if (models.Borrower) {
       Branch.hasMany(models.Borrower, { foreignKey: 'branchId', as: 'Borrowers' });
     }

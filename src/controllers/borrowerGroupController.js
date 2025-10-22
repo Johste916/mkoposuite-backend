@@ -18,14 +18,11 @@ module.exports = ({ models }) => {
   const allowedDays = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
   const allowedStatus = ["active","inactive"];
 
-  // ---------- helpers ----------
   const coalesceOfficerId = (body) =>
-    body?.officerId ??
-    body?.loanOfficerId ??
-    body?.loan_officer_id ??
-    null;
+    body?.officerId ?? body?.loanOfficerId ?? body?.loan_officer_id ?? null;
 
   const clean = (v) => (v === "" ? null : v);
+  const toIntOrNull = (v) => (v === "" || v == null ? null : Number(v));
 
   // ---------- list ----------
   const list = async (req, res) => {
@@ -35,7 +32,7 @@ module.exports = ({ models }) => {
           {
             model: BorrowerGroupMember,
             as: "groupMembers",
-            attributes: ["groupId", "borrowerId"], // no standalone id
+            attributes: ["groupId", "borrowerId"],
           },
           Branch ? { model: Branch, as: "branch", attributes: ["id", "name"] } : null,
         ].filter(Boolean),
@@ -60,35 +57,68 @@ module.exports = ({ models }) => {
 
   // ---------- create ----------
   const create = async (req, res) => {
+    const t = await sequelize.transaction();
     try {
       const payload = {
         name: (req.body?.name || "").trim(),
-        branchId: clean(req.body?.branchId),
-        officerId: clean(coalesceOfficerId(req.body)),
-        meetingDay: clean(req.body?.meetingDay),
-        notes: clean(req.body?.notes),
-        status: clean(req.body?.status) || "active",
+        branchId: toIntOrNull(req.body?.branchId),
+        officerId: coalesceOfficerId(req.body),
+        meetingDay: req.body?.meetingDay === "" ? null : req.body?.meetingDay,
+        notes: req.body?.notes === "" ? null : req.body?.notes,
+        status: (req.body?.status || "active") || "active",
       };
 
-      if (!payload.name) return res.status(400).json({ error: "Name is required" });
+      if (!payload.name) {
+        await t.rollback();
+        return res.status(400).json({ error: "name is required" });
+      }
+
       if (payload.meetingDay) {
         payload.meetingDay = String(payload.meetingDay).toLowerCase();
         if (!allowedDays.includes(payload.meetingDay)) {
+          await t.rollback();
           return res.status(400).json({ error: "meetingDay must be monday…sunday" });
         }
       }
+
       if (payload.status) {
         payload.status = String(payload.status).toLowerCase();
         if (!allowedStatus.includes(payload.status)) {
+          await t.rollback();
           return res.status(400).json({ error: "status must be active|inactive" });
         }
       }
 
-      const g = await BorrowerGroup.create(payload);
-      res.status(201).json({ id: g.id, name: g.name });
+      // 🔐 FK sanity checks to avoid 23503
+      if (payload.branchId != null && models.Branch) {
+        const branch = await models.Branch.findByPk(payload.branchId, { transaction: t });
+        if (!branch) {
+          await t.rollback();
+          return res.status(400).json({ error: `Invalid branchId: ${payload.branchId} (branch not found)` });
+        }
+      }
+
+      if (payload.officerId != null && models.User) {
+        const officer = await models.User.findByPk(payload.officerId, { transaction: t });
+        if (!officer) {
+          await t.rollback();
+          return res.status(400).json({ error: `Invalid officerId: ${payload.officerId} (user not found)` });
+        }
+      }
+
+      const g = await models.BorrowerGroup.create(payload, { transaction: t });
+      await t.commit();
+      return res.status(201).json({ id: g.id, name: g.name });
     } catch (e) {
+      await t.rollback();
+      if (e?.name === "SequelizeForeignKeyConstraintError") {
+        const isBranch = String(e?.index || e?.constraint || "").toLowerCase().includes("branch");
+        const isOfficer = String(e?.index || e?.constraint || "").toLowerCase().includes("officer");
+        const which = isBranch ? "branchId" : isOfficer ? "officerId" : "foreign key";
+        return res.status(400).json({ error: `Invalid ${which} (referenced row does not exist)` });
+      }
       console.error("Create group error:", e);
-      res.status(500).json({ error: "Failed to create group" });
+      return res.status(500).json({ error: "Failed to create group" });
     }
   };
 
@@ -119,7 +149,7 @@ module.exports = ({ models }) => {
         const b = m.borrower || {};
         const name = b.name || [b.firstName, b.lastName].filter(Boolean).join(" ").trim();
         return {
-          id: b.id ?? m.borrowerId,           // UI expects borrower id here
+          id: b.id ?? m.borrowerId,
           name: name || String(b.id ?? m.borrowerId),
           phone: b.phone || null,
           role: m.role || "member",
@@ -156,7 +186,8 @@ module.exports = ({ models }) => {
 
       const changes = {
         name: req.body?.name !== undefined ? (req.body.name || "").trim() : group.name,
-        branchId: req.body?.branchId !== undefined ? clean(req.body.branchId) : group.branchId,
+        branchId:
+          req.body?.branchId !== undefined ? toIntOrNull(req.body.branchId) : group.branchId,
         officerId:
           req.body?.officerId !== undefined ||
           req.body?.loanOfficerId !== undefined ||
@@ -184,10 +215,25 @@ module.exports = ({ models }) => {
         }
       }
 
+      // FK guards on update too
+      if (changes.branchId != null && models.Branch) {
+        const branch = await models.Branch.findByPk(changes.branchId, { transaction: t });
+        if (!branch) {
+          await t.rollback();
+          return res.status(400).json({ error: `Invalid branchId: ${changes.branchId} (branch not found)` });
+        }
+      }
+      if (changes.officerId != null && models.User) {
+        const officer = await models.User.findByPk(changes.officerId, { transaction: t });
+        if (!officer) {
+          await t.rollback();
+          return res.status(400).json({ error: `Invalid officerId: ${changes.officerId} (user not found)` });
+        }
+      }
+
       await group.update(changes, { transaction: t });
       await t.commit();
 
-      // Return the fresh shape the UI expects
       return getOne(req, res);
     } catch (e) {
       await t.rollback();
@@ -201,26 +247,27 @@ module.exports = ({ models }) => {
     const t = await sequelize.transaction();
     try {
       const { id } = req.params; // groupId
-      const borrowerId = req.body?.borrowerId;
+      const borrowerId = toIntOrNull(req.body?.borrowerId);
       if (!borrowerId) {
         await t.rollback();
         return res.status(400).json({ error: "borrowerId is required" });
       }
 
-      const group = await BorrowerGroup.findByPk(id, { transaction: t });
+      const groupId = toIntOrNull(id);
+      const group = await BorrowerGroup.findByPk(groupId, { transaction: t });
       if (!group) {
         await t.rollback();
         return res.status(404).json({ error: "Group not found" });
       }
 
       await BorrowerGroupMember.findOrCreate({
-        where: { groupId: id, borrowerId },
+        where: { groupId, borrowerId },
         defaults: { role: "member", joinedAt: new Date() },
         transaction: t,
       });
 
       await t.commit();
-      res.status(201).json({ groupId: Number(id), borrowerId: Number(borrowerId) });
+      res.status(201).json({ groupId, borrowerId });
     } catch (e) {
       await t.rollback();
       console.error("Add member error:", e);
@@ -232,9 +279,10 @@ module.exports = ({ models }) => {
   const removeMember = async (req, res) => {
     const t = await sequelize.transaction();
     try {
-      const { id, borrowerId } = req.params;
+      const groupId = toIntOrNull(req.params.id);
+      const borrowerId = toIntOrNull(req.params.borrowerId);
       const deleted = await BorrowerGroupMember.destroy({
-        where: { groupId: id, borrowerId },
+        where: { groupId, borrowerId },
         transaction: t,
       });
       await t.commit();

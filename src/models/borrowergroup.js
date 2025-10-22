@@ -10,7 +10,6 @@ module.exports = (sequelize, DataTypes) => {
       branchId: { type: DataTypes.INTEGER, allowNull: true },
       officerId: { type: DataTypes.UUID, allowNull: true },
 
-      // Model as STRINGs; DB has ENUM so values must match, but we avoid tying to enum name
       meetingDay: { type: DataTypes.STRING, allowNull: true },
       notes: { type: DataTypes.TEXT, allowNull: true },
       status: { type: DataTypes.STRING, allowNull: false, defaultValue: "active" },
