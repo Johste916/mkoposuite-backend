@@ -4,18 +4,13 @@ module.exports = (sequelize, DataTypes) => {
   const BorrowerGroup = sequelize.define(
     "BorrowerGroup",
     {
-      id: {
-        type: DataTypes.BIGINT,        // BIGINT to match DB
-        autoIncrement: true,
-        primaryKey: true,
-        allowNull: false,
-      },
+      id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true, allowNull: false },
       name: { type: DataTypes.STRING(160), allowNull: false },
 
-      branchId: { type: DataTypes.BIGINT, allowNull: true },
-      officerId: { type: DataTypes.BIGINT, allowNull: true },
+      branchId: { type: DataTypes.INTEGER, allowNull: true },
+      officerId: { type: DataTypes.UUID, allowNull: true },
 
-      // Use STRING/TEXT rather than ENUM so it fits both old/new DBs
+      // Model as STRINGs; DB has ENUM so values must match, but we avoid tying to enum name
       meetingDay: { type: DataTypes.STRING, allowNull: true },
       notes: { type: DataTypes.TEXT, allowNull: true },
       status: { type: DataTypes.STRING, allowNull: false, defaultValue: "active" },
@@ -31,28 +26,23 @@ module.exports = (sequelize, DataTypes) => {
       underscored: false,
       hooks: {
         beforeValidate(instance) {
-          if (instance.meetingDay) {
-            instance.meetingDay = String(instance.meetingDay).toLowerCase();
-          }
-          ["branchId", "officerId", "notes"].forEach((k) => {
+          if (instance.meetingDay) instance.meetingDay = String(instance.meetingDay).toLowerCase();
+          if (instance.status) instance.status = String(instance.status).toLowerCase();
+          ["branchId","officerId","notes"].forEach((k) => {
             if (instance[k] === "") instance[k] = null;
           });
-          if (instance.status) instance.status = String(instance.status).toLowerCase();
         },
       },
       validate: {
         meetingDayAllowed() {
-          if (
-            this.meetingDay &&
-            !["monday","tuesday","wednesday","thursday","friday","saturday","sunday"].includes(
-              String(this.meetingDay).toLowerCase()
-            )
-          ) {
-            throw new Error("meetingDay must be a weekday name");
+          const v = (this.meetingDay || "").toLowerCase();
+          if (v && !["monday","tuesday","wednesday","thursday","friday","saturday","sunday"].includes(v)) {
+            throw new Error("meetingDay must be monday…sunday");
           }
         },
         statusAllowed() {
-          if (this.status && !["active","inactive"].includes(String(this.status).toLowerCase())) {
+          const v = (this.status || "").toLowerCase();
+          if (v && !["active","inactive"].includes(v)) {
             throw new Error("status must be active|inactive");
           }
         },
