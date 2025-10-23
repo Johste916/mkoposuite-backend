@@ -14,6 +14,7 @@ const Branch             = db.Branch || db.branches || db.Branches;
 const User               = db.User || db.Users;
 const LoanProduct        = db.LoanProduct || db.Product || db.LoanProducts;
 const SavingsTransaction = db.SavingsTransaction || db.SavingsTx;
+const sequelize          = db.sequelize; // may be undefined in memory-only mode
 
 /* ------------------------- cross-schema safe helpers ------------------------ */
 const safeNumber = (v) => Number(v || 0);
@@ -119,8 +120,6 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
 
   // Resolve Loan attributes
   const idField       = pickFieldName(Loan, ['id']);
-  const idKey         = pickAttrKey(Loan,   ['id']);
-
   const borrowerKey   = pickAttrKey(Loan, ['borrowerId', 'borrower_id']);
   const productKey    = pickAttrKey(Loan, ['productId', 'product_id']);
   const amountKey     = pickAttrKey(Loan, ['amount', 'loanAmount', 'principalAmount']);
@@ -144,17 +143,35 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
       ...tenantFilter(LoanPayment, req),
     };
 
-    const attrs = [];
-    attrs.push([col(LoanPayment.rawAttributes[lpLoanIdKey].field || lpLoanIdKey), 'loanId']);
-    attrs.push([fn('sum', col(LoanPayment.rawAttributes[lpAmountKey].field || lpAmountKey)), 'paid']);
+    const loanIdField = LoanPayment?.rawAttributes?.[lpLoanIdKey]?.field || lpLoanIdKey;
+    const amountField = LoanPayment?.rawAttributes?.[lpAmountKey]?.field || lpAmountKey;
+    const dateField   = lpDateKey ? (LoanPayment?.rawAttributes?.[lpDateKey]?.field || lpDateKey) : null;
 
-    const paidByLoan = await LoanPayment.findAll({
+    const attrs = [
+      [col(loanIdField), 'loanId'],
+      [fn('sum', col(amountField)), 'paid'],
+    ];
+
+    // also compute last payment date/createdAt for optional ordering (safe in Postgres)
+    if (dateField) attrs.push([fn('max', col(dateField)), 'lastPaymentDate']);
+    attrs.push([fn('max', col(LoanPayment?.rawAttributes?.createdAt?.field || 'createdAt')), 'lastCreatedAt']);
+
+    const options = {
       where,
       attributes: attrs,
-      group: [col(LoanPayment.rawAttributes[lpLoanIdKey].field || lpLoanIdKey)],
+      group: [col(loanIdField)],
       raw: true,
-    });
+    };
 
+    // If we have a sequelize instance, sort by MAX(date)/MAX(createdAt) (valid with GROUP BY)
+    if (sequelize) {
+      const order = [];
+      if (dateField) order.push([sequelize.literal(`MAX("${LoanPayment.getTableName()}"."${dateField}")`), 'DESC']);
+      order.push([sequelize.literal(`MAX("${LoanPayment.getTableName()}"."${LoanPayment?.rawAttributes?.createdAt?.field || 'createdAt'}")`), 'DESC']);
+      options.order = order;
+    }
+
+    const paidByLoan = await LoanPayment.findAll(options);
     paidMap = new Map((paidByLoan || []).map(r => [String(r.loanId), safeNumber(r.paid)]));
   }
 
@@ -167,11 +184,11 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
   if (principalKey) loanAttrs.push([col(Loan.rawAttributes[principalKey].field || principalKey), 'principal']);
   if (createdAtKey) loanAttrs.push([col(Loan.rawAttributes[createdAtKey].field || createdAtKey), 'createdAt']);
 
-  const loans = await Loan.findAll({
+  const loans = await (Loan ? Loan.findAll({
     attributes: loanAttrs.length ? loanAttrs : undefined,
     where: { ...tenantFilter(Loan, req) },
     raw: true,
-  });
+  }) : []);
 
   // Compute outstanding (principal or amount minus paid)
   const rows = (loans || []).map(l => {
