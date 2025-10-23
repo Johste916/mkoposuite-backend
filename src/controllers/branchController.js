@@ -1,6 +1,5 @@
 // controllers/branchController.js
 'use strict';
-const { Op } = require('sequelize');
 
 let db = {};
 try { db = require('../models'); } catch {}
@@ -29,7 +28,7 @@ exports.listStaff = async (req, res, next) => {
              u.email,
              u.role
       FROM public.user_branches ub
-      JOIN public.users u ON u.id = ub.user_id
+      JOIN public."Users" u ON u.id = ub.user_id
       WHERE ub.branch_id = $1
       ORDER BY name ASC
       `,
