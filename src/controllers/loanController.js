@@ -781,7 +781,13 @@ const getAllLoans = async (req, res) => {
 ============================================ */
 const getLoanById = async (req, res) => {
   try {
-    const { id } = req.params;
+    // Guard: only allow numeric IDs here so /loans/disbursed never reaches the DB as an id
+    const idRaw = String(req.params.id ?? '');
+    const id = Number.parseInt(idRaw, 10);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Loan id must be an integer', received: idRaw });
+    }
+
     const { includeRepayments = "true", includeSchedule = "true" } = req.query;
 
     const loan = await fetchLoanByPkSafe(id);
