@@ -242,7 +242,11 @@ const SUPPORT_STORE = { TICKETS: new Map(), nextId: 1 };
 const SMS_LOGS = [];
 
 /* Load groups router early, but DO NOT mount it yet to avoid TDZ with auth/active */
-const groupsRoutes = safeLoadRoutes('./routes/groupsRoutes', makeDummyRouter([]));
+/* 🔧 FIX: prefer routes/groups.js, then routes/groupsRoutes.js, else dummy */
+const groupsRoutes = safeLoadFirst(
+  ['./routes/groups', './routes/groupsRoutes'],
+  makeDummyRouter([])
+);
 // ⬆️ Mounts for /api/groups are moved to the Mounting section (after auth/active are defined).
 
 /* Alias: /api/tickets/:id/comments → Support store */
@@ -681,20 +685,17 @@ function makeEnrichmentFallbackRouter() {
 }
 
 /* -------------------- Compat: Comments & Repayments (in-memory) ------------ */
-/* These keep the UI working even if DB routes are missing/broken. */
 const COMMENTS_MEM = [];
 let COMMENTS_NEXT_ID = 1;
 function makeCommentsCompatRouter() {
   const r = express.Router();
 
-  // List comments for a loan
   r.get('/loan/:loanId', (req, res) => {
     const items = COMMENTS_MEM.filter(c => String(c.loanId) === String(req.params.loanId));
     res.setHeader('X-Total-Count', String(items.length));
     res.json(items);
   });
 
-  // Create comment
   r.post('/', (req, res) => {
     const { loanId, content } = req.body || {};
     if (!loanId || !content) {
@@ -719,14 +720,12 @@ let REPAYMENTS_NEXT_ID = 1;
 function makeRepaymentsCompatRouter() {
   const r = express.Router();
 
-  // List repayments for a loan
   r.get('/loan/:loanId', (req, res) => {
     const items = REPAYMENTS_MEM.filter(p => String(p.loanId) === String(req.params.loanId));
     res.setHeader('X-Total-Count', String(items.length));
     res.json(items);
   });
 
-  // Create repayment
   r.post('/', (req, res) => {
     const { loanId, amount, date, method, notes } = req.body || {};
     const amt = Number(amount);
@@ -753,7 +752,6 @@ function makeRepaymentsCompatRouter() {
 function makeTenantFeatureBridgeRouter() {
   const r = express.Router({ mergeParams: true });
 
-  // Tickets under /api/tenants/:tenantId/tickets (and alias /support/tickets)
   r.get('/:tenantId/tickets', (req, res) => {
     const tenantId = String(req.params.tenantId);
     const items = Array.from(SUPPORT_STORE.TICKETS.values()).filter(t => t.tenantId === tenantId);
@@ -809,7 +807,6 @@ function makeTenantFeatureBridgeRouter() {
     t.status = 'open'; t.updatedAt = new Date().toISOString(); res.json(t);
   });
 
-  // Alias: /api/tenants/:tenantId/support/tickets*
   r.get('/:tenantId/support/tickets', (req, res) => {
     const tenantId = String(req.params.tenantId);
     const items = Array.from(SUPPORT_STORE.TICKETS.values()).filter(t => t.tenantId === tenantId);
@@ -817,7 +814,6 @@ function makeTenantFeatureBridgeRouter() {
     res.json(items);
   });
 
-  // SMS under tenant scope (write tenantId into logs)
   r.post('/:tenantId/sms/send', (req, res) => {
     const tenantId = String(req.params.tenantId);
     const { to, message, from } = req.body || {};
@@ -840,7 +836,6 @@ function makeTenantFeatureBridgeRouter() {
     res.json({ items });
   });
 
-  // Billing-by-phone under tenant
   r.get('/:tenantId/billing/phone/lookup', (req, res) => {
     const phone = String(req.query.phone || '').trim();
     if (!phone) return res.status(400).json({ error: 'phone query is required' });
@@ -855,7 +850,6 @@ function makeTenantFeatureBridgeRouter() {
     });
   });
 
-  // Enrichment under tenant
   r.get('/:tenantId/enrich/phone', (req, res) => {
     const phone = String(req.query.phone || '').trim();
     if (!phone) return res.status(400).json({ error: 'phone query is required' });
@@ -1059,7 +1053,6 @@ const active = ensureTenantActive ? [ensureTenantActive] : [];
 const ent = (k) => (requireEntitlement ? [requireEntitlement(k)] : []);
 
 /* -------------------------- Automatic audit hooks -------------------------- */
-/* -------------------------- Automatic audit hooks -------------------------- */
 let AuditLog;
 try { ({ AuditLog } = require('./models')); } catch { try { ({ AuditLog } = require('../models')); } catch {} }
 
@@ -1141,10 +1134,6 @@ if (sequelize && !FORCE_REAL) {
 }
 
 /* -------------------- PUBLIC SETTINGS: sidebar (no auth) ------------------- */
-/**
- * Many UIs hit /api/settings/sidebar before auth. Make it optionally public.
- * If a real controller exists, you can swap the fallback to call it.
- */
 const PUBLIC_SIDEBAR_ENABLED = process.env.PUBLIC_SIDEBAR !== '0'; // default on
 const DEFAULT_PUBLIC_SIDEBAR = {
   app: {
@@ -1152,7 +1141,6 @@ const DEFAULT_PUBLIC_SIDEBAR = {
     logoUrl: process.env.APP_LOGO_URL || null,
     version: process.env.APP_VERSION || 'dev',
   },
-  // keep minimal so clients can render shells before login
   sections: [
     {
       key: 'main',
@@ -1165,7 +1153,6 @@ const DEFAULT_PUBLIC_SIDEBAR = {
 };
 if (PUBLIC_SIDEBAR_ENABLED) {
   app.get('/api/settings/sidebar', async (req, res) => {
-    // If you later add a real controller, prefer that and fall back to this payload.
     try {
       const controller = require('./controllers/settingController'); // optional
       if (controller?.publicSidebar) {
@@ -1178,8 +1165,6 @@ if (PUBLIC_SIDEBAR_ENABLED) {
 
 /* ------------------------ 🔔 Register sync listeners (ONCE) ---------------- */
 try {
-  // Requires: ./services/syncBus.js and ./services/syncListeners.js
-  // These files set up the in-process event bus and listeners for auto-sync.
   require('./services/syncListeners');
   console.log('[sync] listeners registered]');
 } catch (e) {
@@ -1301,9 +1286,16 @@ app.use('/api/user-roles',     ...auth, ...active, userRoleRoutes);
 app.use('/api/user-branches',  ...auth, ...active, userBranchRoutes);
 app.use('/api/loan-products',  ...auth, ...active, loanProductRoutes);
 
-/* ✅ Groups mounts (moved here to avoid TDZ for auth/active) */
-app.use('/api/groups',    ...auth, ...active, groupsRoutes);
-app.use('/api/v1/groups', ...auth, ...active, groupsRoutes);
+/* ✅ Groups mounts (with aliases used by the UI) */
+app.use('/api/groups',            ...auth, ...active, groupsRoutes);
+app.use('/api/v1/groups',         ...auth, ...active, groupsRoutes);
+/* 🔧 NEW aliases so /api/borrowers/groups/* and /api/loan-groups/* work */
+app.use('/api/borrowers/groups',  ...auth, ...active, groupsRoutes);
+app.use('/api/loan-groups',       ...auth, ...active, groupsRoutes);
+/* (optional) bare aliases if some clients call without /api */
+app.use('/groups',                groupsRoutes);
+app.use('/borrowers/groups',      groupsRoutes);
+app.use('/loan-groups',           groupsRoutes);
 
 /* New modules */
 app.use('/api/collateral',           ...auth, ...active, ...ent('collateral'),   collateralRoutes);
@@ -1392,12 +1384,11 @@ try {
 
     /* ✅ NEW: Branches-related tables/views presence check */
     app.get('/api/health/db/branches-tables', async (_req, res) => {
-      // These are the tables/views your Branch UI & routes commonly rely on.
       const expected = [
-        'branches',           // core table
-        'users',              // or "Users" depending on old migrations
-        'user_branches',      // often a VIEW used for listing assignments
-        'user_branches_rt',   // runtime relation used by assign-staff
+        'branches',
+        'users',
+        'user_branches',
+        'user_branches_rt',
         'Borrowers',
         'Loans',
         'LoanPayments',
@@ -1421,6 +1412,25 @@ try {
         res.json({ ok: missing.length === 0, present, missing, totalSeenInPublic: presentNames.size });
       } catch (e) {
         console.error('DB table check error:', e);
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    /* ✅ NEW: Borrower Groups tables presence check (optional) */
+    app.get('/api/health/db/borrower-groups', async (_req, res) => {
+      try {
+        const [rows] = await sequelize2.query(`
+          SELECT table_name
+          FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name IN ('BorrowerGroups','BorrowerGroupMembers')
+        `);
+        const names = new Set(rows.map(r => r.table_name));
+        res.json({
+          ok: names.has('BorrowerGroups') && names.has('BorrowerGroupMembers'),
+          present: Array.from(names),
+          missing: ['BorrowerGroups','BorrowerGroupMembers'].filter(t => !names.has(t)),
+        });
+      } catch (e) {
         res.status(500).json({ error: e.message });
       }
     });
