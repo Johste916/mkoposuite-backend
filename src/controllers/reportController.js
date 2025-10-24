@@ -376,54 +376,109 @@ exports.loansSummary = async (req, res) => {
     const { productId } = req.query;
     const { startDate, endDate } = parseDates(req.query);
 
-    const loanDateKey = pickAttrKey(Loan, ['createdAt', 'created_at']);
-    const where = {
-      ...(productId && hasAttr(Loan, 'productId') ? { productId } : {}),
-      ...(startDate || endDate ? betweenRange(loanDateKey, startDate, endDate) : {}),
-      ...tenantFilter(Loan, req),
-    };
-
-    const [count, totalDisbursed] = await Promise.all([
-      Loan ? countSafe(Loan, where) : 0,
-      Loan ? sumSafe(Loan, ['amount','principal','principalAmount','loanAmount'], where) : 0,
-    ]);
-
-    let rows = [];
-    if (Loan) {
-      const idKey        = pickAttrKey(Loan, ['id']);
-      const borrowerKey  = pickAttrKey(Loan, ['borrowerId','borrower_id']);
-      const productKey   = pickAttrKey(Loan, ['productId','product_id']);
-      const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
-      const statusKey    = pickAttrKey(Loan, ['status']);
-      const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at']);
-
-      const attrs = [];
-      if (idKey)        attrs.push(idKey);
-      if (borrowerKey)  attrs.push(borrowerKey);
-      if (productKey)   attrs.push(productKey);
-      if (amountKey)    attrs.push(amountKey);
-      if (statusKey)    attrs.push(statusKey);
-      if (createdAtKey) attrs.push(createdAtKey);
-
-      rows = await Loan.findAll({
-        where,
-        attributes: attrs.length ? attrs : undefined,
-        order: createdAtKey ? [[createdAtKey, 'DESC']] : undefined,
-        limit: 200,
-        raw: true,
+    if (!Loan) {
+      return res.json({
+        summary: { loans: 0, disbursed: 0 },
+        rows: [],
+        period: periodText({ startDate, endDate }),
+        scope: scopeText(req.query),
+        welcome: 'No loans model available.',
       });
     }
 
+    // Which loan fields do we have?
+    const idKey         = pickAttrKey(Loan, ['id']);
+    const borrowerKey   = pickAttrKey(Loan, ['borrowerId','borrower_id']);
+    const productKey    = pickAttrKey(Loan, ['productId','product_id']);
+    const amountKey     = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+    const statusKey     = pickAttrKey(Loan, ['status']);
+    const createdAtKey  = pickAttrKey(Loan, ['createdAt','created_at']);
+    const disbursedKey  = pickAttrKey(Loan, ['disbursementDate','releaseDate','startDate']);
+    const currencyKey   = pickAttrKey(Loan, ['currency']);
+
+    const loanDateKey = createdAtKey || disbursedKey;
+
+    const where = {
+      ...(productId && productKey ? { [productKey]: productId } : {}),
+      ...(loanDateKey ? betweenRange(loanDateKey, startDate, endDate) : {}),
+      ...tenantFilter(Loan, req),
+    };
+
+    // Base rows
+    let rows = await Loan.findAll({
+      where,
+      attributes: [idKey, borrowerKey, productKey, amountKey, statusKey, createdAtKey, disbursedKey, currencyKey].filter(Boolean),
+      order: loanDateKey ? [[loanDateKey, 'DESC']] : undefined,
+      limit: 500,
+      raw: true,
+    });
+
+    // Aggregate header KPIs
+    const [count, totalDisbursed] = await Promise.all([
+      countSafe(Loan, where),
+      sumSafe(Loan, [amountKey || 'amount','principal','principalAmount','loanAmount'].filter(Boolean), where),
+    ]);
+
+    // Pull borrower/product names in one go and map
+    const borrowerIds = Array.from(new Set(rows.map(r => r[borrowerKey]).filter(Boolean)));
+    const productIds  = Array.from(new Set(rows.map(r => r[productKey]).filter(Boolean)));
+
+    let borrowersById = {};
+    if (Borrower && borrowerIds.length) {
+      const bNameKey = pickAttrKey(Borrower, ['name']);
+      const bList = await Borrower.findAll({
+        where: { id: { [Op.in]: borrowerIds }, ...tenantFilter(Borrower, req) },
+        attributes: ['id', ...(bNameKey ? [bNameKey] : [])],
+        raw: true,
+      });
+      borrowersById = Object.fromEntries(
+        bList.map(b => [String(b.id), b[bNameKey] || b.name || ''])
+      );
+    }
+
+    let productsById = {};
+    if (LoanProduct && productIds.length) {
+      const pNameKey = pickAttrKey(LoanProduct, ['name']);
+      const pList = await LoanProduct.findAll({
+        where: { id: { [Op.in]: productIds }, ...tenantFilter(LoanProduct, req) },
+        attributes: ['id', ...(pNameKey ? [pNameKey] : [])],
+        raw: true,
+      });
+      productsById = Object.fromEntries(
+        pList.map(p => [String(p.id), p[pNameKey] || p.name || ''])
+      );
+    }
+
+    // Final UI rows: add borrowerName/productName + normalize fields
+    const uiRows = rows.map(r => ({
+      id: r[idKey],
+      borrowerId: r[borrowerKey],
+      borrowerName: borrowersById[String(r[borrowerKey])] || '—',
+      productId: r[productKey],
+      productName: productsById[String(r[productKey])] || '—',
+      amount: r[amountKey],
+      status: r[statusKey],
+      createdAt: r[createdAtKey],
+      disbursementDate: r[disbursedKey] || r[createdAtKey],
+      currency: r[currencyKey] || 'TZS',
+    }));
+
     res.json({
       summary: { loans: count, disbursed: totalDisbursed },
-      rows,
+      rows: uiRows,
       period: periodText({ startDate, endDate }),
       scope: scopeText(req.query),
       welcome: 'This is your live loan register — filter, review, and export with confidence.',
     });
   } catch (e) {
     console.error('loansSummary error:', e);
-    res.json({ summary:{loans:0,disbursed:0}, rows:[], period: periodText({}), scope: scopeText({}), welcome: 'No loans in this range.' });
+    res.json({
+      summary: { loans: 0, disbursed: 0 },
+      rows: [],
+      period: periodText({}),
+      scope: scopeText({}),
+      welcome: 'No loans in this range.',
+    });
   }
 };
 
