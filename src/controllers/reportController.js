@@ -509,6 +509,145 @@ exports.loansSummary = async (req, res) => {
   }
 };
 
+/* ------------------------------- Loan products ----------------------------- */
+/**
+ * GET /reports/loan-products/summary
+ * Returns per-product counts and total disbursed (schema-safe, tenant-safe).
+ * Optional filters: startDate, endDate, branchId
+ */
+exports.loanProductsSummary = async (req, res) => {
+  try {
+    if (!Loan) {
+      return res.json({
+        rows: [],
+        table: {
+          columns: [
+            { key: 'product', label: 'Product' },
+            { key: 'loans',   label: 'Loans' },
+            { key: 'amount',  label: 'Amount', currency: true },
+          ],
+          rows: [],
+        },
+        period: periodText(parseDates(req.query)),
+        scope: scopeText(req.query),
+        welcome: 'No loans model available.',
+      });
+    }
+
+    const { startDate, endDate } = parseDates(req.query);
+
+    // Resolve fields (schema-safe)
+    const productKey   = pickAttrKey(Loan, ['productId','product_id']);
+    const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+    const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at']);
+    const disbDateKey  = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','startDate']);
+    const branchKey    = pickAttrKey(Loan, ['branchId','branch_id']);
+
+    // Use disbursement date if present, else createdAt
+    const dateKey = disbDateKey || createdAtKey;
+
+    // Base filters
+    const where = {
+      ...(dateKey ? betweenRange(dateKey, startDate, endDate) : {}),
+      ...(req.query.branchId && branchKey ? { [branchKey]: req.query.branchId } : {}),
+      ...tenantFilter(Loan, req),
+    };
+
+    // Pull minimal fields
+    const attrs = [productKey, amountKey].filter(Boolean);
+    if (!productKey) {
+      // cannot aggregate by product without a product id column
+      return res.json({
+        rows: [],
+        table: {
+          columns: [
+            { key: 'product', label: 'Product' },
+            { key: 'loans',   label: 'Loans' },
+            { key: 'amount',  label: 'Amount', currency: true },
+          ],
+          rows: [],
+        },
+        period: periodText({ startDate, endDate }),
+        scope: scopeText(req.query),
+        welcome: 'This dataset has no product reference; cannot summarize by product.',
+      });
+    }
+
+    const items = await Loan.findAll({
+      where,
+      attributes: attrs,
+      raw: true,
+      // large limits are fine; if your dataset is huge, swap to a GROUP BY query
+      // but we keep it schema-safe across engines here.
+      limit: 25000,
+    });
+
+    // Aggregate
+    const agg = new Map(); // productId -> { loans, amount }
+    items.forEach(r => {
+      const pid = String(r[productKey] ?? '');
+      if (!pid) return;
+      const a = agg.get(pid) || { loans: 0, amount: 0 };
+      a.loans += 1;
+      a.amount += safeNumber(r[amountKey]);
+      agg.set(pid, a);
+    });
+
+    // Resolve product names
+    let namesById = {};
+    if (LoanProduct && agg.size) {
+      const pNameKey = pickAttrKey(LoanProduct, ['name','productName','title']);
+      const ids = Array.from(agg.keys());
+      const rows = await LoanProduct.findAll({
+        where: { id: { [Op.in]: ids } , ...tenantFilter(LoanProduct, req)},
+        attributes: ['id', ...(pNameKey ? [pNameKey] : [])],
+        raw: true,
+      });
+      rows.forEach(p => {
+        namesById[String(p.id)] = (p[pNameKey] || p.name || p.productName || '').trim() || `#${p.id}`;
+      });
+    }
+
+    // Build UI rows
+    const uiRows = Array.from(agg.entries())
+      .map(([pid, v]) => ({
+        productId: pid,
+        product: namesById[pid] || `#${pid}`,
+        loans: v.loans,
+        amount: v.amount,
+      }))
+      .sort((a, b) => b.amount - a.amount);
+
+    res.json({
+      rows: uiRows, // raw rows (API consumers)
+      table: {
+        columns: [
+          { key: 'product', label: 'Product' },
+          { key: 'loans',   label: 'Loans' },
+          { key: 'amount',  label: 'Amount', currency: true },
+        ],
+        rows: uiRows, // same shape for your current UI table
+      },
+      period: periodText({ startDate, endDate }),
+      scope: scopeText(req.query),
+      welcome: 'Product mix and totals.',
+    });
+  } catch (e) {
+    console.error('loanProductsSummary error:', e);
+    res.json({
+      rows: [],
+      table: { columns: [
+        { key: 'product', label: 'Product' },
+        { key: 'loans',   label: 'Loans' },
+        { key: 'amount',  label: 'Amount', currency: true },
+      ], rows: [] },
+      period: periodText(parseDates(req.query)),
+      scope: scopeText(req.query),
+      welcome: 'Could not compute product summary.',
+    });
+  }
+};
+
 exports.loansExportCSV = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
@@ -818,164 +957,274 @@ exports.disbursementsSummary = async (req, res) => {
 
 /* ---------------------- Disbursed loans register (schema-safe) ------------- */
 // (unchanged from your version; kept for completeness)
+/* ---------------------- Disbursed loans register (rich) -------------------- */
 exports.loansDisbursedList = async (req, res) => {
   try {
     if (!Loan) return res.json([]);
 
     const { startDate, endDate } = parseDates(req.query);
 
-    // Resolve Loan fields (prefer camelCase, fallback snake_case)
-    const idKey          = pickAttrKey(Loan, ['id']);
-    const borrowerKey    = pickAttrKey(Loan, ['borrowerId','borrower_id']);
-    const productKey     = pickAttrKey(Loan, ['productId','product_id']);
-    const amountKey      = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
-    const currencyKey    = pickAttrKey(Loan, ['currency']);
-    const statusKey      = pickAttrKey(Loan, ['status']);
-    const startKey       = pickAttrKey(Loan, ['startDate','start_date','createdAt','created_at']);
-    const disbDateKey    = pickAttrKey(Loan, ['disbursementDate','disbursement_date']);
-    const disbMethodKey  = pickAttrKey(Loan, ['disbursementMethod','disbursement_method']);
-    const officerKey     = pickAttrKey(Loan, ['officerId','loanOfficerId','userId','disbursedBy','disbursed_by']);
-    const refKey         = pickAttrKey(Loan, ['reference','ref','code']);
-    const branchKey      = pickAttrKey(Loan, ['branchId','branch_id']);
+    // --- Loan fields (schema-safe) ---
+    const idKey         = pickAttrKey(Loan, ['id']);
+    const borrowerKey   = pickAttrKey(Loan, ['borrowerId','borrower_id']);
+    const productKey    = pickAttrKey(Loan, ['productId','product_id']);
+    const amountKey     = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+    const currencyKey   = pickAttrKey(Loan, ['currency']);
+    const statusKey     = pickAttrKey(Loan, ['status']);
+    const startKey      = pickAttrKey(Loan, ['startDate','start_date','createdAt','created_at']);
+    const disbDateKey   = pickAttrKey(Loan, ['disbursementDate','disbursement_date','disbursedAt','releaseDate']);
+    const methodKey     = pickAttrKey(Loan, ['disbursementMethod','disbursement_method']);
+    const officerKey    = pickAttrKey(Loan, ['officerId','loanOfficerId','userId','disbursedBy','disbursed_by']);
+    const refKey        = pickAttrKey(Loan, ['reference','ref','code']);
 
-    // Date range: use disbursement date if present, else start date
+    // Interest model (best-effort)
+    const rateKey       = pickAttrKey(Loan, ['interestRate','rate','annualInterestRate']);
+    const termMonthsKey = pickAttrKey(Loan, ['termMonths','tenor','duration','loanTermMonths','term_months']);
+
+    // Choose date to filter/order by
     const dateKey = disbDateKey || startKey;
 
-    // Base tenant/date filters
-    const baseWhere = {
+    // --- Base filters (tenant + date + direct ids) ---
+    let where = {
       ...(dateKey ? betweenRange(dateKey, startDate, endDate) : {}),
       ...(req.query.productId && productKey ? { [productKey]: req.query.productId } : {}),
       ...(req.query.borrowerId && borrowerKey ? { [borrowerKey]: req.query.borrowerId } : {}),
-      ...(req.query.branchId && branchKey ? { [branchKey]: req.query.branchId } : {}),
       ...tenantFilter(Loan, req),
     };
 
-    // ENUM-safe "disbursed" condition
+    // Amount range (optional)
+    if ((req.query.minAmount || req.query.maxAmount) && amountKey) {
+      const minA = Number(req.query.minAmount || 0);
+      const maxA = Number(req.query.maxAmount || Number.MAX_SAFE_INTEGER);
+      where = { ...where, [amountKey]: { [Op.between]: [minA, maxA] } };
+    }
+
+    // “Disbursed” semantics (date present OR status ~ disbursed)
     const orConds = [];
     if (disbDateKey) orConds.push({ [disbDateKey]: { [Op.ne]: null } });
     if (statusKey) {
       const statusField = Loan.rawAttributes[statusKey]?.field || statusKey;
       orConds.push(sqWhere(cast(col(statusField), 'text'), { [Op.iLike]: 'disbursed' }));
     }
-    let where = orConds.length ? { ...baseWhere, [Op.or]: orConds } : baseWhere;
+    where = orConds.length ? { ...where, [Op.or]: orConds } : where;
 
-    // If officerId is provided and there is an officer column on Loan, add now (DB-level)
+    // Officer filter at DB level when possible
     if (req.query.officerId && officerKey) {
       where = { ...where, [officerKey]: req.query.officerId };
     }
 
-    // Fetch rows (minimal columns) — raw, no associations required
+    // --- Text search (q) across borrower/product/reference/phone (apply post-enrichment if needed) ---
+    const q = (req.query.q || '').trim().toLowerCase();
+
+    // --- Fetch raw loans (minimal columns we need) ---
     const attrs = [
       idKey, borrowerKey, productKey, amountKey, currencyKey, statusKey,
-      startKey, disbDateKey, disbMethodKey, officerKey, refKey, branchKey
+      startKey, disbDateKey, methodKey, officerKey, refKey,
+      rateKey, termMonthsKey,
     ].filter(Boolean);
 
-    const rows = await Loan.findAll({
+    let rows = await Loan.findAll({
       where,
       attributes: attrs,
       order: dateKey ? [[dateKey, 'DESC']] : undefined,
-      limit: 1000,
+      limit: 2000,
       raw: true,
     });
 
-    // Collect IDs for name lookups
+    // Collect IDs for enrichment
     const borrowerIds = Array.from(new Set(rows.map(r => r[borrowerKey]).filter(Boolean))).map(String);
     const productIds  = Array.from(new Set(rows.map(r => r[productKey]).filter(Boolean))).map(String);
 
-    // Officer IDs can come from Loan.* or Borrowers.loan_officer_id fallback
-    const officerIdsFromLoan = Array.from(new Set(
-      rows.map(r => (officerKey ? r[officerKey] : null)).filter(Boolean)
-    )).map(String);
-
-    // Pull borrower names (+ fallback officer ids if loan has none)
+    // Borrowers: name + phone (+ fallback officer if Loan lacks officer)
     let borrowersById = {};
+    let borrowerPhoneById = {};
     let borrowerOfficerMap = {};
     if (Borrower && borrowerIds.length) {
-      const bNameKey   = pickAttrKey(Borrower, ['name']);
+      const bNameKey   = pickAttrKey(Borrower, ['name','fullName']);
+      const bPhoneKey  = pickAttrKey(Borrower, ['phone','phoneNumber','mobile','msisdn','tel']);
       const bOfficerK1 = pickAttrKey(Borrower, ['loan_officer_id','officerId','loanOfficerId','userId']);
       const bList = await Borrower.findAll({
         where: { id: { [Op.in]: borrowerIds }, ...tenantFilter(Borrower, req) },
-        attributes: ['id', ...(bNameKey ? [bNameKey] : []), ...(bOfficerK1 ? [bOfficerK1] : [])],
+        attributes: ['id', ...(bNameKey ? [bNameKey] : []), ...(bPhoneKey ? [bPhoneKey] : []), ...(bOfficerK1 ? [bOfficerK1] : [])],
         raw: true,
       });
-      borrowersById = Object.fromEntries(bList.map(b => [String(b.id), (b[bNameKey] || b.name || '')]));
-      if (bOfficerK1) {
-        borrowerOfficerMap = Object.fromEntries(
-          bList
-            .filter(b => b[bOfficerK1])
-            .map(b => [String(b.id), String(b[bOfficerK1])])
-        );
-      }
+      bList.forEach(b => {
+        const id = String(b.id);
+        borrowersById[id] = (b[bNameKey] ?? b.name ?? '').trim() || '—';
+        borrowerPhoneById[id] = (b[bPhoneKey] ?? '').trim() || '—';
+        if (bOfficerK1 && b[bOfficerK1]) borrowerOfficerMap[id] = String(b[bOfficerK1]);
+      });
     }
 
-    // Product names
+    // Products: name map
     let productsById = {};
     if (LoanProduct && productIds.length) {
-      const pNameKey = pickAttrKey(LoanProduct, ['name']);
+      const pNameKey = pickAttrKey(LoanProduct, ['name','productName']);
       const pList = await LoanProduct.findAll({
         where: { id: { [Op.in]: productIds }, ...tenantFilter(LoanProduct, req) },
         attributes: ['id', ...(pNameKey ? [pNameKey] : [])],
         raw: true,
       });
-      productsById = Object.fromEntries(pList.map(p => [String(p.id), (p[pNameKey] || p.name || '')]));
+      pList.forEach(p => { productsById[String(p.id)] = (p[pNameKey] || p.name || '').trim(); });
     }
 
-    // Build officerId list with borrower fallback
-    const officerIds = new Set(officerIdsFromLoan);
+    // Build officer id list to fetch names (from loan or borrower fallback)
+    const officerIds = new Set(
+      rows.map(r => (officerKey ? r[officerKey] : null)).filter(Boolean).map(String)
+    );
     rows.forEach(r => {
-      if (!officerKey && borrowerKey && borrowerOfficerMap[String(r[borrowerKey])]) {
-        officerIds.add(borrowerOfficerMap[String(r[borrowerKey])]);
+      const bid = borrowerKey ? r[borrowerKey] : null;
+      if (!officerKey && bid && borrowerOfficerMap[String(bid)]) {
+        officerIds.add(borrowerOfficerMap[String(bid)]);
       }
     });
-    const officerIdsArr = Array.from(officerIds).filter(Boolean);
 
-    // Officer names
+    // Officers: name/email lookup
     let officersById = {};
-    if (User && officerIdsArr.length) {
-      const uNameKey = pickAttrKey(User, ['name']);
+    if (User && officerIds.size) {
+      const uNameKey  = pickAttrKey(User, ['name','fullName']);
       const uEmailKey = pickAttrKey(User, ['email']);
       const uList = await User.findAll({
-        where: { id: { [Op.in]: officerIdsArr }, ...tenantFilter(User, req) },
+        where: { id: { [Op.in]: Array.from(officerIds) }, ...tenantFilter(User, req) },
         attributes: ['id', ...(uNameKey ? [uNameKey] : []), ...(uEmailKey ? [uEmailKey] : [])],
         raw: true,
       });
-      officersById = Object.fromEntries(
-        uList.map(u => [
-          String(u.id),
-          (u[uNameKey] || u.name || u[uEmailKey] || u.email || '')
-        ])
-      );
+      uList.forEach(u => {
+        officersById[String(u.id)] = (u[uNameKey] || u.name || u[uEmailKey] || u.email || '').trim();
+      });
     }
 
-    // Final shape for UI
+    // --- Payments: compute paid & outstanding (best-effort breakdown) ---
+    const lpLoanIdKey = pickAttrKey(LoanPayment, ['loanId','loan_id']);
+    const lpAmtKey    = pickAttrKey(LoanPayment, ['amountPaid','amount','paidAmount','paymentAmount']);
+    const lpDateKey   = pickAttrKey(LoanPayment, ['paymentDate','date','createdAt','created_at']);
+    const lpStatusKey = pickAttrKey(LoanPayment, ['status']);
+    const lpAppliedKey= pickAttrKey(LoanPayment, ['applied']);
+
+    // Optional breakdowns if your schema has them:
+    const lpPrinKey   = pickAttrKey(LoanPayment, ['principalPaid','principal_amount','principal']);
+    const lpIntKey    = pickAttrKey(LoanPayment, ['interestPaid','interest_amount','interest']);
+    const lpFeeKey    = pickAttrKey(LoanPayment, ['feePaid','feesPaid','fee_amount','fees']);
+    const lpPenKey    = pickAttrKey(LoanPayment, ['penaltyPaid','penalty_amount','penalties']);
+
+    let paidByLoan = new Map(); // { loanId: { total, principal, interest, fees, penalty } }
+    if (LoanPayment && lpLoanIdKey && (lpAmtKey || lpPrinKey || lpIntKey || lpFeeKey || lpPenKey)) {
+      const payWhere = {
+        ...(lpStatusKey ? { [lpStatusKey]: 'approved' } : {}),
+        ...(lpAppliedKey ? { [lpAppliedKey]: true } : {}),
+        ...(lpDateKey ? betweenRange(lpDateKey, null, new Date()) : {}), // up to now
+        ...tenantFilter(LoanPayment, req),
+      };
+
+      const attrs = [
+        [col(LoanPayment.rawAttributes[lpLoanIdKey]?.field || lpLoanIdKey), 'loanId'],
+      ];
+      if (lpAmtKey)  attrs.push([fn('sum', col(LoanPayment.rawAttributes[lpAmtKey]?.field || lpAmtKey)), 'paidTotal']);
+      if (lpPrinKey) attrs.push([fn('sum', col(LoanPayment.rawAttributes[lpPrinKey]?.field || lpPrinKey)), 'paidPrincipal']);
+      if (lpIntKey)  attrs.push([fn('sum', col(LoanPayment.rawAttributes[lpIntKey]?.field  || lpIntKey)),  'paidInterest']);
+      if (lpFeeKey)  attrs.push([fn('sum', col(LoanPayment.rawAttributes[lpFeeKey]?.field  || lpFeeKey)),  'paidFees']);
+      if (lpPenKey)  attrs.push([fn('sum', col(LoanPayment.rawAttributes[lpPenKey]?.field  || lpPenKey)),  'paidPenalty']);
+
+      const paymentsAgg = await (LoanPayment.unscoped ? LoanPayment.unscoped() : LoanPayment).findAll({
+        where: payWhere,
+        attributes: attrs,
+        group: [col(LoanPayment.rawAttributes[lpLoanIdKey]?.field || lpLoanIdKey)],
+        raw: true,
+      });
+
+      paymentsAgg.forEach(p => {
+        paidByLoan.set(String(p.loanId), {
+          total: safeNumber(p.paidTotal),
+          principal: safeNumber(p.paidPrincipal),
+          interest: safeNumber(p.paidInterest),
+          fees: safeNumber(p.paidFees),
+          penalty: safeNumber(p.paidPenalty),
+        });
+      });
+    }
+
+    // --- Compose UI rows with calculations ---
     let uiRows = rows.map(r => {
+      const loanId = r[idKey];
       const borrowerId = borrowerKey ? r[borrowerKey] : null;
-      const officerId  =
-        officerKey && r[officerKey]
-          ? String(r[officerKey])
-          : (borrowerId && borrowerOfficerMap[String(borrowerId)]) || null;
+      const officerId =
+        (officerKey && r[officerKey]) ? String(r[officerKey]) :
+        (borrowerId && borrowerOfficerMap[String(borrowerId)]) || null;
+
+      const principal = safeNumber(r[amountKey] || 0);
+      const paid = paidByLoan.get(String(loanId)) || { total:0, principal:0, interest:0, fees:0, penalty:0 };
+
+      // If there is no principalPaid breakdown, assume total goes to principal (best effort)
+      const principalPaid = (paid.principal || (paid.total && !lpPrinKey ? paid.total : 0)) || 0;
+      const interestPaid  = paid.interest || 0;
+      const feesPaid      = paid.fees || 0;
+      const penaltyPaid   = paid.penalty || 0;
+
+      const outstandingPrincipal = Math.max(0, principal - principalPaid);
+      // We don’t know accrued interest/fees/penalty unless your schema tracks them; keep 0 as safe default.
+      const outstandingInterest = 0;
+      const outstandingFees     = 0;
+      const outstandingPenalty  = 0;
+      const totalOutstanding    = outstandingPrincipal + outstandingInterest + outstandingFees + outstandingPenalty;
+
+      // Interest rate/year (%) & duration (months)
+      const ratePct = r[rateKey] != null ? Number(r[rateKey]) : null;
+      const months  = r[termMonthsKey] != null ? Number(r[termMonthsKey]) : null;
+
+      // Interest amount (display-only, best-effort simple interest if we have both)
+      let interestAmount = null;
+      if (ratePct != null && months != null) {
+        interestAmount = Math.max(0, Math.round(principal * (ratePct/100) * (months/12)));
+      }
+
+      const disbDate = disbDateKey ? r[disbDateKey] : (startKey ? r[startKey] : null);
+      const productId = productKey ? r[productKey] : null;
+      const borrowerName = borrowerId ? (borrowersById[String(borrowerId)] || '—') : '—';
+      const phone = borrowerId ? (borrowerPhoneById[String(borrowerId)] || '—') : '—';
 
       return {
-        id: r[idKey],
-        reference: refKey ? (r[refKey] || null) : null,
+        id: loanId,
+        date: disbDate,
         borrowerId,
-        borrowerName: borrowerId ? (borrowersById[String(borrowerId)] || '—') : '—',
-        productId: productKey ? r[productKey] : null,
-        productName: productKey ? (productsById[String(r[productKey])] || '—') : '—',
-        amount: r[amountKey] != null ? Number(r[amountKey]) : 0,
-        currency: r[currencyKey] || 'TZS',
-        status: r[statusKey] || null,
-        disbursementDate: disbDateKey ? r[disbDateKey] : (startKey ? r[startKey] : null),
-        disbursementMethod: disbMethodKey ? r[disbMethodKey] : null,
+        borrowerName,
+        phone,
+        productId,
+        productName: productId ? (productsById[String(productId)] || '—') : '—',
+        principalAmount: principal,
+        interestAmount,               // may be null if rate/duration unknown
+        outstandingPrincipal,
+        outstandingInterest,
+        outstandingFees,
+        outstandingPenalty,
+        totalOutstanding,
+        interestRateYear: ratePct,    // %
+        loanDurationMonths: months,
         officerId,
         officerName: officerId ? (officersById[officerId] || '—') : '—',
-        branchId: branchKey ? r[branchKey] : null,
+        currency: r[currencyKey] || 'TZS',
+        status: r[statusKey] || null,
+        reference: refKey ? (r[refKey] || null) : null,
+        disbursementMethod: methodKey ? (r[methodKey] || null) : null,
       };
     });
 
-    // If officerId filter provided but not filterable at DB level, apply after enrichment
+    // Post-enrichment officer filter if Loan lacks officer column
     if (req.query.officerId && !officerKey) {
       uiRows = uiRows.filter(r => String(r.officerId || '') === String(req.query.officerId));
+    }
+
+    // Text search ‘q’ (borrower name / phone / product / reference / id)
+    if (q) {
+      const qn = q;
+      uiRows = uiRows.filter(r => {
+        return (
+          String(r.borrowerName || '').toLowerCase().includes(qn) ||
+          String(r.phone || '').toLowerCase().includes(qn) ||
+          String(r.productName || '').toLowerCase().includes(qn) ||
+          String(r.reference || '').toLowerCase().includes(qn) ||
+          String(r.id || '').toLowerCase().includes(qn)
+        );
+      });
     }
 
     res.json(uiRows);
@@ -984,7 +1233,6 @@ exports.loansDisbursedList = async (req, res) => {
     res.status(500).json({ error: 'Failed to load disbursed loans' });
   }
 };
-
 /* ------------------------------------ Fees -------------------------------- */
 exports.feesSummary = async (req, res) => {
   const p = periodText(parseDates(req.query));
