@@ -133,7 +133,7 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
   const lpDateKey     = pickAttrKey(LoanPayment, ['paymentDate', 'date', 'createdAt', 'created_at']);
   const lpCreatedKey  = pickAttrKey(LoanPayment, ['createdAt', 'created_at']);
 
-  // Sum payments per loan up to asOf (NO ORDER BY in grouped query)
+  // Sum payments per loan up to asOf (NO ORDER BY in grouped query, and UNSCOPED to avoid default order)
   let paidMap = new Map();
   if (LoanPayment && lpLoanIdKey && lpAmountKey) {
     const where = {
@@ -152,15 +152,23 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
       [col(loanIdField), 'loanId'],
       [fn('sum', col(amountField)), 'paid'],
     ];
+    // Optional: keep last dates as aggregates (safe with GROUP BY)
     if (dateField)   attrs.push([fn('max', col(dateField)), 'lastPaymentDate']);
     if (createdFld)  attrs.push([fn('max', col(createdFld)), 'lastCreatedAt']);
 
-    const paidByLoan = await LoanPayment.findAll({
-      where,
-      attributes: attrs,
-      group: [col(loanIdField)],
-      raw: true,
-    });
+    const paidByLoan = await (LoanPayment.unscoped
+      ? LoanPayment.unscoped().findAll({
+          where,
+          attributes: attrs,
+          group: [col(loanIdField)],
+          raw: true,
+        })
+      : LoanPayment.findAll({
+          where,
+          attributes: attrs,
+          group: [col(loanIdField)],
+          raw: true,
+        }));
 
     paidMap = new Map((paidByLoan || []).map(r => [String(r.loanId), safeNumber(r.paid)]));
   }
