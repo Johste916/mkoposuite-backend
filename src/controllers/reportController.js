@@ -1,5 +1,5 @@
 /* eslint-disable no-console */
-const { Op, fn, col } = require('sequelize');
+const { Op, fn, col, cast, where: sqWhere } = require('sequelize');
 const { Parser } = require('json2csv');
 const PDFDocument = require('pdfkit');
 
@@ -739,17 +739,32 @@ exports.proRataCollections = async (req, res) => {
 exports.disbursementsSummary = async (req, res) => {
   try {
     const { startDate, endDate } = parseDates(req.query);
-    const dateKey   = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','createdAt','created_at']);
-    const statusKey = pickAttrKey(Loan, ['status']);
-    const where = {
-      ...(statusKey ? { [statusKey]: 'disbursed' } : {}),
+
+    const dateKey    = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','startDate','createdAt','created_at']);
+    const statusKey  = pickAttrKey(Loan, ['status']);
+    const disbDateK  = pickAttrKey(Loan, ['disbursementDate','disbursement_date']);
+
+    // Base filters
+    const baseWhere = {
       ...(dateKey ? betweenRange(dateKey, startDate, endDate) : {}),
       ...tenantFilter(Loan, req),
     };
+
+    // ENUM-safe: either disbursementDate IS NOT NULL OR CAST(status AS text) ILIKE 'disbursed'
+    const orConds = [];
+    if (disbDateK) orConds.push({ [disbDateK]: { [Op.ne]: null } });
+    if (statusKey) {
+      const statusField = Loan.rawAttributes[statusKey]?.field || statusKey;
+      orConds.push(sqWhere(cast(col(statusField), 'text'), { [Op.iLike]: 'disbursed' }));
+    }
+
+    const where = orConds.length ? { ...baseWhere, [Op.or]: orConds } : baseWhere;
+
     const [count, total] = await Promise.all([
       Loan ? countSafe(Loan, where) : 0,
       Loan ? sumSafe(Loan, ['amount','principal','principalAmount','loanAmount'], where) : 0,
     ]);
+
     res.json({
       summary:{ count, total },
       table: {
@@ -769,105 +784,156 @@ exports.disbursementsSummary = async (req, res) => {
   }
 };
 
-/* --------------------- NEW: disbursed loans register list ------------------ */
+/* ---------------------- Disbursed loans register (schema-safe) ------------- */
 exports.loansDisbursedList = async (req, res) => {
   try {
     if (!Loan) return res.json([]);
 
     const { startDate, endDate } = parseDates(req.query);
 
-    // Resolve loan attributes
-    const idKey        = pickAttrKey(Loan, ['id']);
-    const statusKey    = pickAttrKey(Loan, ['status']);
-    const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
-    const currencyKey  = pickAttrKey(Loan, ['currency']);
-    const refKey       = pickAttrKey(Loan, ['reference','ref','code']);
-    const borrowerKey  = pickAttrKey(Loan, ['borrowerId','borrower_id']);
-    const productKey   = pickAttrKey(Loan, ['productId','product_id']);
-    const officerKey   = pickAttrKey(Loan, ['officerId','loanOfficerId','officer_id','loan_officer_id']);
-    const disbKey      = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','createdAt','created_at']);
-    const methodKey    = pickAttrKey(Loan, ['disbursementMethod','method']);
+    // Resolve Loan fields (prefer camelCase, fallback snake_case)
+    const idKey          = pickAttrKey(Loan, ['id']);
+    const borrowerKey    = pickAttrKey(Loan, ['borrowerId','borrower_id']);
+    const productKey     = pickAttrKey(Loan, ['productId','product_id']);
+    const amountKey      = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+    const currencyKey    = pickAttrKey(Loan, ['currency']);
+    const statusKey      = pickAttrKey(Loan, ['status']);
+    const startKey       = pickAttrKey(Loan, ['startDate','start_date','createdAt','created_at']);
+    const disbDateKey    = pickAttrKey(Loan, ['disbursementDate','disbursement_date']);
+    const disbMethodKey  = pickAttrKey(Loan, ['disbursementMethod','disbursement_method']);
+    const officerKey     = pickAttrKey(Loan, ['officerId','loanOfficerId','userId','disbursedBy','disbursed_by']);
+    const refKey         = pickAttrKey(Loan, ['reference','ref','code']);
 
-    const where = {
-      ...(statusKey ? { [statusKey]: 'disbursed' } : {}),
-      ...(disbKey ? betweenRange(disbKey, startDate, endDate) : {}),
+    // Date range: use disbursement date if present, else start date
+    const dateKey = disbDateKey || startKey;
+
+    // Base tenant/date filters
+    const baseWhere = {
+      ...(dateKey ? betweenRange(dateKey, startDate, endDate) : {}),
       ...tenantFilter(Loan, req),
     };
 
-    const loans = await Loan.findAll({
+    // ENUM-safe "disbursed" condition
+    const orConds = [];
+    if (disbDateKey) orConds.push({ [disbDateKey]: { [Op.ne]: null } });
+    if (statusKey) {
+      const statusField = Loan.rawAttributes[statusKey]?.field || statusKey;
+      orConds.push(sqWhere(cast(col(statusField), 'text'), { [Op.iLike]: 'disbursed' }));
+    }
+    const where = orConds.length ? { ...baseWhere, [Op.or]: orConds } : baseWhere;
+
+    // Fetch rows (minimal columns) — raw, no associations required
+    const attrs = [
+      idKey, borrowerKey, productKey, amountKey, currencyKey, statusKey,
+      startKey, disbDateKey, disbMethodKey, officerKey, refKey
+    ].filter(Boolean);
+
+    const rows = await Loan.findAll({
       where,
-      attributes: [idKey, statusKey, amountKey, currencyKey, refKey, borrowerKey, productKey, officerKey, disbKey, methodKey].filter(Boolean),
-      order: disbKey ? [[disbKey, 'DESC']] : undefined,
-      limit: Number(req.query.pageSize) || 500,
+      attributes: attrs,
+      order: dateKey ? [[dateKey, 'DESC']] : undefined,
+      limit: 1000,
       raw: true,
     });
 
-    // Enrich names in batch
-    const borrowerIds = Array.from(new Set(loans.map(r => r[borrowerKey]).filter(Boolean)));
-    const productIds  = Array.from(new Set(loans.map(r => r[productKey]).filter(Boolean)));
-    const officerIds  = Array.from(new Set(loans.map(r => r[officerKey]).filter(Boolean)));
+    // Collect IDs for name lookups
+    const borrowerIds = Array.from(new Set(rows.map(r => r[borrowerKey]).filter(Boolean))).map(String);
+    const productIds  = Array.from(new Set(rows.map(r => r[productKey]).filter(Boolean))).map(String);
 
+    // Officer IDs can come from Loan.* or Borrowers.loan_officer_id fallback
+    const officerIdsFromLoan = Array.from(new Set(
+      rows.map(r => (officerKey ? r[officerKey] : null)).filter(Boolean)
+    )).map(String);
+
+    // Pull borrower names (+ fallback officer ids if loan has none)
     let borrowersById = {};
+    let borrowerOfficerMap = {};
     if (Borrower && borrowerIds.length) {
-      const nameKey = pickAttrKey(Borrower, ['name']);
-      const list = await Borrower.findAll({
+      const bNameKey   = pickAttrKey(Borrower, ['name']);
+      const bOfficerK1 = pickAttrKey(Borrower, ['loan_officer_id','officerId','loanOfficerId','userId']);
+      const bList = await Borrower.findAll({
         where: { id: { [Op.in]: borrowerIds }, ...tenantFilter(Borrower, req) },
-        attributes: ['id', ...(nameKey ? [nameKey] : [])],
+        attributes: ['id', ...(bNameKey ? [bNameKey] : []), ...(bOfficerK1 ? [bOfficerK1] : [])],
         raw: true,
       });
-      borrowersById = Object.fromEntries(list.map(b => [String(b.id), b[nameKey] || b.name || '']));
+      borrowersById = Object.fromEntries(bList.map(b => [String(b.id), (b[bNameKey] || b.name || '')]));
+      if (bOfficerK1) {
+        borrowerOfficerMap = Object.fromEntries(
+          bList
+            .filter(b => b[bOfficerK1])
+            .map(b => [String(b.id), String(b[bOfficerK1])])
+        );
+      }
     }
 
+    // Product names
     let productsById = {};
     if (LoanProduct && productIds.length) {
-      const nameKey = pickAttrKey(LoanProduct, ['name']);
-      const list = await LoanProduct.findAll({
+      const pNameKey = pickAttrKey(LoanProduct, ['name']);
+      const pList = await LoanProduct.findAll({
         where: { id: { [Op.in]: productIds }, ...tenantFilter(LoanProduct, req) },
-        attributes: ['id', 'feeType','feeAmount','feePercent', ...(nameKey ? [nameKey] : [])],
+        attributes: ['id', ...(pNameKey ? [pNameKey] : [])],
         raw: true,
       });
-      productsById = Object.fromEntries(list.map(p => [String(p.id), p]));
+      productsById = Object.fromEntries(pList.map(p => [String(p.id), (p[pNameKey] || p.name || '')]));
     }
 
+    // Build officerId list with borrower fallback
+    const officerIds = new Set(officerIdsFromLoan);
+    rows.forEach(r => {
+      if (!officerKey && borrowerKey && borrowerOfficerMap[String(r[borrowerKey])]) {
+        officerIds.add(borrowerOfficerMap[String(r[borrowerKey])]);
+      }
+    });
+    const officerIdsArr = Array.from(officerIds).filter(Boolean);
+
+    // Officer names
     let officersById = {};
-    if (User && officerIds.length) {
-      const nameKey = pickAttrKey(User, ['name']);
-      const emailKey = pickAttrKey(User, ['email']);
-      const list = await User.findAll({
-        where: { id: { [Op.in]: officerIds }, ...tenantFilter(User, req) },
-        attributes: ['id', ...(nameKey ? [nameKey] : []), ...(emailKey ? [emailKey] : [])],
+    if (User && officerIdsArr.length) {
+      const uNameKey = pickAttrKey(User, ['name']);
+      const uEmailKey = pickAttrKey(User, ['email']);
+      const uList = await User.findAll({
+        where: { id: { [Op.in]: officerIdsArr }, ...tenantFilter(User, req) },
+        attributes: ['id', ...(uNameKey ? [uNameKey] : []), ...(uEmailKey ? [uEmailKey] : [])],
         raw: true,
       });
-      officersById = Object.fromEntries(list.map(u => [String(u.id), (u[nameKey] || u.name || u[emailKey] || '')]));
+      officersById = Object.fromEntries(
+        uList.map(u => [
+          String(u.id),
+          (u[uNameKey] || u.name || u[uEmailKey] || u.email || '')
+        ])
+      );
     }
 
-    const out = loans.map(l => {
-      const principal = safeNumber(l[amountKey]);
-      const prod      = productsById[String(l[productKey])] || {};
-      const feeType   = prod.feeType;
-      const feeAmt    = safeNumber(prod.feeAmount);
-      const feePct    = safeNumber(prod.feePercent);
-      const fees = feeType === 'percent' ? principal * (feePct / 100) : (feeType === 'amount' ? feeAmt : 0);
+    // Final shape for UI
+    const uiRows = rows.map(r => {
+      const borrowerId = borrowerKey ? r[borrowerKey] : null;
+      const officerId  =
+        officerKey && r[officerKey]
+          ? String(r[officerKey])
+          : (borrowerId && borrowerOfficerMap[String(borrowerId)]) || null;
+
       return {
-        id: l[idKey],
-        reference: l[refKey] || `LN-${l[idKey]}`,
-        borrowerName: borrowersById[String(l[borrowerKey])] || '—',
-        productName: prod.name || (pickAttrKey(LoanProduct, ['name']) ? prod[pickAttrKey(LoanProduct, ['name'])] : '') || '—',
-        amount: principal,
-        currency: l[currencyKey] || 'TZS',
-        officerName: officersById[String(l[officerKey])] || '—',
-        disbursementDate: l[disbKey],
-        disbursementMethod: l[methodKey] || null,
-        fees,
-        netDisbursed: Math.max(0, principal - fees),
-        status: 'disbursed',
+        id: r[idKey],
+        reference: refKey ? (r[refKey] || null) : null,
+        borrowerId,
+        borrowerName: borrowerId ? (borrowersById[String(borrowerId)] || '—') : '—',
+        productId: productKey ? r[productKey] : null,
+        productName: productKey ? (productsById[String(r[productKey])] || '—') : '—',
+        amount: r[amountKey] != null ? Number(r[amountKey]) : 0,
+        currency: r[currencyKey] || 'TZS',
+        status: r[statusKey] || null,
+        disbursementDate: disbDateKey ? r[disbDateKey] : (startKey ? r[startKey] : null),
+        disbursementMethod: disbMethodKey ? r[disbMethodKey] : null,
+        officerId,
+        officerName: officerId ? (officersById[officerId] || '—') : '—',
       };
     });
 
-    res.json(out);
+    res.json(uiRows);
   } catch (e) {
     console.error('loansDisbursedList error:', e);
-    res.json([]);
+    res.status(500).json({ error: 'Failed to load disbursed loans' });
   }
 };
 

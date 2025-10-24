@@ -1,4 +1,3 @@
-// server/src/routes/reportRoutes.js
 const express = require("express");
 const ctl = require("../controllers/reportController");
 
@@ -10,9 +9,9 @@ r.get("/filters", ctl.getFilters);
 /* Borrowers */
 r.get("/borrowers/loan-summary", ctl.borrowersLoanSummary);
 
-/* Loans */
+/* Loans (summary + disbursed register) */
 r.get("/loans/summary", ctl.loansSummary);
-r.get("/loans/disbursements/list", ctl.loansDisbursedList); // disbursed loans register
+r.get("/loans/disbursements/list", ctl.loansDisbursedList); // Disbursed loans register
 r.get("/loans/export/csv", ctl.loansExportCSV);
 r.get("/loans/export/pdf", ctl.loansExportPDF);
 r.get("/loans/trends", ctl.loansTrends);
@@ -43,4 +42,4 @@ r.get("/monthly", ctl.monthlyReport);
 r.get("/at-a-glance", ctl.atAGlance);
 r.get("/all-entries", ctl.allEntries);
 
-module.exports = r; // ✅ export the router
+module.exports = r;
