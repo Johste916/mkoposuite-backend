@@ -1,75 +1,62 @@
+'use strict';
+
 module.exports = (sequelize, DataTypes) => {
-  const isPg = sequelize.getDialect && sequelize.getDialect() === "postgres";
-  const JSON_TYPE = isPg ? DataTypes.JSONB : DataTypes.JSON;
-
+  // Your DB has both "LoanPayment" (capitalized) and "loan_payments" in some envs.
+  // Pick the one you actually use in prod; default here is lowercase table.
   const LoanPayment = sequelize.define(
-    "LoanPayment",
+    'LoanPayment',
     {
-      loanId: { type: DataTypes.INTEGER, allowNull: false, field: "loanId" },
+      id:         { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
-      // NOTE: logs show Users.id is UUID; this matches. (We also ship a migration below to enforce it.)
-      userId: { type: DataTypes.UUID, allowNull: true, field: "userId" },
+      loanId:     { type: DataTypes.INTEGER, allowNull: false, field: 'loanId' }, // camel exists; if not, set to 'loan_id'
+      // If your active table is snake_case only, switch the field to 'loan_id'
+      // loanId:     { type: DataTypes.INTEGER, allowNull: false, field: 'loan_id' },
 
-      // amounts/dates
-      amountPaid: {
-        type: DataTypes.DECIMAL(14, 2),
-        allowNull: false,
-        defaultValue: 0,
-        field: "amountPaid",
-      },
-      paymentDate: { type: DataTypes.DATEONLY, allowNull: false, field: "paymentDate" },
+      amountPaid: { type: DataTypes.DECIMAL(14, 2), allowNull: false, field: 'amountPaid' },
+      // If snake_case only:
+      // amountPaid: { type: DataTypes.DECIMAL(14, 2), allowNull: false, field: 'amount' },
 
-      // meta
-      method: { type: DataTypes.STRING, allowNull: true, field: "method" }, // 'cash','mobile','bank', etc
-      notes: { type: DataTypes.TEXT, allowNull: true, field: "notes" },
+      paymentDate: { type: DataTypes.DATE, allowNull: true, field: 'paymentDate' },
+      // Snake-case alternatives you might need:
+      // paymentDate: { type: DataTypes.DATE, allowNull: true, field: 'payment_date' },
+      // Or fallback commonly seen: 'date' or 'created_at'
 
-      // Workflow + external/gateway
-      // DB may be an ENUM (PG); using STRING with validation is safe across dialects.
-      status: {
-        type: DataTypes.STRING(16),
-        allowNull: false,
-        defaultValue: "approved",
-        validate: { isIn: [["pending", "approved", "rejected", "voided"]] },
-        field: "status",
-      },
-      applied: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true, field: "applied" },
-      reference: { type: DataTypes.STRING, allowNull: true, field: "reference" }, // payer ref / internal ref
-      receiptNo: { type: DataTypes.STRING, allowNull: true, field: "receiptNo" },
-      currency: { type: DataTypes.STRING(8), allowNull: true, field: "currency" },
+      status:     { type: DataTypes.STRING, allowNull: true,  field: 'status', defaultValue: 'approved' },
+      applied:    { type: DataTypes.BOOLEAN, allowNull: true, field: 'applied', defaultValue: true },
 
-      gateway: { type: DataTypes.STRING, allowNull: true, field: "gateway" }, // 'mpesa','tigo','bank-xyz', etc
-      gatewayRef: { type: DataTypes.STRING, allowNull: true, field: "gatewayRef" }, // provider txn id
+      borrowerId: { type: DataTypes.INTEGER, allowNull: true, field: 'borrowerId' }, // if present
+      productId:  { type: DataTypes.INTEGER, allowNull: true, field: 'productId' },  // if present
+      officerId:  { type: DataTypes.UUID,    allowNull: true, field: 'officerId' },  // sometimes user_id
+      branchId:   { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },  // common in PG
 
-      allocation: { type: JSON_TYPE, allowNull: true, field: "allocation" }, // allocation lines
-      voidReason: { type: DataTypes.TEXT, allowNull: true, field: "voidReason" },
+      tenantId:   { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },
     },
     {
-      tableName: "loan_payments",
+      // choose the live table name you actually use:
+      tableName: 'LoanPayment',      // if you use the capitalized table
+      // tableName: 'loan_payments', // if you use the snake_case table
+      freezeTableName: true,
       timestamps: true,
-      defaultScope: {
-        order: [
-          ["paymentDate", "DESC"],
-          ["createdAt", "DESC"],
-        ],
-      },
+      underscored: true,
       indexes: [
-        { fields: ["loanId"] },
-        { fields: ["userId"] },
-        { fields: ["paymentDate"] },
-        { fields: ["status"] },
-        { fields: ["reference"] },
-        { fields: ["gatewayRef"] },
-        { fields: ["createdAt"] },
+        { fields: ['loanId'] },
+        { fields: ['status'] },
+        { fields: ['paymentDate'] },
+        { fields: ['branch_id'] },
+        { fields: ['tenant_id'] },
       ],
     }
   );
 
   LoanPayment.associate = (models) => {
-    if (models.Loan) {
-      LoanPayment.belongsTo(models.Loan, { foreignKey: "loanId" });
+    if (models.Loan && !LoanPayment.associations?.Loan) {
+      LoanPayment.belongsTo(models.Loan, { as: 'Loan', foreignKey: 'loanId', targetKey: 'id' });
     }
-    if (models.User) {
-      LoanPayment.belongsTo(models.User, { foreignKey: "userId" });
+    if (models.Borrower && !LoanPayment.associations?.Borrower) {
+      LoanPayment.belongsTo(models.Borrower, { as: 'Borrower', foreignKey: 'borrowerId', targetKey: 'id', constraints: false });
+    }
+    if (models.User && !LoanPayment.associations?.Officer) {
+      LoanPayment.belongsTo(models.User, { as: 'Officer', foreignKey: 'officerId', targetKey: 'id', constraints: false });
     }
   };
 
