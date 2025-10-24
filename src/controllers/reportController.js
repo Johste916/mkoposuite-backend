@@ -14,7 +14,6 @@ const Branch             = db.Branch || db.branches || db.Branches;
 const User               = db.User || db.Users;
 const LoanProduct        = db.LoanProduct || db.Product || db.LoanProducts;
 const SavingsTransaction = db.SavingsTransaction || db.SavingsTx;
-const sequelize          = db.sequelize; // may be undefined in memory-only mode
 
 /* ------------------------- cross-schema safe helpers ------------------------ */
 const safeNumber = (v) => Number(v || 0);
@@ -132,8 +131,9 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
   const lpStatusKey   = pickAttrKey(LoanPayment, ['status']);
   const lpAppliedKey  = pickAttrKey(LoanPayment, ['applied']);
   const lpDateKey     = pickAttrKey(LoanPayment, ['paymentDate', 'date', 'createdAt', 'created_at']);
+  const lpCreatedKey  = pickAttrKey(LoanPayment, ['createdAt', 'created_at']);
 
-  // Sum payments per loan up to asOf
+  // Sum payments per loan up to asOf (NO ORDER BY in grouped query)
   let paidMap = new Map();
   if (LoanPayment && lpLoanIdKey && lpAmountKey) {
     const where = {
@@ -145,33 +145,23 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
 
     const loanIdField = LoanPayment?.rawAttributes?.[lpLoanIdKey]?.field || lpLoanIdKey;
     const amountField = LoanPayment?.rawAttributes?.[lpAmountKey]?.field || lpAmountKey;
-    const dateField   = lpDateKey ? (LoanPayment?.rawAttributes?.[lpDateKey]?.field || lpDateKey) : null;
+    const dateField   = lpDateKey    ? (LoanPayment?.rawAttributes?.[lpDateKey]?.field   || lpDateKey)   : null;
+    const createdFld  = lpCreatedKey ? (LoanPayment?.rawAttributes?.[lpCreatedKey]?.field|| lpCreatedKey): null;
 
     const attrs = [
       [col(loanIdField), 'loanId'],
       [fn('sum', col(amountField)), 'paid'],
     ];
+    if (dateField)   attrs.push([fn('max', col(dateField)), 'lastPaymentDate']);
+    if (createdFld)  attrs.push([fn('max', col(createdFld)), 'lastCreatedAt']);
 
-    // also compute last payment date/createdAt for optional ordering (safe in Postgres)
-    if (dateField) attrs.push([fn('max', col(dateField)), 'lastPaymentDate']);
-    attrs.push([fn('max', col(LoanPayment?.rawAttributes?.createdAt?.field || 'createdAt')), 'lastCreatedAt']);
-
-    const options = {
+    const paidByLoan = await LoanPayment.findAll({
       where,
       attributes: attrs,
       group: [col(loanIdField)],
       raw: true,
-    };
+    });
 
-    // If we have a sequelize instance, sort by MAX(date)/MAX(createdAt) (valid with GROUP BY)
-    if (sequelize) {
-      const order = [];
-      if (dateField) order.push([sequelize.literal(`MAX("${LoanPayment.getTableName()}"."${dateField}")`), 'DESC']);
-      order.push([sequelize.literal(`MAX("${LoanPayment.getTableName()}"."${LoanPayment?.rawAttributes?.createdAt?.field || 'createdAt'}")`), 'DESC']);
-      options.order = order;
-    }
-
-    const paidByLoan = await LoanPayment.findAll(options);
     paidMap = new Map((paidByLoan || []).map(r => [String(r.loanId), safeNumber(r.paid)]));
   }
 
