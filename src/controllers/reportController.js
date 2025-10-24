@@ -207,9 +207,7 @@ exports.getFilters = async (req, res) => {
   try {
     const [branches, officers, borrowers, products] = await Promise.all([
       Branch ? Branch.findAll({
-        attributes: hasAttr(Branch, 'name')
-          ? ['id', 'name']
-          : ['id'],
+        attributes: hasAttr(Branch, 'name') ? ['id', 'name'] : ['id'],
         where: { ...tenantFilter(Branch, req) },
         order: hasAttr(Branch, 'name') ? [['name', 'ASC']] : undefined,
         raw: true,
@@ -246,13 +244,17 @@ exports.getFilters = async (req, res) => {
 /* ------------------------- BORROWERS (loan summary) ------------------------ */
 exports.borrowersLoanSummary = async (req, res) => {
   try {
-    const { branchId, officerId, borrowerId } = req.query;
+    const { branchId, officerId, borrowerId, productId } = req.query;
     const { startDate, endDate } = parseDates(req.query);
 
-    // Loan filters
+    // Loan filters (add missing branch/officer/product guards if columns exist)
     const loanDateKey = pickAttrKey(Loan, ['createdAt', 'created_at']);
     const loanWhere = {
       ...(borrowerId && hasAttr(Loan, 'borrowerId') ? { borrowerId } : {}),
+      ...(productId && hasAttr(Loan, 'productId') ? { productId } : {}),
+      ...(branchId && hasAttr(Loan, 'branchId') ? { branchId } : {}),
+      ...(officerId && (hasAttr(Loan, 'officerId') || hasAttr(Loan, 'loanOfficerId') || hasAttr(Loan, 'userId')) ?
+        { [pickAttrKey(Loan, ['officerId','loanOfficerId','userId'])]: officerId } : {}),
       ...(startDate || endDate ? betweenRange(loanDateKey, startDate, endDate) : {}),
       ...tenantFilter(Loan, req),
     };
@@ -262,21 +264,26 @@ exports.borrowersLoanSummary = async (req, res) => {
       Loan ? sumSafe(Loan, ['amount', 'principal', 'principalAmount', 'loanAmount'], loanWhere) : 0,
     ]);
 
-    // Collections
+    // Collections (respect filters where columns exist)
     let totalRepayments = 0;
     if (LoanPayment) {
       const lpAmountKey  = pickAttrKey(LoanPayment, ['amountPaid', 'amount', 'paidAmount', 'paymentAmount']);
       const lpDateKey    = pickAttrKey(LoanPayment, ['paymentDate', 'date', 'createdAt', 'created_at']);
       const lpStatusKey  = pickAttrKey(LoanPayment, ['status']);
       const lpAppliedKey = pickAttrKey(LoanPayment, ['applied']);
+      const lpBranchKey  = pickAttrKey(LoanPayment, ['branchId','branch_id']);
+      const lpOfficerKey = pickAttrKey(LoanPayment, ['officerId','loanOfficerId','userId']);
+      const lpBorrowerK  = pickAttrKey(LoanPayment, ['borrowerId','borrower_id']);
+      const lpProductK   = pickAttrKey(LoanPayment, ['productId','product_id']); // some schemas track this
 
       const payWhere = {
         ...(lpStatusKey ? { [lpStatusKey]: 'approved' } : {}),
         ...(lpAppliedKey ? { [lpAppliedKey]: true } : {}),
         ...(lpDateKey ? betweenRange(lpDateKey, startDate, endDate) : {}),
-        ...(branchId && hasAttr(LoanPayment, 'branchId') ? { branchId } : {}),
-        ...(officerId && hasAttr(LoanPayment, 'officerId') ? { officerId } : {}),
-        ...(borrowerId && hasAttr(LoanPayment, 'borrowerId') ? { borrowerId } : {}),
+        ...(branchId && lpBranchKey ? { [lpBranchKey]: branchId } : {}),
+        ...(officerId && lpOfficerKey ? { [lpOfficerKey]: officerId } : {}),
+        ...(borrowerId && lpBorrowerK ? { [lpBorrowerK]: borrowerId } : {}),
+        ...(productId && lpProductK ? { [lpProductK]: productId } : {}),
         ...tenantFilter(LoanPayment, req),
       };
       totalRepayments = lpAmountKey ? await sumSafe(LoanPayment, [lpAmountKey], payWhere) : 0;
@@ -305,7 +312,7 @@ exports.borrowersLoanSummary = async (req, res) => {
         ],
       },
       period: periodText({ startDate, endDate }),
-      scope:  scopeText({ branchId, officerId, borrowerId }),
+      scope:  scopeText({ branchId, officerId, borrowerId, productId }),
       welcome: 'Here is a friendly summary for your borrowers. Apply filters to narrow focus and export anytime!',
     });
   } catch (err) {
@@ -355,12 +362,12 @@ exports.loansTrends = async (req, res) => {
     loans.forEach(l => {
       const dt = loanDateKey ? l[loanDateKey] : null;
       const m = dt ? new Date(dt).getMonth() : 0;
-      monthly[m].loans += safeNumber(l[loanAmountKey] || 0);
+      if (m >= 0 && m < 12) monthly[m].loans += safeNumber(loanAmountKey ? l[loanAmountKey] : 0);
     });
     pays.forEach(p => {
       const dt = payDateKey ? p[payDateKey] : null;
       const m = dt ? new Date(dt).getMonth() : 0;
-      monthly[m].repayments += safeNumber(p[payAmtKey] || 0);
+      if (m >= 0 && m < 12) monthly[m].repayments += safeNumber(payAmtKey ? p[payAmtKey] : 0);
     });
 
     res.json(monthly);
@@ -810,6 +817,7 @@ exports.disbursementsSummary = async (req, res) => {
 };
 
 /* ---------------------- Disbursed loans register (schema-safe) ------------- */
+// (unchanged from your version; kept for completeness)
 exports.loansDisbursedList = async (req, res) => {
   try {
     if (!Loan) return res.json([]);
@@ -1010,21 +1018,6 @@ exports.loanOfficerSummary = async (req, res) => {
     period: p,
     scope: scopeText(req.query),
     welcome: 'Officer performance snapshots coming soon.'
-  });
-};
-
-/* ------------------------------- Loan products ----------------------------- */
-exports.loanProductsSummary = async (req, res) => {
-  const p = periodText(parseDates(req.query));
-  res.json({
-    rows:[],
-    table: {
-      columns:[{key:'product',label:'Product'},{key:'loans',label:'Loans'},{key:'amount',label:'Amount',currency:true}],
-      rows:[],
-    },
-    period: p,
-    scope: scopeText(req.query),
-    welcome: 'Product mix and yields will populate as data accrues.'
   });
 };
 

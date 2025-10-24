@@ -1,45 +1,70 @@
 const express = require("express");
-const ctl = require("../controllers/reportController");
+
+// Load controller (supports both CJS and ESM default)
+let ctl = require("../controllers/reportController");
+ctl = ctl && ctl.__esModule && ctl.default ? ctl.default : ctl;
 
 const r = express.Router();
 
+/** Resolve a handler by name; if missing, return a 501 placeholder and log a clear warning */
+function handler(name) {
+  const fn = ctl && ctl[name];
+  if (typeof fn === "function") return fn;
+
+  const available = Object.keys(ctl || {}).sort().join(", ");
+  console.warn(
+    `[reportRoutes] Missing controller handler "${name}". Got: ${typeof fn}. ` +
+    `Available: [${available || "none"}]. ` +
+    `Check ../controllers/reportController.{js,ts}`
+  );
+
+  // Fallback: keep the app running but mark the route as not implemented
+  return (req, res) => {
+    res.status(501).json({
+      error: `Handler "${name}" is not implemented on the server.`,
+      hint: "Verify the export in controllers/reportController",
+      route: req.originalUrl,
+    });
+  };
+}
+
 /* Filters */
-r.get("/filters", ctl.getFilters);
+r.get("/filters", handler("getFilters"));
 
 /* Borrowers */
-r.get("/borrowers/loan-summary", ctl.borrowersLoanSummary);
+r.get("/borrowers/loan-summary", handler("borrowersLoanSummary"));
 
 /* Loans (summary + disbursed register) */
-r.get("/loans/summary", ctl.loansSummary);
-r.get("/loans/disbursements/list", ctl.loansDisbursedList); // Disbursed loans register
-r.get("/loans/export/csv", ctl.loansExportCSV);
-r.get("/loans/export/pdf", ctl.loansExportPDF);
-r.get("/loans/trends", ctl.loansTrends);
+r.get("/loans/summary", handler("loansSummary"));
+r.get("/loans/disbursements/list", handler("loansDisbursedList")); // Disbursed loans register
+r.get("/loans/export/csv", handler("loansExportCSV"));
+r.get("/loans/export/pdf", handler("loansExportPDF"));
+r.get("/loans/trends", handler("loansTrends"));
 
 /* Arrears / PAR / Outstanding */
-r.get("/arrears-aging", ctl.arrearsAging);
-r.get("/outstanding", ctl.outstandingReport);
-r.get("/par/summary", ctl.parSummary);
+r.get("/arrears-aging", handler("arrearsAging"));
+r.get("/outstanding", handler("outstandingReport"));
+r.get("/par/summary", handler("parSummary"));
 
 /* Collections */
-r.get("/collections/summary", ctl.collectionsSummary);
-r.get("/collectors/summary", ctl.collectorSummary);
+r.get("/collections/summary", handler("collectionsSummary"));
+r.get("/collectors/summary", handler("collectorSummary"));
 
 /* Disbursements / Fees / Officers / Products */
-r.get("/disbursements/summary", ctl.disbursementsSummary);
-r.get("/fees/summary", ctl.feesSummary);
-r.get("/loan-officers/summary", ctl.loanOfficerSummary);
-r.get("/loan-products/summary", ctl.loanProductsSummary);
+r.get("/disbursements/summary", handler("disbursementsSummary"));
+r.get("/fees/summary", handler("feesSummary"));
+r.get("/loan-officers/summary", handler("loanOfficerSummary"));
+r.get("/loan-products/summary", handler("loanProductsSummary")); // <- the one your logs flagged
 
 /* Deferred Income */
-r.get("/deferred-income", ctl.deferredIncome);
-r.get("/deferred-income/monthly", ctl.deferredIncomeMonthly);
+r.get("/deferred-income", handler("deferredIncome"));
+r.get("/deferred-income/monthly", handler("deferredIncomeMonthly"));
 
 /* MFRS / Daily / Monthly / Glance / Everything */
-r.get("/mfrs", ctl.mfrsRatios);
-r.get("/daily", ctl.dailyReport);
-r.get("/monthly", ctl.monthlyReport);
-r.get("/at-a-glance", ctl.atAGlance);
-r.get("/all-entries", ctl.allEntries);
+r.get("/mfrs", handler("mfrsRatios"));
+r.get("/daily", handler("dailyReport"));
+r.get("/monthly", handler("monthlyReport"));
+r.get("/at-a-glance", handler("atAGlance"));
+r.get("/all-entries", handler("allEntries"));
 
 module.exports = r;
