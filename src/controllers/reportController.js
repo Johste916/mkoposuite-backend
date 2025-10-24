@@ -106,6 +106,7 @@ function periodText({ startDate, endDate, asOf, snapshot = false }) {
 function tenantFilter(model, req) {
   const tenantId =
     req?.tenant?.id ||
+    req?.context?.tenantId ||
     req?.headers?.['x-tenant-id'] ||
     req?.headers?.['X-Tenant-Id'];
   const key = pickAttrKey(model, ['tenantId', 'tenant_id']);
@@ -372,7 +373,7 @@ exports.loansTrends = async (req, res) => {
 /* ------------------------- Loans summary/register -------------------------- */
 exports.loansSummary = async (req, res) => {
   try {
-    const { productId } = req.query;
+    const { productId, status } = req.query;
     const { startDate, endDate } = parseDates(req.query);
 
     if (!Loan) {
@@ -394,17 +395,37 @@ exports.loansSummary = async (req, res) => {
     const createdAtKey  = pickAttrKey(Loan, ['createdAt','created_at']);
     const disbursedKey  = pickAttrKey(Loan, ['disbursementDate','releaseDate','startDate']);
     const currencyKey   = pickAttrKey(Loan, ['currency']);
+    const branchKey     = pickAttrKey(Loan, ['branchId','branch_id']);
 
     const loanDateKey = createdAtKey || disbursedKey;
 
-    const where = {
+    const baseWhere = {
       ...(productId && productKey ? { [productKey]: productId } : {}),
       ...(loanDateKey ? betweenRange(loanDateKey, startDate, endDate) : {}),
+      ...(req.query.branchId && branchKey ? { [branchKey]: req.query.branchId } : {}),
       ...tenantFilter(Loan, req),
     };
 
+    // Optional ENUM-safe status filter
+    let where = baseWhere;
+    if (status && statusKey) {
+      const statusField = Loan.rawAttributes[statusKey]?.field || statusKey;
+      const want = String(status).toLowerCase();
+      if (want === 'disbursed') {
+        const orConds = [];
+        if (disbursedKey) orConds.push({ [disbursedKey]: { [Op.ne]: null } });
+        orConds.push(sqWhere(cast(col(statusField), 'text'), { [Op.iLike]: 'disbursed' }));
+        where = { ...baseWhere, [Op.or]: orConds };
+      } else {
+        where = {
+          ...baseWhere,
+          [sqWhere(cast(col(statusField), 'text'), { [Op.iLike]: want })]: true,
+        };
+      }
+    }
+
     // Base rows
-    let rows = await Loan.findAll({
+    const rows = await Loan.findAll({
       where,
       attributes: [idKey, borrowerKey, productKey, amountKey, statusKey, createdAtKey, disbursedKey, currencyKey].filter(Boolean),
       order: loanDateKey ? [[loanDateKey, 'DESC']] : undefined,
@@ -743,10 +764,14 @@ exports.disbursementsSummary = async (req, res) => {
     const dateKey    = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','startDate','createdAt','created_at']);
     const statusKey  = pickAttrKey(Loan, ['status']);
     const disbDateK  = pickAttrKey(Loan, ['disbursementDate','disbursement_date']);
+    const branchKey  = pickAttrKey(Loan, ['branchId','branch_id']);
+    const productKey = pickAttrKey(Loan, ['productId','product_id']);
 
     // Base filters
     const baseWhere = {
       ...(dateKey ? betweenRange(dateKey, startDate, endDate) : {}),
+      ...(req.query.branchId && branchKey ? { [branchKey]: req.query.branchId } : {}),
+      ...(req.query.productId && productKey ? { [productKey]: req.query.productId } : {}),
       ...tenantFilter(Loan, req),
     };
 
@@ -803,6 +828,7 @@ exports.loansDisbursedList = async (req, res) => {
     const disbMethodKey  = pickAttrKey(Loan, ['disbursementMethod','disbursement_method']);
     const officerKey     = pickAttrKey(Loan, ['officerId','loanOfficerId','userId','disbursedBy','disbursed_by']);
     const refKey         = pickAttrKey(Loan, ['reference','ref','code']);
+    const branchKey      = pickAttrKey(Loan, ['branchId','branch_id']);
 
     // Date range: use disbursement date if present, else start date
     const dateKey = disbDateKey || startKey;
@@ -810,6 +836,9 @@ exports.loansDisbursedList = async (req, res) => {
     // Base tenant/date filters
     const baseWhere = {
       ...(dateKey ? betweenRange(dateKey, startDate, endDate) : {}),
+      ...(req.query.productId && productKey ? { [productKey]: req.query.productId } : {}),
+      ...(req.query.borrowerId && borrowerKey ? { [borrowerKey]: req.query.borrowerId } : {}),
+      ...(req.query.branchId && branchKey ? { [branchKey]: req.query.branchId } : {}),
       ...tenantFilter(Loan, req),
     };
 
@@ -820,12 +849,17 @@ exports.loansDisbursedList = async (req, res) => {
       const statusField = Loan.rawAttributes[statusKey]?.field || statusKey;
       orConds.push(sqWhere(cast(col(statusField), 'text'), { [Op.iLike]: 'disbursed' }));
     }
-    const where = orConds.length ? { ...baseWhere, [Op.or]: orConds } : baseWhere;
+    let where = orConds.length ? { ...baseWhere, [Op.or]: orConds } : baseWhere;
+
+    // If officerId is provided and there is an officer column on Loan, add now (DB-level)
+    if (req.query.officerId && officerKey) {
+      where = { ...where, [officerKey]: req.query.officerId };
+    }
 
     // Fetch rows (minimal columns) — raw, no associations required
     const attrs = [
       idKey, borrowerKey, productKey, amountKey, currencyKey, statusKey,
-      startKey, disbDateKey, disbMethodKey, officerKey, refKey
+      startKey, disbDateKey, disbMethodKey, officerKey, refKey, branchKey
     ].filter(Boolean);
 
     const rows = await Loan.findAll({
@@ -906,7 +940,7 @@ exports.loansDisbursedList = async (req, res) => {
     }
 
     // Final shape for UI
-    const uiRows = rows.map(r => {
+    let uiRows = rows.map(r => {
       const borrowerId = borrowerKey ? r[borrowerKey] : null;
       const officerId  =
         officerKey && r[officerKey]
@@ -927,8 +961,14 @@ exports.loansDisbursedList = async (req, res) => {
         disbursementMethod: disbMethodKey ? r[disbMethodKey] : null,
         officerId,
         officerName: officerId ? (officersById[officerId] || '—') : '—',
+        branchId: branchKey ? r[branchKey] : null,
       };
     });
+
+    // If officerId filter provided but not filterable at DB level, apply after enrichment
+    if (req.query.officerId && !officerKey) {
+      uiRows = uiRows.filter(r => String(r.officerId || '') === String(req.query.officerId));
+    }
 
     res.json(uiRows);
   } catch (e) {
