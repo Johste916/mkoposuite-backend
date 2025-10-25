@@ -9,8 +9,8 @@ module.exports = (sequelize, DataTypes) => {
       // FKs — match DB reality
       borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' },  // DB camel
       productId:  { type: DataTypes.INTEGER, allowNull: true,  field: 'product_id' },  // DB snake
-      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId' },    // 👈 DB camel
-      tenantId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'tenant_id' },   // DB snake
+      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId' },    // DB camel
+      tenantId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'tenantId' },    // ✅ DB camel (fix)
 
       // Officer (either loan_officer_id or disbursed_by)
       loanOfficerId: { type: DataTypes.UUID, allowNull: true, field: 'loan_officer_id' },
@@ -26,16 +26,16 @@ module.exports = (sequelize, DataTypes) => {
       // Money & terms
       amount:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'amount' },
       currency:     { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS', field: 'currency' },
-      interestRate: { type: DataTypes.DECIMAL(10, 4), field: 'interestRate' },   // DB camel? keep as-is if exists
+      interestRate: { type: DataTypes.DECIMAL(10, 4), field: 'interestRate' },   // DB camel
       termMonths:   { type: DataTypes.INTEGER, field: 'term_months' },           // DB snake
 
       // Dates
-      startDate:         { type: DataTypes.DATEONLY, field: 'start_date' },
-      endDate:           { type: DataTypes.DATEONLY, field: 'end_date' },
+      startDate:         { type: DataTypes.DATEONLY, field: 'startDate' },        // ✅ DB camel (fix)
+      endDate:           { type: DataTypes.DATEONLY, field: 'endDate' },          // ✅ DB camel (fix)
       approvalDate:      { type: DataTypes.DATE,     field: 'approval_date' },
       rejectionDate:     { type: DataTypes.DATE,     field: 'rejection_date' },
       disbursementDate:  { type: DataTypes.DATE,     field: 'disbursement_date' }, // DB snake
-      disbursementMethod:{ type: DataTypes.STRING,   field: 'disbursementMethod' }, // DB camel? keep as-is if exists
+      disbursementMethod:{ type: DataTypes.STRING,   field: 'disbursementMethod' }, // DB camel
 
       // Status & aggregates
       status:        { type: DataTypes.STRING, allowNull: false, defaultValue: 'pending', field: 'status' },
@@ -53,10 +53,9 @@ module.exports = (sequelize, DataTypes) => {
     {
       tableName: 'loans',
       freezeTableName: true,
-      // Your "index" setup uses camel timestamps globally; but logs show loans has created_at/updated_at.
-      // We'll keep underscored timestamps here specifically for loans:
+      // loans table uses created_at/updated_at
       timestamps: true,
-      underscored: true,                 // created_at / updated_at in this table
+      underscored: true,
       createdAt: 'created_at',
       updatedAt: 'updated_at',
       hooks: {
@@ -73,7 +72,8 @@ module.exports = (sequelize, DataTypes) => {
       indexes: [
         { fields: ['borrowerId'] },         // camel - exists in DB
         { fields: ['product_id'] },         // snake - exists in DB
-        { fields: ['branchId'] },           // 👈 camel - fix from branch_id
+        { fields: ['branchId'] },           // camel
+        { fields: ['tenantId'] },           // ✅ camel (fix)
         { fields: ['status'] },
         { fields: ['disbursement_date'] },
         { fields: ['created_at'] },
@@ -89,10 +89,6 @@ module.exports = (sequelize, DataTypes) => {
     if (target.getUTCMonth() !== ((m - 1 + months) % 12 + 12) % 12) target.setUTCDate(0);
     return target.toISOString().slice(0, 10);
   }
-
-  // ❌ Remove per-model associations to avoid alias conflicts.
-  // We'll rely on models/index.js to wire associations consistently.
-  // Loan.associate = (models) => { /* intentionally empty */ };
 
   return Loan;
 };

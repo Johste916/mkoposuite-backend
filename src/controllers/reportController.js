@@ -477,17 +477,18 @@ exports.loansSummary = async (req, res) => {
     }
 
     // Final UI rows
+    const idK = idKey, bK = borrowerKey, pK = productKey, aK = amountKey, sK = statusKey, cAtK = createdAtKey, dK = disbursedKey, curK = currencyKey;
     const uiRows = rows.map(r => ({
-      id: r[idKey],
-      borrowerId: r[borrowerKey],
-      borrowerName: borrowersById[String(r[borrowerKey])] || '—',
-      productId: r[productKey],
-      productName: productsById[String(r[productKey])] || '—',
-      amount: r[amountKey],
-      status: r[statusKey],
-      createdAt: r[createdAtKey],
-      disbursementDate: r[disbursedKey] || r[createdAtKey],
-      currency: r[currencyKey] || 'TZS',
+      id: r[idK],
+      borrowerId: r[bK],
+      borrowerName: borrowersById[String(r[bK])] || '—',
+      productId: r[pK],
+      productName: productsById[String(r[pK])] || '—',
+      amount: r[aK],
+      status: r[sK],
+      createdAt: r[cAtK],
+      disbursementDate: r[dK] || r[cAtK],
+      currency: r[curK] || 'TZS',
     }));
 
     res.json({
@@ -577,8 +578,6 @@ exports.loanProductsSummary = async (req, res) => {
       where,
       attributes: attrs,
       raw: true,
-      // large limits are fine; if your dataset is huge, swap to a GROUP BY query
-      // but we keep it schema-safe across engines here.
       limit: 25000,
     });
 
@@ -619,14 +618,14 @@ exports.loanProductsSummary = async (req, res) => {
       .sort((a, b) => b.amount - a.amount);
 
     res.json({
-      rows: uiRows, // raw rows (API consumers)
+      rows: uiRows,
       table: {
         columns: [
           { key: 'product', label: 'Product' },
           { key: 'loans',   label: 'Loans' },
           { key: 'amount',  label: 'Amount', currency: true },
         ],
-        rows: uiRows, // same shape for your current UI table
+        rows: uiRows,
       },
       period: periodText({ startDate, endDate }),
       scope: scopeText(req.query),
@@ -955,8 +954,6 @@ exports.disbursementsSummary = async (req, res) => {
   }
 };
 
-/* ---------------------- Disbursed loans register (schema-safe) ------------- */
-// (unchanged from your version; kept for completeness)
 /* ---------------------- Disbursed loans register (rich) -------------------- */
 exports.loansDisbursedList = async (req, res) => {
   try {
@@ -1013,7 +1010,7 @@ exports.loansDisbursedList = async (req, res) => {
       where = { ...where, [officerKey]: req.query.officerId };
     }
 
-    // --- Text search (q) across borrower/product/reference/phone (apply post-enrichment if needed) ---
+    // Text search (q)
     const q = (req.query.q || '').trim().toLowerCase();
 
     // --- Fetch raw loans (minimal columns we need) ---
@@ -1112,7 +1109,7 @@ exports.loansDisbursedList = async (req, res) => {
       const payWhere = {
         ...(lpStatusKey ? { [lpStatusKey]: 'approved' } : {}),
         ...(lpAppliedKey ? { [lpAppliedKey]: true } : {}),
-        ...(lpDateKey ? betweenRange(lpDateKey, null, new Date()) : {}), // up to now
+        ...(lpDateKey ? betweenRange(lpDateKey, null, new Date()) : {}),
         ...tenantFilter(LoanPayment, req),
       };
 
@@ -1154,24 +1151,20 @@ exports.loansDisbursedList = async (req, res) => {
       const principal = safeNumber(r[amountKey] || 0);
       const paid = paidByLoan.get(String(loanId)) || { total:0, principal:0, interest:0, fees:0, penalty:0 };
 
-      // If there is no principalPaid breakdown, assume total goes to principal (best effort)
       const principalPaid = (paid.principal || (paid.total && !lpPrinKey ? paid.total : 0)) || 0;
       const interestPaid  = paid.interest || 0;
       const feesPaid      = paid.fees || 0;
       const penaltyPaid   = paid.penalty || 0;
 
       const outstandingPrincipal = Math.max(0, principal - principalPaid);
-      // We don’t know accrued interest/fees/penalty unless your schema tracks them; keep 0 as safe default.
       const outstandingInterest = 0;
       const outstandingFees     = 0;
       const outstandingPenalty  = 0;
       const totalOutstanding    = outstandingPrincipal + outstandingInterest + outstandingFees + outstandingPenalty;
 
-      // Interest rate/year (%) & duration (months)
       const ratePct = r[rateKey] != null ? Number(r[rateKey]) : null;
       const months  = r[termMonthsKey] != null ? Number(r[termMonthsKey]) : null;
 
-      // Interest amount (display-only, best-effort simple interest if we have both)
       let interestAmount = null;
       if (ratePct != null && months != null) {
         interestAmount = Math.max(0, Math.round(principal * (ratePct/100) * (months/12)));
@@ -1191,13 +1184,13 @@ exports.loansDisbursedList = async (req, res) => {
         productId,
         productName: productId ? (productsById[String(productId)] || '—') : '—',
         principalAmount: principal,
-        interestAmount,               // may be null if rate/duration unknown
+        interestAmount,
         outstandingPrincipal,
         outstandingInterest,
         outstandingFees,
         outstandingPenalty,
         totalOutstanding,
-        interestRateYear: ratePct,    // %
+        interestRateYear: ratePct,
         loanDurationMonths: months,
         officerId,
         officerName: officerId ? (officersById[officerId] || '—') : '—',
@@ -1213,9 +1206,9 @@ exports.loansDisbursedList = async (req, res) => {
       uiRows = uiRows.filter(r => String(r.officerId || '') === String(req.query.officerId));
     }
 
-    // Text search ‘q’ (borrower name / phone / product / reference / id)
-    if (q) {
-      const qn = q;
+    // Text search ‘q’
+    const qn = q;
+    if (qn) {
       uiRows = uiRows.filter(r => {
         return (
           String(r.borrowerName || '').toLowerCase().includes(qn) ||
@@ -1344,7 +1337,7 @@ exports.outstandingReport = async (req, res) => {
     const rows = await computeOutstandingByLoan(asOf, req);
     const total = rows.reduce((s,r)=>s+safeNumber(r.outstanding),0);
     res.json({
-      rows, // detailed rows per loan (kept as-is for this report)
+      rows,
       totals: { outstanding: total },
       asOf,
       scope: scopeText(req.query),

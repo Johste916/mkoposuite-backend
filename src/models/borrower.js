@@ -42,7 +42,7 @@ module.exports = (sequelize, DataTypes) => {
       // Org / Relations
       branchId:       { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' }, // DB has branch_id
       loanOfficerId:  { type: DataTypes.UUID,    allowNull: true, field: 'loan_officer_id' },
-      tenantId:       { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },  // tenant scoping (exists on branches; add if present on borrowers)
+      tenantId:       { type: DataTypes.INTEGER, allowNull: true, field: 'tenantId' },  // ✅ DB camel (fix)
 
       // KYC / Profile
       gender:               { type: DataTypes.STRING(16), allowNull: true, field: 'gender' },
@@ -79,7 +79,7 @@ module.exports = (sequelize, DataTypes) => {
       status: { type: DataTypes.STRING(32), allowNull: false, defaultValue: 'active', field: 'status' },
     },
     {
-      tableName: 'Borrowers', // your DB has "Borrowers" (capitalized)
+      tableName: 'Borrowers', // DB has "Borrowers" (capitalized)
       freezeTableName: true,
       timestamps: true,
       indexes: [
@@ -89,6 +89,7 @@ module.exports = (sequelize, DataTypes) => {
         { fields: ['idNumber'] },
         { fields: ['branch_id'] },
         { fields: ['loan_officer_id'] },
+        { fields: ['tenantId'] },       // ✅ camel (fix)
         { fields: ['status'] },
         { fields: ['blacklistedAt'] },
       ],
