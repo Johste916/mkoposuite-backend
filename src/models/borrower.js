@@ -1,3 +1,4 @@
+// src/models/borrower.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
@@ -40,9 +41,10 @@ module.exports = (sequelize, DataTypes) => {
       ward:        { type: DataTypes.TEXT,   allowNull: true, field: 'ward' },
 
       // Org / Relations
-      branchId:       { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' }, // DB has branch_id
-      loanOfficerId:  { type: DataTypes.UUID,    allowNull: true, field: 'loan_officer_id' },
-      tenantId:       { type: DataTypes.INTEGER, allowNull: true, field: 'tenantId' },  // ✅ DB camel (fix)
+      branchId:      { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },
+      loanOfficerId: { type: DataTypes.UUID,    allowNull: true, field: 'loan_officer_id' },
+      // 👇 FIX: actual DB column is snake_case
+      tenantId:      { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },
 
       // KYC / Profile
       gender:               { type: DataTypes.STRING(16), allowNull: true, field: 'gender' },
@@ -79,7 +81,7 @@ module.exports = (sequelize, DataTypes) => {
       status: { type: DataTypes.STRING(32), allowNull: false, defaultValue: 'active', field: 'status' },
     },
     {
-      tableName: 'Borrowers', // DB has "Borrowers" (capitalized)
+      tableName: 'Borrowers',
       freezeTableName: true,
       timestamps: true,
       indexes: [
@@ -89,7 +91,8 @@ module.exports = (sequelize, DataTypes) => {
         { fields: ['idNumber'] },
         { fields: ['branch_id'] },
         { fields: ['loan_officer_id'] },
-        { fields: ['tenantId'] },       // ✅ camel (fix)
+        // 👇 FIX: index on the real column name
+        { fields: ['tenant_id'] },
         { fields: ['status'] },
         { fields: ['blacklistedAt'] },
       ],
