@@ -12,7 +12,6 @@ let cron;
 try { cron = require('node-cron'); } catch { /* optional */ }
 
 /* ---------------------------- Optional auto-sync --------------------------- */
-// Prefer migrations; autoSync is a legacy helper and optional
 let autoSync;
 try {
   autoSync = require('./bootstrap/autoSync');
@@ -22,7 +21,6 @@ try {
 } catch { /* optional */ }
 
 /* ----------------------------- Run migrations ------------------------------ */
-// Always attempt migrations first. If not present, continue without crashing.
 let runMigrations = async () => {
   console.warn('⚠️  runMigrations not found; skipping DB migrations.');
 };
@@ -146,14 +144,13 @@ let server;
     await sequelize.authenticate();
     console.log('✅ Connected to the database');
 
-    // Migrations first (adds/updates columns like tenant_id, opening_balance, etc.)
+    // Migrations first
     await runMigrations(sequelize);
 
-    // One-switch bootstrap (optional legacy sync; prefer migrations)
+    // Optional syncs (prefer migrations)
     if (process.env.AUTO_SYNC === '1' && typeof autoSync === 'function') {
-      await autoSync(); // typically does sequelize.sync({ alter: true })
+      await autoSync();
     } else {
-      // Granular toggles
       const syncSettingsOnly = process.env.SYNC_SETTINGS_ONLY === 'true';
       const syncACL          = process.env.SYNC_ACL === 'true';
       const syncAudit        = process.env.SYNC_AUDIT === 'true';
@@ -180,8 +177,9 @@ let server;
       else console.log('⏭️  Skipping CORE sync (set SYNC_CORE=true to create/alter core tables)');
     }
 
-    server = app.listen(PORT, () => {
-      console.log(`🚀 Server is running on port ${PORT}`);
+    // Explicit host helps on Render/containers
+    server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Server is running on http://0.0.0.0:${PORT}`);
     });
   } catch (err) {
     console.error('❌ Unable to start server:', err);
