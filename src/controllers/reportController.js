@@ -2,6 +2,7 @@
 const { Op, fn, col, cast, where: sqWhere } = require('sequelize');
 const { Parser } = require('json2csv');
 const PDFDocument = require('pdfkit');
+const XLSX = require('xlsx');
 
 let db = {};
 try { db = require('../models'); } catch (e) { db = {}; }
@@ -122,8 +123,8 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
   const idField       = pickFieldName(Loan, ['id']);
   const borrowerKey   = pickAttrKey(Loan, ['borrowerId', 'borrower_id']);
   const productKey    = pickAttrKey(Loan, ['productId', 'product_id']);
-  const amountKey     = pickAttrKey(Loan, ['amount', 'loanAmount', 'principalAmount']);
-  const principalKey  = pickAttrKey(Loan, ['principal', 'principalAmount', 'amount', 'loanAmount']);
+  const amountKey     = pickAttrKey(Loan, ['amount', 'loanAmount', 'principalAmount', 'approved_amount', 'approvedAmount']);
+  const principalKey  = pickAttrKey(Loan, ['principal', 'principalAmount', 'amount', 'loanAmount', 'approved_amount', 'approvedAmount']);
   const createdAtKey  = pickAttrKey(Loan, ['createdAt', 'created_at']);
 
   // Resolve LoanPayment attributes
@@ -204,9 +205,8 @@ async function computeOutstandingByLoan(asOf = new Date(), req = null) {
 
 /* --------------------------- internal report service ----------------------- */
 /**
- * We keep all domain/data logic here. Controllers become thin “illogic” glue:
+ * We keep all domain/data logic here. Controllers become thin glue:
  * parse inputs → call service → return HTTP.
- * NOTE: Everything uses existing helpers, so behavior is unchanged.
  */
 const ReportsService = {
   async getFiltersData(req) {
@@ -377,10 +377,10 @@ const ReportsService = {
     const productKey    = pickAttrKey(Loan, ['productId','product_id']);
     const amountKey     = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
     const statusKey     = pickAttrKey(Loan, ['status']);
-    const createdAtKey  = pickAttrKey(Loan, ['createdAt','created_at']);
-    const disbursedKey  = pickAttrKey(Loan, ['disbursementDate','releaseDate','startDate']);
-    const currencyKey   = pickAttrKey(Loan, ['currency']);
-    const branchKey     = pickAttrKey(Loan, ['branchId','branch_id']);
+    const createdAtKey  = pickAttrKey(Loan, ['createdAt','created_at','approvedDate','approved_date']);
+    const disbursedKey  = pickAttrKey(Loan, ['disbursementDate','releaseDate','startDate','dateDisbursed','date_disbursed']);
+    const currencyKey   = pickAttrKey(Loan, ['currency','ccy']);
+    const branchKey     = pickAttrKey(Loan, ['branchId','branch_id','branch','branchCode','branch_code']);
 
     const loanDateKey = createdAtKey || disbursedKey;
 
@@ -496,7 +496,7 @@ const ReportsService = {
     const productKey   = pickAttrKey(Loan, ['productId','product_id']);
     const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
     const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at']);
-    const disbDateKey  = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','startDate']);
+    const disbDateKey  = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','startDate','dateDisbursed','date_disbursed']);
     const branchKey    = pickAttrKey(Loan, ['branchId','branch_id']);
     const dateKey = disbDateKey || createdAtKey;
 
@@ -663,7 +663,7 @@ const ReportsService = {
 
     const dateKey    = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','startDate','createdAt','created_at']);
     const statusKey  = pickAttrKey(Loan, ['status']);
-    const disbDateK  = pickAttrKey(Loan, ['disbursementDate','disbursement_date']);
+    const disbDateK  = pickAttrKey(Loan, ['disbursementDate','disbursement_date','dateDisbursed','date_disbursed']);
     const branchKey  = pickAttrKey(Loan, ['branchId','branch_id']);
     const productKey = pickAttrKey(Loan, ['productId','product_id']);
 
@@ -685,7 +685,7 @@ const ReportsService = {
 
     const [count, total] = await Promise.all([
       Loan ? countSafe(Loan, where) : 0,
-      Loan ? sumSafe(Loan, ['amount','principal','principalAmount','loanAmount'], where) : 0,
+      Loan ? sumSafe(Loan, ['amount','principal','principalAmount','loanAmount','approved_amount','approvedAmount'], where) : 0,
     ]);
 
     return {
@@ -708,24 +708,31 @@ const ReportsService = {
 
     const { startDate, endDate } = parseDates(req.query);
 
+    // ---- Loan fields (schema-safe, expanded) ----
     const idKey         = pickAttrKey(Loan, ['id']);
-    const borrowerKey   = pickAttrKey(Loan, ['borrowerId','borrower_id']);
+    const borrowerKey   = pickAttrKey(Loan, ['borrowerId','borrower_id','clientId','client_id']);
     const productKey    = pickAttrKey(Loan, ['productId','product_id']);
-    const amountKey     = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
-    const currencyKey   = pickAttrKey(Loan, ['currency']);
-    const statusKey     = pickAttrKey(Loan, ['status']);
-    const startKey      = pickAttrKey(Loan, ['startDate','start_date','createdAt','created_at']);
-    const disbDateKey   = pickAttrKey(Loan, ['disbursementDate','disbursement_date','disbursedAt','releaseDate']);
-    const methodKey     = pickAttrKey(Loan, ['disbursementMethod','disbursement_method']);
-    const officerKey    = pickAttrKey(Loan, ['officerId','loanOfficerId','userId','disbursedBy','disbursed_by']);
-    const branchKey     = pickAttrKey(Loan, ['branchId','branch_id']);
-    const refKey        = pickAttrKey(Loan, ['reference','ref','code']);
+    const amountKey     = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount','approved_amount','approvedAmount']);
+    const currencyKey   = pickAttrKey(Loan, ['currency','ccy']);
+    const statusKey     = pickAttrKey(Loan, ['status','loanStatus','loan_status']);
+    const startKey      = pickAttrKey(Loan, ['startDate','start_date','createdAt','created_at','approvedDate','approved_date']);
+    const disbDateKey   = pickAttrKey(Loan, ['disbursementDate','disbursement_date','disbursedAt','releaseDate','dateDisbursed','date_disbursed']);
+    const methodKey     = pickAttrKey(Loan, ['disbursementMethod','disbursement_method','payoutMethod','payout_method']);
+    const officerKey    = pickAttrKey(Loan, ['officerId','loanOfficerId','userId','disbursedBy','disbursed_by','loan_officer_id']);
+    const branchKey     = pickAttrKey(Loan, ['branchId','branch_id','branch','branchCode','branch_code']);
+    const refKey        = pickAttrKey(Loan, ['reference','ref','code','loanNumber','loan_number','accountNo','account_no']);
 
-    const rateKey       = pickAttrKey(Loan, ['interestRate','rate','annualInterestRate']);
-    const termMonthsKey = pickAttrKey(Loan, ['termMonths','tenor','duration','loanTermMonths','term_months']);
+    const rateKey       = pickAttrKey(Loan, ['interestRate','rate','annualInterestRate','interest_rate','nominal_rate']);
+    const termMonthsKey = pickAttrKey(Loan, ['termMonths','tenor','duration','loanTermMonths','term_months','loan_term','months']);
 
+    // Optional names stored directly on Loan
+    const officerNameKeyOnLoan = pickAttrKey(Loan, ['officerName','loanOfficer','loan_officer','userName','user_name']);
+    const branchNameKeyOnLoan  = pickAttrKey(Loan, ['branchName','branch_name','branch','branch_code']);
+
+    // choose the best date available
     const dateKey = disbDateKey || startKey;
 
+    // ---- Base filters ----
     let where = {
       ...(dateKey ? betweenRange(dateKey, startDate, endDate) : {}),
       ...(req.query.productId && productKey ? { [productKey]: req.query.productId } : {}),
@@ -734,6 +741,7 @@ const ReportsService = {
       ...tenantFilter(Loan, req),
     };
 
+    // "disbursed" semantics: date present OR status ~ disbursed
     const orConds = [];
     if (disbDateKey) orConds.push({ [disbDateKey]: { [Op.ne]: null } });
     if (statusKey) {
@@ -742,18 +750,21 @@ const ReportsService = {
     }
     where = orConds.length ? { ...where, [Op.or]: orConds } : where;
 
+    // Amount range
     if ((req.query.minAmount || req.query.maxAmount) && amountKey) {
       const minA = Number(req.query.minAmount || 0);
       const maxA = Number(req.query.maxAmount || Number.MAX_SAFE_INTEGER);
       where = { ...where, [amountKey]: { [Op.between]: [minA, maxA] } };
     }
 
+    // Officer filter at DB level when the column exists
     if (req.query.officerId && officerKey) where = { ...where, [officerKey]: req.query.officerId };
 
+    // ---- Fetch loans ----
     const attrs = [
       idKey, borrowerKey, productKey, amountKey, currencyKey, statusKey,
       startKey, disbDateKey, methodKey, officerKey, branchKey, refKey,
-      rateKey, termMonthsKey,
+      rateKey, termMonthsKey, officerNameKeyOnLoan, branchNameKeyOnLoan
     ].filter(Boolean);
 
     let rows = await Loan.findAll({
@@ -764,11 +775,13 @@ const ReportsService = {
       raw: true,
     });
 
+    // ---- Collect IDs for enrichment ----
     const loanIds     = rows.map(r => r[idKey]).filter(Boolean);
     const borrowerIds = Array.from(new Set(rows.map(r => r[borrowerKey]).filter(Boolean))).map(String);
     const productIds  = Array.from(new Set(rows.map(r => r[productKey]).filter(Boolean))).map(String);
     const branchIds   = Array.from(new Set(rows.map(r => r[branchKey]).filter(Boolean))).map(String);
 
+    // ---- Borrowers (name/phone + fallback officer if loan lacks) ----
     let borrowersById = {}, borrowerPhoneById = {}, borrowerOfficerMap = {};
     if (Borrower && borrowerIds.length) {
       const bNameKey   = pickAttrKey(Borrower, ['name','fullName']);
@@ -787,6 +800,7 @@ const ReportsService = {
       });
     }
 
+    // ---- Products ----
     let productsById = {};
     if (LoanProduct && productIds.length) {
       const pNameKey = pickAttrKey(LoanProduct, ['name','productName']);
@@ -798,6 +812,7 @@ const ReportsService = {
       pList.forEach(p => { productsById[String(p.id)] = (p[pNameKey] || p.name || '').trim(); });
     }
 
+    // ---- Branches ----
     let branchesById = {};
     if (Branch && branchIds.length) {
       const brNameKey = pickAttrKey(Branch, ['name','branchName','title']);
@@ -809,6 +824,7 @@ const ReportsService = {
       brs.forEach(b => { branchesById[String(b.id)] = (b[brNameKey] || b.name || '').trim(); });
     }
 
+    // ---- Officer names (loan-level or borrower fallback) ----
     const officerIds = new Set(
       rows.map(r => (officerKey ? r[officerKey] : null)).filter(Boolean).map(String)
     );
@@ -833,24 +849,26 @@ const ReportsService = {
       });
     }
 
+    // ---- Schedules: sums + PAID status + next due (your schema) ----
     let scheduleAggByLoan = new Map();
     let nextDueByLoan     = new Map();
 
     if (db.LoanSchedule && loanIds.length) {
       const LS = db.LoanSchedule;
       const lsLoanId   = pickAttrKey(LS, ['loanId','loan_id']);
-      const lsDue      = pickAttrKey(LS, ['due_date','dueDate']);
+      const lsDue      = pickAttrKey(LS, ['due_date','dueDate','due_on','dueOn']);
       const lsPaidNum  = pickAttrKey(LS, ['paid']);
       const lsStatus   = pickAttrKey(LS, ['status']);
       const lsPrin     = pickAttrKey(LS, ['principal']);
       const lsInt      = pickAttrKey(LS, ['interest']);
       const lsFees     = pickAttrKey(LS, ['fees']);
-      const lsPen      = pickAttrKey(LS, ['penalties']);
+      const lsPen      = pickAttrKey(LS, ['penalties','penalty']);
       const lsPrinPaid = pickAttrKey(LS, ['principal_paid']);
       const lsIntPaid  = pickAttrKey(LS, ['interest_paid']);
       const lsFeesPaid = pickAttrKey(LS, ['fees_paid']);
-      const lsPenPaid  = pickAttrKey(LS, ['penalties_paid']);
+      const lsPenPaid  = pickAttrKey(LS, ['penalties_paid','penalty_paid']);
 
+      // Totals & paid totals
       const aggRows = await LS.findAll({
         where: { [lsLoanId]: { [Op.in]: loanIds } , ...tenantFilter(LS, req) },
         attributes: [
@@ -881,6 +899,7 @@ const ReportsService = {
         });
       });
 
+      // Next unpaid due date
       const unpaidCond = {
         [Op.or]: [
           ...(lsPaidNum ? [{ [lsPaidNum]: 0 }] : []),
@@ -905,6 +924,9 @@ const ReportsService = {
       dueRows.forEach(r => nextDueByLoan.set(String(r.loanId), r.nextDue));
     }
 
+    // ---- Fallbacks when schedules are absent ----
+    const maturityKeyOnLoan = pickAttrKey(Loan, ['maturityDate','maturity_date','dueDate','due_date','nextDueDate','next_due_date']);
+
     const q = String(req.query.q || '').trim().toLowerCase();
     let uiRows = rows.map(r => {
       const loanId     = r[idKey];
@@ -919,23 +941,48 @@ const ReportsService = {
         paidPrincipal: 0,   paidInterest: 0,   paidFees: 0,   paidPenalty: 0,
       };
 
-      const outPrin = Math.max(0, sched.schedPrincipal - sched.paidPrincipal);
-      const outInt  = Math.max(0, sched.schedInterest  - sched.paidInterest);
-      const outFee  = Math.max(0, sched.schedFees      - sched.paidFees);
-      const outPen  = Math.max(0, sched.schedPenalty   - sched.paidPenalty);
-      const totalOutstanding = outPrin + outInt + outFee + outPen;
+      // Outstanding derived from schedule
+      let outPrin = Math.max(0, sched.schedPrincipal - sched.paidPrincipal);
+      let outInt  = Math.max(0, sched.schedInterest  - sched.paidInterest);
+      let outFee  = Math.max(0, sched.schedFees      - sched.paidFees);
+      let outPen  = Math.max(0, sched.schedPenalty   - sched.paidPenalty);
 
       const ratePct = r[rateKey] != null ? Number(r[rateKey]) : null;
       const months  = r[termMonthsKey] != null ? Number(r[termMonthsKey]) : null;
 
+      // If schedule totals missing, estimate interest & outstanding (simple interest)
       let interestAmount = (sched.schedInterest || null);
       if (interestAmount == null && ratePct != null && months != null) {
         interestAmount = Math.max(0, Math.round(principal * (ratePct/100) * (months/12)));
       }
+      if ((sched.schedPrincipal + sched.schedInterest + sched.schedFees + sched.schedPenalty) === 0 && interestAmount != null) {
+        outPrin = principal; // assume no principal paid since we can't see it
+        outInt  = interestAmount;
+        outFee  = 0;
+        outPen  = 0;
+      }
+
+      const totalOutstanding = outPrin + outInt + outFee + outPen;
 
       const disbDate  = disbDateKey ? r[disbDateKey] : (startKey ? r[startKey] : null);
       const productId = productKey ? r[productKey] : null;
       const branchId  = branchKey ? r[branchKey] : null;
+
+      // Officer/Branch names – prefer lookup by ID, else fall back to Loan string fields
+      const officerName =
+        (officerId && officersById[officerId]) ||
+        (officerNameKeyOnLoan ? (r[officerNameKeyOnLoan] || '').toString().trim() : '') ||
+        '—';
+
+      const branchName =
+        (branchId && branchesById[String(branchId)]) ||
+        (branchNameKeyOnLoan ? (r[branchNameKeyOnLoan] || '').toString().trim() : '') ||
+        '—';
+
+      // Next due fallback from loan if schedule didn’t provide it
+      const nextDue =
+        nextDueByLoan.get(String(loanId)) ||
+        (maturityKeyOnLoan ? r[maturityKeyOnLoan] : null) || null;
 
       return {
         id: loanId,
@@ -959,23 +1006,25 @@ const ReportsService = {
         loanDurationMonths: months,
 
         officerId,
-        officerName: officerId ? (officersById[officerId] || '—') : '—',
+        officerName,
         branchId,
-        branchName: branchId ? (branchesById[String(branchId)] || '—') : '—',
+        branchName,
 
         currency: r[currencyKey] || 'TZS',
         status: r[statusKey] || null,
         reference: refKey ? (r[refKey] || null) : null,
         disbursementMethod: methodKey ? (r[methodKey] || null) : null,
 
-        nextDueDate: nextDueByLoan.get(String(loanId)) || null,
+        nextDueDate: nextDue,
       };
     });
 
+    // Officer post-filter if the loans table lacks an officer column
     if (req.query.officerId && !officerKey) {
       uiRows = uiRows.filter(r => String(r.officerId || '') === String(req.query.officerId));
     }
 
+    // Free-text search
     if (q) {
       uiRows = uiRows.filter(r =>
         String(r.borrowerName || '').toLowerCase().includes(q) ||
@@ -1046,9 +1095,7 @@ const ReportsService = {
 
   // Small utility for exports to reuse the same base query as the UI list
   async loansListRawForExport(req) {
-    // Reuse loansSummaryData base filtering/attrs, but return raw rows only.
     const data = await this.loansSummaryData(req);
-    // data.rawRows is included by loansSummaryData
     return data.rawRows || [];
   }
 };
@@ -1133,7 +1180,6 @@ exports.loanProductsSummary = async (req, res) => {
 /* ---------------------------------- Exports -------------------------------- */
 exports.loansExportCSV = async (req, res) => {
   try {
-    // Reuse the same filtering logic as loansSummary (raw rows)
     const list = await ReportsService.loansListRawForExport(req);
 
     const parser = new Parser();
@@ -1149,12 +1195,10 @@ exports.loansExportCSV = async (req, res) => {
 
 exports.loansExportPDF = async (req, res) => {
   try {
-    // Reuse the same filtering logic as loansSummary (raw rows)
     const list = await ReportsService.loansListRawForExport(req);
 
-    // Determine createdAt key from existing Loan model for date printing
-    const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at']);
-    const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+    const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at','approvedDate','approved_date']);
+    const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount','approved_amount','approvedAmount']);
     const idKey        = pickAttrKey(Loan, ['id']);
     const borrowerKey  = pickAttrKey(Loan, ['borrowerId','borrower_id']);
     const productKey   = pickAttrKey(Loan, ['productId','product_id']);
@@ -1179,6 +1223,23 @@ exports.loansExportPDF = async (req, res) => {
     doc.end();
   } catch (e) {
     console.error('loansExportPDF error:', e);
+    res.status(500).json({ error: 'Export failed' });
+  }
+};
+
+// NEW: Excel export to match UI button
+exports.loansExportExcel = async (req, res) => {
+  try {
+    const list = await ReportsService.loansListRawForExport(req);
+    const ws = XLSX.utils.json_to_sheet(list);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Loans');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition','attachment; filename=loans.xlsx');
+    res.send(buf);
+  } catch (e) {
+    console.error('loansExportExcel error:', e);
     res.status(500).json({ error: 'Export failed' });
   }
 };
