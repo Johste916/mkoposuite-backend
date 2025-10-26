@@ -1,3 +1,4 @@
+// server/routes/reportRoutes.js
 const express = require("express");
 
 // Load controller (supports both CJS and ESM default)
@@ -54,7 +55,7 @@ r.get("/collectors/summary", handler("collectorSummary"));
 r.get("/disbursements/summary", handler("disbursementsSummary"));
 r.get("/fees/summary", handler("feesSummary"));
 r.get("/loan-officers/summary", handler("loanOfficerSummary"));
-r.get("/loan-products/summary", handler("loanProductsSummary")); // <- the one your logs flagged
+r.get("/loan-products/summary", handler("loanProductsSummary"));
 
 /* Deferred Income */
 r.get("/deferred-income", handler("deferredIncome"));
