@@ -7,51 +7,44 @@ module.exports = (sequelize, DataTypes) => {
     {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
-      // DB column: loanId (camelCase in DB, since you're using the CamelCase table)
       loanId: { type: DataTypes.INTEGER, allowNull: false, field: 'loanId' },
 
-      // Use the DB column `amount` but expose it as amountPaid in JS
+      // Maps DB 'amount' -> JS 'amountPaid'
       amountPaid: {
         type: DataTypes.DECIMAL(14, 2),
         allowNull: false,
         field: 'amount',
         get() {
           const raw = this.getDataValue('amountPaid');
-          // normalize to string with 2 dp; keep as string to avoid float drift
           return raw == null ? null : raw.toString();
         },
       },
 
-      // DB column: paymentDate (DATE or TIMESTAMP). If you use DATEONLY, change to DataTypes.DATEONLY
       paymentDate: { type: DataTypes.DATE, allowNull: true, field: 'paymentDate' },
+      status:      { type: DataTypes.STRING,  allowNull: false, defaultValue: 'POSTED', field: 'status' },
+      applied:     { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true,     field: 'applied' },
 
-      status:   { type: DataTypes.STRING,  allowNull: false, defaultValue: 'POSTED', field: 'status' },
-      applied:  { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true,    field: 'applied' },
+      borrowerId:  { type: DataTypes.INTEGER, allowNull: true, field: 'borrowerId' },
+      productId:   { type: DataTypes.INTEGER, allowNull: true, field: 'productId' },
+      // Change to INTEGER if users.id is an integer
+      officerId:   { type: DataTypes.UUID,    allowNull: true, field: 'officerId' },
 
-      borrowerId: { type: DataTypes.INTEGER, allowNull: true, field: 'borrowerId' },
-      productId:  { type: DataTypes.INTEGER, allowNull: true, field: 'productId' },
-
-      // Keep UUID only if your users.id is UUID; otherwise change to INTEGER to match FK
-      officerId:  { type: DataTypes.UUID,    allowNull: true, field: 'officerId' },
-
-      // snake_case columns kept as-is in DB
-      branchId:   { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },
-      tenantId:   { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },
-      userId:     { type: DataTypes.INTEGER, allowNull: true, field: 'user_id' },
+      branchId:    { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },
+      tenantId:    { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },
+      userId:      { type: DataTypes.INTEGER, allowNull: true, field: 'user_id' },
     },
     {
       schema: 'public',
-      tableName: 'LoanPayment',       // real TABLE (not a view)
+      tableName: 'LoanPayment',
       freezeTableName: true,
-      underscored: true,              // created_at / updated_at on the table
+
+      // Timestamps map to snake_case columns on the real table
+      underscored: true,
       timestamps: true,
       createdAt: 'created_at',
       updatedAt: 'updated_at',
 
-      defaultScope: {
-        order: [['created_at', 'DESC']],
-      },
-
+      // NOTE: no defaultScope with order here to avoid double ORDER BYs
       indexes: [
         { fields: ['loanId'] },
         { fields: ['status'] },
@@ -63,7 +56,6 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   LoanPayment.associate = (models) => {
-    // loan
     if (models.Loan && !LoanPayment.associations?.Loan) {
       LoanPayment.belongsTo(models.Loan, {
         as: 'Loan',
@@ -71,8 +63,6 @@ module.exports = (sequelize, DataTypes) => {
         targetKey: 'id',
       });
     }
-
-    // borrower
     if (models.Borrower && !LoanPayment.associations?.Borrower) {
       LoanPayment.belongsTo(models.Borrower, {
         as: 'Borrower',
@@ -81,8 +71,6 @@ module.exports = (sequelize, DataTypes) => {
         constraints: false,
       });
     }
-
-    // officer (User)
     if (models.User && !LoanPayment.associations?.Officer) {
       LoanPayment.belongsTo(models.User, {
         as: 'Officer',
