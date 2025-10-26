@@ -7,6 +7,7 @@ module.exports = (sequelize, DataTypes) => {
     {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
+      // DB column: loanId
       loanId: { type: DataTypes.INTEGER, allowNull: false, field: 'loanId' },
 
       // Maps DB 'amount' -> JS 'amountPaid'
@@ -20,14 +21,16 @@ module.exports = (sequelize, DataTypes) => {
         },
       },
 
-      paymentDate: { type: DataTypes.DATE, allowNull: true, field: 'paymentDate' },
+      // DB shows DATE, so use DATEONLY
+      paymentDate: { type: DataTypes.DATEONLY, allowNull: true, field: 'paymentDate' },
       status:      { type: DataTypes.STRING,  allowNull: false, defaultValue: 'POSTED', field: 'status' },
       applied:     { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true,     field: 'applied' },
 
       borrowerId:  { type: DataTypes.INTEGER, allowNull: true, field: 'borrowerId' },
       productId:   { type: DataTypes.INTEGER, allowNull: true, field: 'productId' },
-      // Change to INTEGER if users.id is an integer
-      officerId:   { type: DataTypes.UUID,    allowNull: true, field: 'officerId' },
+
+      // DB shows integer
+      officerId:   { type: DataTypes.INTEGER, allowNull: true, field: 'officerId' },
 
       branchId:    { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },
       tenantId:    { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },
@@ -51,6 +54,8 @@ module.exports = (sequelize, DataTypes) => {
         { fields: ['paymentDate'] },
         { fields: ['branch_id'] },
         { fields: ['tenant_id'] },
+        // DB already has an index on created_at, fine to list here too
+        { fields: ['created_at'] },
       ],
     }
   );

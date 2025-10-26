@@ -1,5 +1,4 @@
 // controllers/loans.js
-
 const {
   Loan,
   Borrower,
@@ -752,6 +751,7 @@ const getAllLoans = async (req, res) => {
         { model: LoanProduct },
         ...userIncludes,
       ],
+      // Keeping as-is to avoid touching Loans ordering if it's already working for you.
       order: [["createdAt", "DESC"]],
       limit: 500,
     });
@@ -812,23 +812,17 @@ const getLoanById = async (req, res) => {
       if (!RepaymentModel || typeof RepaymentModel.findAll !== "function") {
         console.warn("[loans] No repayment model registered; returning empty repayments list");
       } else {
+        // Build a safe order: prefer paymentDate/date if present, always fall back to created_at
         const attrs = RepaymentModel.rawAttributes || {};
-        let orderCol = attrs.paymentDate ? "paymentDate" : attrs.date ? "date" : "createdAt";
+        const orderParts = [];
+        if (attrs.paymentDate) orderParts.push(['paymentDate', 'DESC']);
+        else if (attrs.date) orderParts.push(['date', 'DESC']);
+        orderParts.push(['created_at', 'DESC']); // DB column exists; avoid 'createdAt'
 
-        try {
-          repayments = await RepaymentModel.findAll({
-            where: { loanId: loan.id },
-            order: [[orderCol, "DESC"], ["createdAt", "DESC"]],
-          });
-        } catch (e) {
-          console.warn(
-            `[loans] repayment query failed (${e.code || e.name}): ${e.message} — retrying with createdAt`
-          );
-          repayments = await RepaymentModel.findAll({
-            where: { loanId: loan.id },
-            order: [["createdAt", "DESC"]],
-          });
-        }
+        repayments = await RepaymentModel.findAll({
+          where: { loanId: loan.id },
+          order: orderParts,
+        });
 
         for (const r of repayments) {
           const alloc = Array.isArray(r.allocation)
