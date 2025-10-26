@@ -1,43 +1,40 @@
+// src/models/loanPayment.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
-  // Your DB has both "LoanPayment" (capitalized) and "loan_payments" in some envs.
-  // Pick the one you actually use in prod; default here is lowercase table.
+  // Live table in your logs is "LoanPayment" (capitalized)
   const LoanPayment = sequelize.define(
     'LoanPayment',
     {
-      id:         { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+      id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
-      loanId:     { type: DataTypes.INTEGER, allowNull: false, field: 'loanId' }, // camel exists; if not, set to 'loan_id'
-      // If your active table is snake_case only, switch the field to 'loan_id'
-      // loanId:     { type: DataTypes.INTEGER, allowNull: false, field: 'loan_id' },
+      // keep these as you had them (your DB has mixed casing for some cols)
+      loanId:     { type: DataTypes.INTEGER, allowNull: false, field: 'loanId' },
+      // 👇 FIX: DB column is snake_case; map it to the camelCase attribute
+      amountPaid: { type: DataTypes.DECIMAL(14, 2), allowNull: false, field: 'amount_paid' },
 
-      amountPaid: { type: DataTypes.DECIMAL(14, 2), allowNull: false, field: 'amountPaid' },
-      // If snake_case only:
-      // amountPaid: { type: DataTypes.DECIMAL(14, 2), allowNull: false, field: 'amount' },
+      paymentDate:{ type: DataTypes.DATE, allowNull: true, field: 'paymentDate' },
 
-      paymentDate: { type: DataTypes.DATE, allowNull: true, field: 'paymentDate' },
-      // Snake-case alternatives you might need:
-      // paymentDate: { type: DataTypes.DATE, allowNull: true, field: 'payment_date' },
-      // Or fallback commonly seen: 'date' or 'created_at'
+      status:     { type: DataTypes.STRING,  allowNull: true,  field: 'status',  defaultValue: 'approved' },
+      applied:    { type: DataTypes.BOOLEAN, allowNull: true,  field: 'applied', defaultValue: true },
 
-      status:     { type: DataTypes.STRING, allowNull: true,  field: 'status', defaultValue: 'approved' },
-      applied:    { type: DataTypes.BOOLEAN, allowNull: true, field: 'applied', defaultValue: true },
+      borrowerId: { type: DataTypes.INTEGER, allowNull: true, field: 'borrowerId' },
+      productId:  { type: DataTypes.INTEGER, allowNull: true, field: 'productId' },
+      officerId:  { type: DataTypes.UUID,    allowNull: true, field: 'officerId' },
 
-      borrowerId: { type: DataTypes.INTEGER, allowNull: true, field: 'borrowerId' }, // if present
-      productId:  { type: DataTypes.INTEGER, allowNull: true, field: 'productId' },  // if present
-      officerId:  { type: DataTypes.UUID,    allowNull: true, field: 'officerId' },  // sometimes user_id
-      branchId:   { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },  // common in PG
-
+      // these two were already correct in your logs
+      branchId:   { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },
       tenantId:   { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },
+
+      // present in your earlier logs, harmless if not used
+      userId:     { type: DataTypes.INTEGER, allowNull: true, field: 'user_id' },
     },
     {
-      // choose the live table name you actually use:
-      tableName: 'LoanPayment',      // if you use the capitalized table
-      // tableName: 'loan_payments', // if you use the snake_case table
+      tableName: 'LoanPayment',
       freezeTableName: true,
       timestamps: true,
-      underscored: true,
+      underscored: true,           // createdAt/updatedAt -> created_at/updated_at
+      // keep existing index column names as-is to avoid any change in behavior
       indexes: [
         { fields: ['loanId'] },
         { fields: ['status'] },
