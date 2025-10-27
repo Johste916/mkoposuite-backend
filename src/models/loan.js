@@ -6,58 +6,60 @@ module.exports = (sequelize, DataTypes) => {
     {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
-      // FKs — match DB reality
-      borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' },  // DB camel
-      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: 'product_id' },  // DB snake
-      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId' },    // DB camel
-      tenantId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'tenantId' },    // ✅ DB camel (fix)
+      // FKs
+      borrowerId: { type: DataTypes.INTEGER, allowNull: false, field: 'borrowerId' }, // camel in DB
+      productId:  { type: DataTypes.INTEGER, allowNull: true,  field: 'product_id' }, // snake in DB
+      branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId' },   // camel in DB
 
-      // Officer (either loan_officer_id or disbursed_by)
-      loanOfficerId: { type: DataTypes.UUID, allowNull: true, field: 'loan_officer_id' },
-      disbursedBy:   { type: DataTypes.UUID, allowNull: true, field: 'disbursed_by' },
-      officerId: {
-        type: DataTypes.VIRTUAL,
-        get() { return this.getDataValue('loanOfficerId') || this.getDataValue('disbursedBy') || null; },
-        set() {},
-      },
+      // Business refs / users
+      approvedBy:  { type: DataTypes.UUID, allowNull: true, field: 'approved_by' },  // snake exists
+      rejectedBy:  { type: DataTypes.UUID, allowNull: true, field: 'rejected_by' },
+      disbursedBy: { type: DataTypes.UUID, allowNull: true, field: 'disbursed_by' },
 
-      reference: { type: DataTypes.STRING, unique: true, field: 'reference' },
+      // Core
+      reference:     { type: DataTypes.STRING(255), allowNull: true, field: 'reference' },
+      amount:        { type: DataTypes.DOUBLE, allowNull: false, field: 'amount' },
+      currency:      { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS', field: 'currency' },
+      interestRate:  { type: DataTypes.DOUBLE, allowNull: false, field: 'interestRate' }, // camel in DB
+      startDate:     { type: DataTypes.DATEONLY, allowNull: false, field: 'startDate' },  // camel in DB
+      endDate:       { type: DataTypes.DATEONLY, allowNull: false, field: 'endDate' },    // camel in DB
 
-      // Money & terms
-      amount:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0, field: 'amount' },
-      currency:     { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'TZS', field: 'currency' },
-      interestRate: { type: DataTypes.DECIMAL(10, 4), field: 'interestRate' },   // DB camel
-      termMonths:   { type: DataTypes.INTEGER, field: 'term_months' },           // DB snake
+      repaymentFrequency: { type: DataTypes.STRING, allowNull: false, field: 'repaymentFrequency' }, // enum in DB
+      interestMethod:     { type: DataTypes.STRING, allowNull: false, field: 'interestMethod' },     // enum in DB
+      status:             { type: DataTypes.STRING, allowNull: false, defaultValue: 'pending', field: 'status' },
 
-      // Dates
-      startDate:         { type: DataTypes.DATEONLY, field: 'startDate' },        // ✅ DB camel (fix)
-      endDate:           { type: DataTypes.DATEONLY, field: 'endDate' },          // ✅ DB camel (fix)
-      approvalDate:      { type: DataTypes.DATE,     field: 'approval_date' },
-      rejectionDate:     { type: DataTypes.DATE,     field: 'rejection_date' },
-      disbursementDate:  { type: DataTypes.DATE,     field: 'disbursement_date' }, // DB snake
-      disbursementMethod:{ type: DataTypes.STRING,   field: 'disbursementMethod' }, // DB camel
+      // Dates (dual forms in table — prefer snake where it exists)
+      approvalDate:     { type: DataTypes.DATE, allowNull: true, field: 'approval_date' },
+      rejectionDate:    { type: DataTypes.DATE, allowNull: true, field: 'rejection_date' },
+      disbursementDate: { type: DataTypes.DATE, allowNull: true, field: 'disbursement_date' },
 
-      // Status & aggregates
-      status:        { type: DataTypes.STRING, allowNull: false, defaultValue: 'pending', field: 'status' },
-      totalInterest: { type: DataTypes.DECIMAL(14, 2), field: 'total_interest' },
-      totalPaid:     { type: DataTypes.DECIMAL(14, 2), field: 'total_paid' },
-      outstanding:   { type: DataTypes.DECIMAL(14, 2), field: 'outstanding' },
+      // Aggregates
+      totalInterest:     { type: DataTypes.DECIMAL, allowNull: true, defaultValue: 0, field: 'total_interest' },
+      totalPaid:         { type: DataTypes.DECIMAL, allowNull: true, defaultValue: 0, field: 'total_paid' },
+      outstanding:       { type: DataTypes.DECIMAL, allowNull: true, defaultValue: 0, field: 'outstanding' },
+      outstandingAmount: { type: DataTypes.DECIMAL, allowNull: true, field: 'outstandingAmount' }, // camel exists
+      nextDueDate:       { type: DataTypes.DATEONLY, allowNull: true, field: 'nextDueDate' },      // camel exists
+      nextDueAmount:     { type: DataTypes.DECIMAL, allowNull: true, field: 'nextDueAmount' },     // camel exists
 
-      // Close info
-      closedBy:          { type: DataTypes.UUID,   field: 'closed_by' },
-      closedDate:        { type: DataTypes.DATE,   field: 'closed_date' },
-      closeReason:       { type: DataTypes.STRING, field: 'close_reason' },
-      rescheduledFromId: { type: DataTypes.INTEGER, field: 'rescheduled_from_id' },
-      topUpOfId:         { type: DataTypes.INTEGER, field: 'top_up_of_id' },
+      // Term
+      termMonths: { type: DataTypes.INTEGER, allowNull: true, field: 'term_months' },
+
+      // Close / reschedule
+      closedBy:          { type: DataTypes.INTEGER, allowNull: true, field: 'closed_by' },
+      closedDate:        { type: DataTypes.DATE, allowNull: true, field: 'closed_date' },
+      closeReason:       { type: DataTypes.STRING(255), allowNull: true, field: 'close_reason' },
+      rescheduledFromId: { type: DataTypes.INTEGER, allowNull: true, field: 'rescheduled_from_id' },
+      topUpOfId:         { type: DataTypes.INTEGER, allowNull: true, field: 'top_up_of_id' },
+
+      // Timestamps in your DB are camelCase columns
+      createdAt: { type: DataTypes.DATE, allowNull: true, field: 'createdAt' },
+      updatedAt: { type: DataTypes.DATE, allowNull: true, field: 'updatedAt' },
     },
     {
       tableName: 'loans',
       freezeTableName: true,
-      // loans table uses created_at/updated_at
-      timestamps: true,
-      underscored: true,
-      createdAt: 'created_at',
-      updatedAt: 'updated_at',
+      timestamps: true,          // uses createdAt/updatedAt by default
+      underscored: false,        // your table uses camel for timestamps & many cols
       hooks: {
         beforeValidate: (loan) => {
           if (!loan.reference) {
@@ -70,13 +72,12 @@ module.exports = (sequelize, DataTypes) => {
         },
       },
       indexes: [
-        { fields: ['borrowerId'] },         // camel - exists in DB
-        { fields: ['product_id'] },         // snake - exists in DB
-        { fields: ['branchId'] },           // camel
-        { fields: ['tenantId'] },           // ✅ camel (fix)
+        { fields: ['borrowerId'] },
+        { fields: ['product_id'] },
+        { fields: ['branchId'] },
         { fields: ['status'] },
         { fields: ['disbursement_date'] },
-        { fields: ['created_at'] },
+        { fields: ['createdAt'] },   // camel in your table
       ],
     }
   );

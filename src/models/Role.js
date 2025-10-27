@@ -1,29 +1,19 @@
 'use strict';
 
-/**
- * Role model
- * - Adds a unique `code` used by auth middleware and RBAC checks.
- * - Auto-derives `code` from `name` if not provided (slug: lowercase, a–z0–9 and underscores).
- */
-
 module.exports = (sequelize, DataTypes) => {
-  const toCode = (value) => {
-    if (!value) return value;
-    return String(value)
+  const toCode = (value) =>
+    (String(value || '')
       .trim()
       .toLowerCase()
       .replace(/[\s-]+/g, '_')
       .replace(/[^a-z0-9_]/g, '')
       .replace(/_+/g, '_')
-      .replace(/^_+|_+$/g, '')
-      || null;
-  };
+      .replace(/^_+|_+$/g, '')) || null;
 
   const Role = sequelize.define(
     'Role',
     {
-      id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
-
+      id:   { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
       code: {
         type: DataTypes.STRING(64),
         allowNull: false,
@@ -31,15 +21,13 @@ module.exports = (sequelize, DataTypes) => {
         set(val) {
           const normalized = toCode(val);
           if (!normalized) {
-            const name = this.getDataValue('name');
-            const fallback = toCode(name);
+            const fallback = toCode(this.getDataValue('name'));
             this.setDataValue('code', fallback);
           } else {
             this.setDataValue('code', normalized);
           }
         },
       },
-
       name: {
         type: DataTypes.STRING(80),
         allowNull: false,
@@ -47,18 +35,15 @@ module.exports = (sequelize, DataTypes) => {
         set(val) {
           const clean = (val ?? '').toString().trim();
           this.setDataValue('name', clean);
-          if (!this.getDataValue('code')) {
-            const derived = toCode(clean);
-            this.setDataValue('code', derived);
-          }
+          if (!this.getDataValue('code')) this.setDataValue('code', toCode(clean));
         },
       },
-
       description: { type: DataTypes.STRING(255), allowNull: false, defaultValue: '' },
-      isSystem: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+      isSystem:    { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     },
     {
       tableName: 'Roles',
+      freezeTableName: true,
       timestamps: true,
       indexes: [
         { unique: true, fields: ['name'] },
@@ -75,7 +60,7 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   Role.associate = (models) => {
-    if (models.Permission && models.RolePermission) {
+    if (models.Permission && models.RolePermission && !Role.associations?.Permissions) {
       Role.belongsToMany(models.Permission, {
         through: models.RolePermission,
         foreignKey: 'roleId',
@@ -83,7 +68,7 @@ module.exports = (sequelize, DataTypes) => {
         as: 'Permissions',
       });
     }
-    if (models.User) {
+    if (models.User && (models.UserRole || 'UserRoles') && !Role.associations?.Users) {
       Role.belongsToMany(models.User, {
         through: models.UserRole || 'UserRoles',
         foreignKey: 'roleId',
@@ -100,7 +85,7 @@ module.exports = (sequelize, DataTypes) => {
   Role.prototype.toSafeJSON = function () {
     const { id, code, name, description, isSystem, createdAt, updatedAt } = this.get({ plain: true });
     return { id, code, name, description, isSystem, createdAt, updatedAt };
-    };
+  };
 
   return Role;
 };

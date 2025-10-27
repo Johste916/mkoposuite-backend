@@ -4,33 +4,34 @@ module.exports = (sequelize, DataTypes) => {
   const BorrowerGroup = sequelize.define(
     "BorrowerGroup",
     {
-      id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true, allowNull: false },
-      name: { type: DataTypes.STRING(160), allowNull: false },
+      id:        { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true, allowNull: false },
+      name:      { type: DataTypes.STRING(160), allowNull: false },
 
-      branchId: { type: DataTypes.INTEGER, allowNull: true },
-      officerId: { type: DataTypes.UUID, allowNull: true },
+      branchId:  { type: DataTypes.INTEGER, allowNull: true },
+      officerId: { type: DataTypes.UUID,    allowNull: true },
 
-      // Model as STRINGs; DB has ENUM so values must match, but we avoid tying to enum name
+      // DB uses enums? keep as STRING with validation for portability
       meetingDay: { type: DataTypes.STRING, allowNull: true },
-      notes: { type: DataTypes.TEXT, allowNull: true },
-      status: { type: DataTypes.STRING, allowNull: false, defaultValue: "active" },
+      notes:      { type: DataTypes.TEXT,   allowNull: true },
+      status:     { type: DataTypes.STRING, allowNull: false, defaultValue: "active" },
 
-      createdAt: { type: DataTypes.DATE, allowNull: false },
-      updatedAt: { type: DataTypes.DATE, allowNull: false },
-      deletedAt: { type: DataTypes.DATE, allowNull: true },
+      createdAt:  { type: DataTypes.DATE, allowNull: false },
+      updatedAt:  { type: DataTypes.DATE, allowNull: false },
+      deletedAt:  { type: DataTypes.DATE, allowNull: true },
     },
     {
       tableName: "BorrowerGroups",
+      freezeTableName: true,
       paranoid: true,
       timestamps: true,
       underscored: false,
       hooks: {
         beforeValidate(instance) {
           if (instance.meetingDay) instance.meetingDay = String(instance.meetingDay).toLowerCase();
-          if (instance.status) instance.status = String(instance.status).toLowerCase();
-          ["branchId","officerId","notes"].forEach((k) => {
+          if (instance.status)     instance.status     = String(instance.status).toLowerCase();
+          for (const k of ["branchId", "officerId", "notes"]) {
             if (instance[k] === "") instance[k] = null;
-          });
+          }
         },
       },
       validate: {
@@ -47,17 +48,25 @@ module.exports = (sequelize, DataTypes) => {
           }
         },
       },
+      indexes: [
+        { fields: ["name"] },
+        { fields: ["status"] },
+        { fields: ["branchId"] },
+        { fields: ["officerId"] },
+        { fields: ["deletedAt"] },
+      ],
     }
   );
 
   BorrowerGroup.associate = (models) => {
-    if (models.Branch) {
+    if (models.Branch && !BorrowerGroup.associations?.branch) {
       BorrowerGroup.belongsTo(models.Branch, { foreignKey: "branchId", as: "branch" });
     }
-    if (models.User) {
+    if (models.User && !BorrowerGroup.associations?.officer) {
+      // officerId is UUID, User.id UUID → no constraint issues
       BorrowerGroup.belongsTo(models.User, { foreignKey: "officerId", as: "officer" });
     }
-    if (models.BorrowerGroupMember) {
+    if (models.BorrowerGroupMember && !BorrowerGroup.associations?.groupMembers) {
       BorrowerGroup.hasMany(models.BorrowerGroupMember, {
         foreignKey: "groupId",
         as: "groupMembers",

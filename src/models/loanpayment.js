@@ -7,10 +7,9 @@ module.exports = (sequelize, DataTypes) => {
     {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
-      // DB column: loanId
-      loanId: { type: DataTypes.INTEGER, allowNull: false, field: 'loanId' },
+      loanId: { type: DataTypes.INTEGER, allowNull: false, field: 'loanId' }, // DB camel
 
-      // Maps DB 'amount' -> JS 'amountPaid'
+      // DB column is 'amount'; we present it as 'amountPaid' to the app
       amountPaid: {
         type: DataTypes.DECIMAL(14, 2),
         allowNull: false,
@@ -21,40 +20,37 @@ module.exports = (sequelize, DataTypes) => {
         },
       },
 
-      // DB shows DATE, so use DATEONLY
-      paymentDate: { type: DataTypes.DATEONLY, allowNull: true, field: 'paymentDate' },
+      paymentDate: { type: DataTypes.DATEONLY, allowNull: true, field: 'paymentDate' }, // DB camel date
       status:      { type: DataTypes.STRING,  allowNull: false, defaultValue: 'POSTED', field: 'status' },
       applied:     { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true,     field: 'applied' },
 
       borrowerId:  { type: DataTypes.INTEGER, allowNull: true, field: 'borrowerId' },
       productId:   { type: DataTypes.INTEGER, allowNull: true, field: 'productId' },
 
-      // DB shows integer
+      // keep integer per your note; association has constraints:false due to UUID users
       officerId:   { type: DataTypes.INTEGER, allowNull: true, field: 'officerId' },
 
-      branchId:    { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },
-      tenantId:    { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },
-      userId:      { type: DataTypes.INTEGER, allowNull: true, field: 'user_id' },
+      branchId:    { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' }, // snake
+      tenantId:    { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' }, // snake
+      userId:      { type: DataTypes.INTEGER, allowNull: true, field: 'user_id' },   // snake
     },
     {
       schema: 'public',
-      tableName: 'LoanPayment',
+      tableName: 'LoanPayment',  // keep your existing name
       freezeTableName: true,
 
-      // Timestamps map to snake_case columns on the real table
+      // This table uses snake timestamps in DB
       underscored: true,
       timestamps: true,
       createdAt: 'created_at',
       updatedAt: 'updated_at',
 
-      // NOTE: no defaultScope with order here to avoid double ORDER BYs
       indexes: [
         { fields: ['loanId'] },
         { fields: ['status'] },
         { fields: ['paymentDate'] },
         { fields: ['branch_id'] },
         { fields: ['tenant_id'] },
-        // DB already has an index on created_at, fine to list here too
         { fields: ['created_at'] },
       ],
     }
@@ -81,7 +77,7 @@ module.exports = (sequelize, DataTypes) => {
         as: 'Officer',
         foreignKey: 'officerId',
         targetKey: 'id',
-        constraints: false,
+        constraints: false, // integer → UUID mismatch guarded
       });
     }
   };

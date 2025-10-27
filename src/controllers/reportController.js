@@ -246,7 +246,7 @@ const ReportsService = {
     const { branchId, officerId, borrowerId, productId } = req.query;
     const { startDate, endDate } = parseDates(req.query);
 
-    const loanDateKey = pickAttrKey(Loan, ['createdAt', 'created_at']);
+    const loanDateKey = pickAttrKey(Loan, ['createdAt', 'created_at', 'approvalDate', 'approval_date', 'disbursementDate', 'disbursement_date']);
     const loanWhere = {
       ...(borrowerId && hasAttr(Loan, 'borrowerId') ? { borrowerId } : {}),
       ...(productId && hasAttr(Loan, 'productId') ? { productId } : {}),
@@ -259,7 +259,7 @@ const ReportsService = {
 
     const [loanCount, totalDisbursed] = await Promise.all([
       Loan ? countSafe(Loan, loanWhere) : 0,
-      Loan ? sumSafe(Loan, ['amount', 'principal', 'principalAmount', 'loanAmount'], loanWhere) : 0,
+      Loan ? sumSafe(Loan, ['amount', 'principal', 'principalAmount', 'loanAmount', 'approved_amount', 'approvedAmount'], loanWhere) : 0,
     ]);
 
     let totalRepayments = 0;
@@ -320,8 +320,8 @@ const ReportsService = {
     const end   = new Date(`${year}-12-31T23:59:59.999Z`);
     const monthly = Array.from({length:12},(_,i)=>({month:i+1,loans:0,repayments:0}));
 
-    const loanDateKey = pickAttrKey(Loan, ['createdAt', 'created_at']);
-    const loanAmountKey = pickAttrKey(Loan, ['amount', 'principal', 'principalAmount', 'loanAmount']);
+    const loanDateKey = pickAttrKey(Loan, ['disbursementDate','disbursement_date','createdAt','created_at','approvalDate','approval_date']);
+    const loanAmountKey = pickAttrKey(Loan, ['amount', 'principal', 'principalAmount', 'loanAmount','approved_amount','approvedAmount']);
 
     const payDateKey   = pickAttrKey(LoanPayment, ['paymentDate', 'date', 'createdAt', 'created_at']);
     const payAmtKey    = pickAttrKey(LoanPayment, ['amountPaid', 'amount', 'paidAmount', 'paymentAmount']);
@@ -375,14 +375,14 @@ const ReportsService = {
     const idKey         = pickAttrKey(Loan, ['id']);
     const borrowerKey   = pickAttrKey(Loan, ['borrowerId','borrower_id']);
     const productKey    = pickAttrKey(Loan, ['productId','product_id']);
-    const amountKey     = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+    const amountKey     = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount','approved_amount','approvedAmount']);
     const statusKey     = pickAttrKey(Loan, ['status']);
-    const createdAtKey  = pickAttrKey(Loan, ['createdAt','created_at','approvedDate','approved_date']);
-    const disbursedKey  = pickAttrKey(Loan, ['disbursementDate','releaseDate','startDate','dateDisbursed','date_disbursed']);
+    const createdAtKey  = pickAttrKey(Loan, ['createdAt','created_at','approvalDate','approval_date']);
+    const disbursedKey  = pickAttrKey(Loan, ['disbursementDate','disbursement_date','disbursedAt','releaseDate','startDate','dateDisbursed','date_disbursed']);
     const currencyKey   = pickAttrKey(Loan, ['currency','ccy']);
     const branchKey     = pickAttrKey(Loan, ['branchId','branch_id','branch','branchCode','branch_code']);
 
-    const loanDateKey = createdAtKey || disbursedKey;
+    const loanDateKey = disbursedKey || createdAtKey;
 
     const baseWhere = {
       ...(productId && productKey ? { [productKey]: productId } : {}),
@@ -418,7 +418,7 @@ const ReportsService = {
 
     const [count, totalDisbursed] = await Promise.all([
       countSafe(Loan, where),
-      sumSafe(Loan, [amountKey || 'amount','principal','principalAmount','loanAmount'].filter(Boolean), where),
+      sumSafe(Loan, [amountKey || 'amount','principal','principalAmount','loanAmount','approved_amount','approvedAmount'].filter(Boolean), where),
     ]);
 
     const borrowerIds = Array.from(new Set(rawRows.map(r => r[borrowerKey]).filter(Boolean)));
@@ -494,9 +494,9 @@ const ReportsService = {
 
     const { startDate, endDate } = parseDates(req.query);
     const productKey   = pickAttrKey(Loan, ['productId','product_id']);
-    const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+    const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount','approved_amount','approvedAmount']);
     const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at']);
-    const disbDateKey  = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','startDate','dateDisbursed','date_disbursed']);
+    const disbDateKey  = pickAttrKey(Loan, ['disbursementDate','disbursement_date','disbursedAt','releaseDate','startDate','dateDisbursed','date_disbursed']);
     const branchKey    = pickAttrKey(Loan, ['branchId','branch_id']);
     const dateKey = disbDateKey || createdAtKey;
 
@@ -661,7 +661,7 @@ const ReportsService = {
   async disbursementsSummaryData(req) {
     const { startDate, endDate } = parseDates(req.query);
 
-    const dateKey    = pickAttrKey(Loan, ['disbursementDate','disbursedAt','releaseDate','startDate','createdAt','created_at']);
+    const dateKey    = pickAttrKey(Loan, ['disbursementDate','disbursement_date','disbursedAt','releaseDate','startDate','createdAt','created_at']);
     const statusKey  = pickAttrKey(Loan, ['status']);
     const disbDateK  = pickAttrKey(Loan, ['disbursementDate','disbursement_date','dateDisbursed','date_disbursed']);
     const branchKey  = pickAttrKey(Loan, ['branchId','branch_id']);
@@ -703,27 +703,39 @@ const ReportsService = {
     };
   },
 
+  // Rich disbursed loans list
   async loansDisbursedListData(req) {
     if (!Loan) return [];
 
     const { startDate, endDate } = parseDates(req.query);
 
-    // ---- Loan fields (schema-safe, expanded) ----
+    // ---- Loan fields mapped to your schema first, then generics as fallback ----
     const idKey         = pickAttrKey(Loan, ['id']);
     const borrowerKey   = pickAttrKey(Loan, ['borrowerId','borrower_id','clientId','client_id']);
-    const productKey    = pickAttrKey(Loan, ['productId','product_id']);
-    const amountKey     = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount','approved_amount','approvedAmount']);
+    const productKey    = pickAttrKey(Loan, ['product_id','productId']);
+    const amountKey     = pickAttrKey(Loan, ['amount']);
+
     const currencyKey   = pickAttrKey(Loan, ['currency','ccy']);
-    const statusKey     = pickAttrKey(Loan, ['status','loanStatus','loan_status']);
-    const startKey      = pickAttrKey(Loan, ['startDate','start_date','createdAt','created_at','approvedDate','approved_date']);
-    const disbDateKey   = pickAttrKey(Loan, ['disbursementDate','disbursement_date','disbursedAt','releaseDate','dateDisbursed','date_disbursed']);
+    const statusKey     = pickAttrKey(Loan, ['status']);
+
+    const startKey      = pickAttrKey(Loan, ['startDate','start_date','createdAt','created_at']);
+    const disbDateKey   = pickAttrKey(Loan, ['disbursement_date','disbursementDate','disbursedAt','releaseDate','dateDisbursed','date_disbursed']);
+    const endKey        = pickAttrKey(Loan, ['endDate','end_date']);
+
     const methodKey     = pickAttrKey(Loan, ['disbursementMethod','disbursement_method','payoutMethod','payout_method']);
     const officerKey    = pickAttrKey(Loan, ['officerId','loanOfficerId','userId','disbursedBy','disbursed_by','loan_officer_id']);
     const branchKey     = pickAttrKey(Loan, ['branchId','branch_id','branch','branchCode','branch_code']);
     const refKey        = pickAttrKey(Loan, ['reference','ref','code','loanNumber','loan_number','accountNo','account_no']);
 
-    const rateKey       = pickAttrKey(Loan, ['interestRate','rate','annualInterestRate','interest_rate','nominal_rate']);
-    const termMonthsKey = pickAttrKey(Loan, ['termMonths','tenor','duration','loanTermMonths','term_months','loan_term','months']);
+    const rateKey       = pickAttrKey(Loan, ['interestRate','interest_rate','rate','annualInterestRate','nominal_rate']);
+    const termMonthsKey = pickAttrKey(Loan, ['term_months','termMonths','tenor','duration','months','loanTermMonths']);
+
+    const totalPaidKey      = pickAttrKey(Loan, ['total_paid','totalPaid']);
+    const totalInterestKey  = pickAttrKey(Loan, ['total_interest','totalInterest']);
+    const outstandingAmtKey = pickAttrKey(Loan, ['outstandingAmount','outstanding','outstanding_amount']);
+
+    const nextDueDateKey    = pickAttrKey(Loan, ['nextDueDate','next_due_date']);
+    const nextDueAmtKey     = pickAttrKey(Loan, ['nextDueAmount','next_due_amount']);
 
     // Optional names stored directly on Loan
     const officerNameKeyOnLoan = pickAttrKey(Loan, ['officerName','loanOfficer','loan_officer','userName','user_name']);
@@ -732,7 +744,7 @@ const ReportsService = {
     // choose the best date available
     const dateKey = disbDateKey || startKey;
 
-    // ---- Base filters ----
+    // ---- Base filters (period, product, borrower, branch, amount, officer) ----
     let where = {
       ...(dateKey ? betweenRange(dateKey, startDate, endDate) : {}),
       ...(req.query.productId && productKey ? { [productKey]: req.query.productId } : {}),
@@ -763,8 +775,9 @@ const ReportsService = {
     // ---- Fetch loans ----
     const attrs = [
       idKey, borrowerKey, productKey, amountKey, currencyKey, statusKey,
-      startKey, disbDateKey, methodKey, officerKey, branchKey, refKey,
-      rateKey, termMonthsKey, officerNameKeyOnLoan, branchNameKeyOnLoan
+      startKey, disbDateKey, endKey, methodKey, officerKey, branchKey, refKey,
+      rateKey, termMonthsKey, totalPaidKey, totalInterestKey, outstandingAmtKey,
+      nextDueDateKey, nextDueAmtKey, officerNameKeyOnLoan, branchNameKeyOnLoan
     ].filter(Boolean);
 
     let rows = await Loan.findAll({
@@ -849,7 +862,7 @@ const ReportsService = {
       });
     }
 
-    // ---- Schedules: sums + PAID status + next due (your schema) ----
+    // ---- Schedules (optional) ----
     let scheduleAggByLoan = new Map();
     let nextDueByLoan     = new Map();
 
@@ -868,7 +881,6 @@ const ReportsService = {
       const lsFeesPaid = pickAttrKey(LS, ['fees_paid']);
       const lsPenPaid  = pickAttrKey(LS, ['penalties_paid','penalty_paid']);
 
-      // Totals & paid totals
       const aggRows = await LS.findAll({
         where: { [lsLoanId]: { [Op.in]: loanIds } , ...tenantFilter(LS, req) },
         attributes: [
@@ -899,7 +911,6 @@ const ReportsService = {
         });
       });
 
-      // Next unpaid due date
       const unpaidCond = {
         [Op.or]: [
           ...(lsPaidNum ? [{ [lsPaidNum]: 0 }] : []),
@@ -924,10 +935,8 @@ const ReportsService = {
       dueRows.forEach(r => nextDueByLoan.set(String(r.loanId), r.nextDue));
     }
 
-    // ---- Fallbacks when schedules are absent ----
-    const maturityKeyOnLoan = pickAttrKey(Loan, ['maturityDate','maturity_date','dueDate','due_date','nextDueDate','next_due_date']);
-
     const q = String(req.query.q || '').trim().toLowerCase();
+
     let uiRows = rows.map(r => {
       const loanId     = r[idKey];
       const borrowerId = borrowerKey ? r[borrowerKey] : null;
@@ -936,39 +945,57 @@ const ReportsService = {
         (borrowerId && borrowerOfficerMap[String(borrowerId)]) || null;
 
       const principal = Number(r[amountKey] || 0);
+
+      // 1) Use schedule totals if present
       const sched = scheduleAggByLoan.get(String(loanId)) || {
         schedPrincipal: 0, schedInterest: 0, schedFees: 0, schedPenalty: 0,
         paidPrincipal: 0,   paidInterest: 0,   paidFees: 0,   paidPenalty: 0,
       };
 
-      // Outstanding derived from schedule
+      // 2) Interest amount preference: explicit column -> computed flat -> 0
+      let interestAmount = null;
+      if (totalInterestKey && r[totalInterestKey] != null) {
+        interestAmount = Number(r[totalInterestKey] || 0);
+      } else {
+        const ratePct = r[rateKey] != null ? Number(r[rateKey]) : null;
+        const months  = r[termMonthsKey] != null ? Number(r[termMonthsKey]) : null;
+        if (ratePct != null && months != null) {
+          interestAmount = Math.max(0, Math.round(principal * (ratePct/100) * (months/12)));
+        } else {
+          interestAmount = 0;
+        }
+      }
+
+      // Outstanding preference:
+      //  (a) explicit outstandingAmount
+      //  (b) (principal + interest) - total_paid
+      //  (c) schedule-based remainder
       let outPrin = Math.max(0, sched.schedPrincipal - sched.paidPrincipal);
       let outInt  = Math.max(0, sched.schedInterest  - sched.paidInterest);
       let outFee  = Math.max(0, sched.schedFees      - sched.paidFees);
       let outPen  = Math.max(0, sched.schedPenalty   - sched.paidPenalty);
 
-      const ratePct = r[rateKey] != null ? Number(r[rateKey]) : null;
-      const months  = r[termMonthsKey] != null ? Number(r[termMonthsKey]) : null;
+      const totalPaid = totalPaidKey ? Number(r[totalPaidKey] || 0) : 0;
 
-      // If schedule totals missing, estimate interest & outstanding (simple interest)
-      let interestAmount = (sched.schedInterest || null);
-      if (interestAmount == null && ratePct != null && months != null) {
-        interestAmount = Math.max(0, Math.round(principal * (ratePct/100) * (months/12)));
+      let totalOutstanding;
+      if (outstandingAmtKey && r[outstandingAmtKey] != null) {
+        totalOutstanding = Number(r[outstandingAmtKey] || 0);
+      } else if (principal || interestAmount) {
+        const dueTotal = principal + Number(interestAmount || 0);
+        totalOutstanding = Math.max(0, dueTotal - totalPaid);
+        // Try to apportion into principal/interest so UI columns look sensible
+        outPrin = Math.max(0, principal - Math.min(totalPaid, principal));
+        const paidTowardsInt = Math.max(0, totalPaid - (principal - outPrin));
+        outInt  = Math.max(0, Number(interestAmount || 0) - paidTowardsInt);
+        outFee = 0; outPen = 0;
+      } else {
+        totalOutstanding = outPrin + outInt + outFee + outPen;
       }
-      if ((sched.schedPrincipal + sched.schedInterest + sched.schedFees + sched.schedPenalty) === 0 && interestAmount != null) {
-        outPrin = principal; // assume no principal paid since we can't see it
-        outInt  = interestAmount;
-        outFee  = 0;
-        outPen  = 0;
-      }
-
-      const totalOutstanding = outPrin + outInt + outFee + outPen;
 
       const disbDate  = disbDateKey ? r[disbDateKey] : (startKey ? r[startKey] : null);
       const productId = productKey ? r[productKey] : null;
       const branchId  = branchKey ? r[branchKey] : null;
 
-      // Officer/Branch names – prefer lookup by ID, else fall back to Loan string fields
       const officerName =
         (officerId && officersById[officerId]) ||
         (officerNameKeyOnLoan ? (r[officerNameKeyOnLoan] || '').toString().trim() : '') ||
@@ -979,14 +1006,16 @@ const ReportsService = {
         (branchNameKeyOnLoan ? (r[branchNameKeyOnLoan] || '').toString().trim() : '') ||
         '—';
 
-      // Next due fallback from loan if schedule didn’t provide it
       const nextDue =
         nextDueByLoan.get(String(loanId)) ||
-        (maturityKeyOnLoan ? r[maturityKeyOnLoan] : null) || null;
+        (nextDueDateKey ? r[nextDueDateKey] : null) || null;
+
+      const nextDueAmt = nextDueAmtKey ? Number(r[nextDueAmtKey] || 0) : null;
 
       return {
         id: loanId,
         date: disbDate,
+        endDate: endKey ? r[endKey] : null,
         borrowerId,
         borrowerName: borrowerId ? (borrowersById[String(borrowerId)] || '—') : '—',
         phone: borrowerId ? (borrowerPhoneById[String(borrowerId)] || '—') : '—',
@@ -1002,8 +1031,8 @@ const ReportsService = {
         outstandingPenalty:   outPen,
         totalOutstanding,
 
-        interestRateYear: ratePct,
-        loanDurationMonths: months,
+        interestRateYear: rateKey ? Number(r[rateKey] || 0) : null,
+        loanDurationMonths: termMonthsKey ? Number(r[termMonthsKey] || 0) : null,
 
         officerId,
         officerName,
@@ -1015,7 +1044,9 @@ const ReportsService = {
         reference: refKey ? (r[refKey] || null) : null,
         disbursementMethod: methodKey ? (r[methodKey] || null) : null,
 
+        totalPaid,
         nextDueDate: nextDue,
+        nextDueAmount: nextDueAmt,
       };
     });
 
@@ -1197,7 +1228,7 @@ exports.loansExportPDF = async (req, res) => {
   try {
     const list = await ReportsService.loansListRawForExport(req);
 
-    const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at','approvedDate','approved_date']);
+    const createdAtKey = pickAttrKey(Loan, ['createdAt','created_at','approvalDate','approval_date']);
     const amountKey    = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount','approved_amount','approvedAmount']);
     const idKey        = pickAttrKey(Loan, ['id']);
     const borrowerKey  = pickAttrKey(Loan, ['borrowerId','borrower_id']);
@@ -1227,7 +1258,7 @@ exports.loansExportPDF = async (req, res) => {
   }
 };
 
-// NEW: Excel export to match UI button
+// Excel export
 exports.loansExportExcel = async (req, res) => {
   try {
     const list = await ReportsService.loansListRawForExport(req);

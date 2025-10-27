@@ -7,7 +7,6 @@ module.exports = (sequelize, DataTypes) => {
     {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
-      // Names
       name:      { type: DataTypes.STRING, allowNull: false, field: 'name' },
       firstName: { type: DataTypes.TEXT,   allowNull: true,  field: 'firstName' },
       lastName:  { type: DataTypes.TEXT,   allowNull: true,  field: 'lastName' },
@@ -24,14 +23,12 @@ module.exports = (sequelize, DataTypes) => {
         set(v) { this.setDataValue('name', v); },
       },
 
-      // Identity / Contact
       nationalId:     { type: DataTypes.STRING, allowNull: true, field: 'nationalId' },
       idNumber:       { type: DataTypes.TEXT,   allowNull: true, field: 'idNumber' },
       phone:          { type: DataTypes.STRING, allowNull: true, field: 'phone' },
       secondaryPhone: { type: DataTypes.TEXT,   allowNull: true, field: 'secondaryPhone' },
       email:          { type: DataTypes.STRING, allowNull: true, field: 'email' },
 
-      // Address
       address:     { type: DataTypes.STRING, allowNull: true, field: 'address' },
       addressLine: { type: DataTypes.TEXT,   allowNull: true, field: 'addressLine' },
       street:      { type: DataTypes.TEXT,   allowNull: true, field: 'street' },
@@ -40,13 +37,10 @@ module.exports = (sequelize, DataTypes) => {
       district:    { type: DataTypes.TEXT,   allowNull: true, field: 'district' },
       ward:        { type: DataTypes.TEXT,   allowNull: true, field: 'ward' },
 
-      // Org / Relations
       branchId:      { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },
       loanOfficerId: { type: DataTypes.UUID,    allowNull: true, field: 'loan_officer_id' },
-      // 👇 FIX: actual DB column is snake_case
       tenantId:      { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },
 
-      // KYC / Profile
       gender:               { type: DataTypes.STRING(16), allowNull: true, field: 'gender' },
       birthDate:            { type: DataTypes.DATEONLY,   allowNull: true, field: 'birthDate' },
       employmentStatus:     { type: DataTypes.TEXT,       allowNull: true, field: 'employmentStatus' },
@@ -58,7 +52,6 @@ module.exports = (sequelize, DataTypes) => {
       nextKinPhone:         { type: DataTypes.TEXT,       allowNull: true, field: 'nextKinPhone' },
       nextOfKinRelationship:{ type: DataTypes.STRING,     allowNull: true, field: 'nextOfKinRelationship' },
 
-      // Business / Extra
       groupId:        { type: DataTypes.TEXT,       allowNull: true, field: 'groupId' },
       loanType:       { type: DataTypes.TEXT,       allowNull: true, field: 'loanType', defaultValue: 'individual' },
       regDate:        { type: DataTypes.DATEONLY,   allowNull: true, field: 'regDate' },
@@ -68,22 +61,20 @@ module.exports = (sequelize, DataTypes) => {
       tin:            { type: DataTypes.STRING(32), allowNull: true, field: 'tin' },
       nationality:    { type: DataTypes.STRING(64), allowNull: true, field: 'nationality' },
 
-      // Media
       photoUrl:        { type: DataTypes.STRING, allowNull: true, field: 'photoUrl' },
       profilePhotoUrl: { type: DataTypes.TEXT,   allowNull: true, field: 'profilePhotoUrl' },
 
-      // Blacklist
       blacklistReason: { type: DataTypes.TEXT,     allowNull: true, field: 'blacklistReason' },
       blacklistUntil:  { type: DataTypes.DATEONLY, allowNull: true, field: 'blacklistUntil' },
       blacklistedAt:   { type: DataTypes.DATE,     allowNull: true, field: 'blacklistedAt' },
 
-      // Status
       status: { type: DataTypes.STRING(32), allowNull: false, defaultValue: 'active', field: 'status' },
     },
     {
       tableName: 'Borrowers',
       freezeTableName: true,
-      timestamps: true,
+      timestamps: true,   // this table uses camel timestamps
+      underscored: false,
       indexes: [
         { fields: ['name'] },
         { fields: ['phone'] },
@@ -91,7 +82,6 @@ module.exports = (sequelize, DataTypes) => {
         { fields: ['idNumber'] },
         { fields: ['branch_id'] },
         { fields: ['loan_officer_id'] },
-        // 👇 FIX: index on the real column name
         { fields: ['tenant_id'] },
         { fields: ['status'] },
         { fields: ['blacklistedAt'] },
