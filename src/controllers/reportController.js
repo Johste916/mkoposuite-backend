@@ -103,16 +103,51 @@ function periodText({ startDate, endDate, asOf, snapshot = false }) {
   return `${s} → ${e}`;
 }
 
-// Multi-tenant helper — add tenantId if model supports it
-function tenantFilter(model, req) {
-  const tenantId =
-    req?.tenant?.id ||
-    req?.context?.tenantId ||
-    req?.headers?.['x-tenant-id'] ||
-    req?.headers?.['X-Tenant-Id'];
-  const key = pickAttrKey(model, ['tenantId', 'tenant_id']);
-  return tenantId && key ? { [key]: tenantId } : {};
+/* -------------------------- tenant filter (robust) -------------------------- */
+// Detect the tenant attribute (tenantId | tenant_id) and its sequelize type key (e.g. 'INTEGER', 'UUID')
+function getTenantAttrAndType(model) {
+  if (!model?.rawAttributes) return null;
+  const attrKey = pickAttrKey(model, ['tenantId', 'tenant_id']);
+  if (!attrKey) return null;
+  const attr = model.rawAttributes[attrKey];
+  const typeKey = attr?.type?.key || attr?.type?.toSql?.() || ''; // DataTypes.INTEGER => key 'INTEGER'
+  return { attrKey, typeKey: String(typeKey).toUpperCase() };
 }
+
+const looksLikeUuid = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+const looksLikeInt  = (v) => (typeof v === 'number' && Number.isInteger(v)) || (typeof v === 'string' && /^\d+$/.test(v));
+
+/**
+ * Multi-tenant helper — add tenantId if model supports it and value matches column type.
+ * If invalid, returns {} so we don't crash with 22P02.
+ */
+function tenantFilter(model, req) {
+  const meta = getTenantAttrAndType(model);
+  if (!meta) return {};
+
+  // find a candidate tenant id from a few likely places
+  const rawTenantId =
+    req?.tenant?.id ??
+    req?.context?.tenantId ??
+    req?.user?.tenantId ??
+    req?.headers?.['x-tenant-id'] ??
+    req?.headers?.['X-Tenant-Id'] ??
+    req?.query?.tenantId ??
+    null;
+
+  if (rawTenantId == null) return {};
+
+  // validate by column type
+  if (meta.typeKey.includes('UUID')) {
+    if (looksLikeUuid(rawTenantId)) return { [meta.attrKey]: rawTenantId };
+    return {}; // invalid for UUID column
+  }
+
+  // treat everything else (INTEGER, BIGINT, etc.) as numeric
+  if (looksLikeInt(rawTenantId)) return { [meta.attrKey]: Number(rawTenantId) };
+  return {}; // invalid for numeric column
+}
+/* --------------------------------------------------------------------------- */
 
 /* ----------------------------- business helpers ---------------------------- */
 // Compute outstanding per loan as of a date (defaults to now)
@@ -1138,6 +1173,7 @@ exports.getFilters = async (req, res) => {
     res.json({ ...data, welcome: 'Welcome! Choose filters and export whenever ready.' });
   } catch (e) {
     console.error('filters error:', e);
+    // Fail soft so the frontend can fall back to client-side filters
     res.json({ branches: [], officers: [], borrowers: [], products: [], welcome: 'Welcome!' });
   }
 };
