@@ -414,6 +414,34 @@ function addMonthsDateOnly(dateStr, months) {
   return target.toISOString().slice(0, 10);
 }
 
+/* ---------- API payload normalizers (stable frontend contract) ---------- */
+function isoDateOnly(input) {
+  if (!input) return "";
+  const s = typeof input === "string" ? input : new Date(input).toISOString();
+  // allow 'YYYY-MM-DD', otherwise trim to date part
+  const mm = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return mm ? mm[1] : new Date(s).toISOString().slice(0, 10);
+}
+
+/** Normalize a repayment row to a stable shape the UI expects */
+function normalizeRepaymentRow(r) {
+  // Models vary (LoanPayment vs LoanRepayment). We normalize here.
+  const date =
+    r.paymentDate || r.date || r.paidAt || r.created_at || r.createdAt || r.updated_at || r.updatedAt;
+  const amount = r.amountPaid ?? r.amount ?? r.total ?? 0;
+  const method = r.method || r.channel || r.mode || null;
+  const notes =
+    r.notes || r.note || r.remark || r.reference || r.description || null;
+
+  return {
+    id: r.id,
+    date: isoDateOnly(date),
+    amount: Number(amount || 0),
+    method,
+    notes,
+  };
+}
+
 /* ===========================
    Small helpers
 =========================== */
@@ -781,7 +809,6 @@ const getAllLoans = async (req, res) => {
 ============================================ */
 const getLoanById = async (req, res) => {
   try {
-    // Guard: only allow numeric IDs here so /loans/disbursed never reaches the DB as an id
     const idRaw = String(req.params.id ?? '');
     const id = Number.parseInt(idRaw, 10);
     if (!Number.isFinite(id)) {
@@ -809,36 +836,27 @@ const getLoanById = async (req, res) => {
         LoanRepayment ||
         (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment));
 
-      if (!RepaymentModel || typeof RepaymentModel.findAll !== "function") {
-        console.warn("[loans] No repayment model registered; returning empty repayments list");
-      } else {
-        // Build a safe order: prefer paymentDate/date if present, always fall back to created_at
+      if (RepaymentModel && typeof RepaymentModel.findAll === "function") {
         const attrs = RepaymentModel.rawAttributes || {};
         const orderParts = [];
         if (attrs.paymentDate) orderParts.push(['paymentDate', 'DESC']);
         else if (attrs.date) orderParts.push(['date', 'DESC']);
-        orderParts.push(['created_at', 'DESC']); // DB column exists; avoid 'createdAt'
+        orderParts.push(['created_at', 'DESC']); // safer fallback than createdAt
 
-        repayments = await RepaymentModel.findAll({
+        const rawRows = await RepaymentModel.findAll({
           where: { loanId: loan.id },
           order: orderParts,
         });
 
-        for (const r of repayments) {
-          const alloc = Array.isArray(r.allocation)
-            ? r.allocation
-            : r.allocation
-            ? [r.allocation]
-            : [];
-          for (const a of alloc) {
-            totals.principal += Number(a.principal || 0);
-            totals.interest += Number(a.interest || 0);
-            totals.fees += Number(a.fees || 0);
-            totals.penalties += Number(a.penalties || 0);
-          }
-          totals.totalPaid += Number(r.amountPaid ?? r.amount ?? r.total ?? 0);
-        }
+        // Normalize for UI
+        repayments = rawRows.map((r) => normalizeRepaymentRow(r));
 
+        // Totals
+        for (const r of repayments) {
+          totals.totalPaid += Number(r.amount || 0);
+        }
+        // If you have allocation breakdown in your model, you can also roll-up
+        // principal/interest/fees/penalties here (kept simple & safe).
         totals.outstanding = Math.max(
           0,
           Number(loan.amount || 0) + Number(loan.totalInterest || 0) - totals.totalPaid
@@ -867,6 +885,10 @@ const getLoanById = async (req, res) => {
 
     res.json({
       ...loan.toJSON(),
+      // expose stable keys the UI reads:
+      borrowerId: loan.borrowerId ?? loan.Borrower?.id ?? null,
+      branchId: loan.branchId ?? loan.Branch?.id ?? null,
+      productId: loan.productId ?? loan.LoanProduct?.id ?? null,
       totals,
       repayments,
       schedule,
@@ -886,9 +908,20 @@ const updateLoan = async (req, res) => {
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     const before = loan.toJSON();
-    const body = { ...req.body };
-    const productId = body.productId ?? loan.productId;
+    const body = { ...(req.body || {}) };
 
+    // Accept legacy/alias fields
+    if (body.principal != null && body.amount == null) body.amount = Number(body.principal);
+    if (body.durationMonths != null && body.termMonths == null) body.termMonths = Number(body.durationMonths);
+    if (body.releaseDate && !body.startDate) body.startDate = body.releaseDate;
+
+    // Coerce numerics where provided
+    if (body.amount !== undefined && body.amount !== "") body.amount = Number(body.amount);
+    if (body.termMonths !== undefined && body.termMonths !== "") body.termMonths = Number(body.termMonths);
+    if (body.interestRate !== undefined && body.interestRate !== "") body.interestRate = Number(body.interestRate);
+
+    // Product validations (if changing product or values that need product bounds)
+    const productId = body.productId ?? loan.productId;
     if (productId) {
       const p = await LoanProduct.findByPk(productId);
       if (!p) return res.status(400).json({ error: "Invalid loan product selected" });
@@ -911,7 +944,7 @@ const updateLoan = async (req, res) => {
         body.interestRate = loan.interestRate || Number(p.interestRate || 0);
     }
 
-    // If termMonths or startDate change and endDate not explicitly provided, recompute
+    // Recompute endDate if term/start changed and endDate omitted
     const willChangeTerm = body.termMonths != null && Number(body.termMonths) !== Number(loan.termMonths);
     const willChangeStart = body.startDate && String(body.startDate) !== String(loan.startDate);
     if (!body.endDate && (willChangeTerm || willChangeStart)) {
@@ -920,7 +953,14 @@ const updateLoan = async (req, res) => {
       body.endDate = addMonthsDateOnly(nextStart, nextTerm);
     }
 
-    await loan.update(body);
+    // Only send columns that actually exist on loans table
+    const safeAttrs = await getSafeLoanAttributeNames();        // model attr names
+    const safeBody = {};
+    for (const key of Object.keys(body)) {
+      if (safeAttrs.includes(key)) safeBody[key] = body[key];
+    }
+
+    await loan.update(safeBody);
 
     writeAudit({
       entityId: loan.id,
@@ -930,14 +970,14 @@ const updateLoan = async (req, res) => {
       req,
     }).catch(() => {});
 
-    // Reload with safe attributes
     const reloaded = await fetchLoanByPkSafe(loan.id);
     res.json(reloaded || loan);
   } catch (err) {
     console.error("Update loan error:", err);
-    res.status(500).json({ error: "Error updating loan" });
+    res.status(500).json({ error: "Error updating loan", detail: err?.parent?.message || err?.message });
   }
 };
+
 
 /* ===========================
    DELETE LOAN
