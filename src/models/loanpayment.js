@@ -1,84 +1,85 @@
-// src/models/loanPayment.js
+// src/models/LoanPayment.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
+  const isPg = sequelize.getDialect && sequelize.getDialect() === 'postgres';
+  const JSON_TYPE = isPg ? DataTypes.JSONB : DataTypes.JSON;
+
   const LoanPayment = sequelize.define(
     'LoanPayment',
     {
-      id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+      id:        { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
-      loanId: { type: DataTypes.INTEGER, allowNull: false, field: 'loanId' }, // DB camel
+      // FKs
+      loanId:    { type: DataTypes.INTEGER, allowNull: false, field: 'loanId' },
+      userId:    { type: DataTypes.UUID,    allowNull: true,  field: 'userId' },      // Users.id is UUID
+      officerId: { type: DataTypes.UUID,    allowNull: true,  field: 'officerId' },   // optional (constraints: false)
 
-      // DB column is 'amount'; we present it as 'amountPaid' to the app
+      // Core
       amountPaid: {
         type: DataTypes.DECIMAL(14, 2),
         allowNull: false,
-        field: 'amount',
-        get() {
-          const raw = this.getDataValue('amountPaid');
-          return raw == null ? null : raw.toString();
-        },
+        defaultValue: 0,
+        field: 'amountPaid',
       },
+      paymentDate: { type: DataTypes.DATEONLY, allowNull: false, field: 'paymentDate' },
 
-      paymentDate: { type: DataTypes.DATEONLY, allowNull: true, field: 'paymentDate' }, // DB camel date
-      status:      { type: DataTypes.STRING,  allowNull: false, defaultValue: 'POSTED', field: 'status' },
-      applied:     { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true,     field: 'applied' },
+      // Meta
+      method:     { type: DataTypes.STRING,   allowNull: true,  field: 'method' },
+      notes:      { type: DataTypes.TEXT,     allowNull: true,  field: 'notes' },
+      status:     {
+        type: DataTypes.STRING(16),
+        allowNull: false,
+        defaultValue: 'approved',
+        validate: { isIn: [['pending', 'approved', 'rejected', 'voided']] },
+        field: 'status',
+      },
+      applied:    { type: DataTypes.BOOLEAN,  allowNull: false, defaultValue: true,   field: 'applied' },
+      reference:  { type: DataTypes.STRING,   allowNull: true,  field: 'reference' },
+      receiptNo:  { type: DataTypes.STRING,   allowNull: true,  field: 'receiptNo' },
+      currency:   { type: DataTypes.STRING(8),allowNull: true,  field: 'currency' },
 
-      borrowerId:  { type: DataTypes.INTEGER, allowNull: true, field: 'borrowerId' },
-      productId:   { type: DataTypes.INTEGER, allowNull: true, field: 'productId' },
+      gateway:    { type: DataTypes.STRING,   allowNull: true,  field: 'gateway' },
+      gatewayRef: { type: DataTypes.STRING,   allowNull: true,  field: 'gatewayRef' },
 
-      // keep integer per your note; association has constraints:false due to UUID users
-      officerId:   { type: DataTypes.INTEGER, allowNull: true, field: 'officerId' },
-
-      branchId:    { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' }, // snake
-      tenantId:    { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' }, // snake
-      userId:      { type: DataTypes.INTEGER, allowNull: true, field: 'user_id' },   // snake
+      allocation: { type: JSON_TYPE,          allowNull: true,  field: 'allocation' },
+      voidReason: { type: DataTypes.TEXT,     allowNull: true,  field: 'voidReason' },
     },
     {
-      schema: 'public',
-      tableName: 'LoanPayment',  // keep your existing name
+      tableName: 'loan_payments',  // ✅ single canonical table
       freezeTableName: true,
-
-      // This table uses snake timestamps in DB
-      underscored: true,
-      timestamps: true,
-      createdAt: 'created_at',
-      updatedAt: 'updated_at',
-
+      timestamps: true,            // createdAt/updatedAt (camel), matching your codebase
+      underscored: false,          // camel columns
+      defaultScope: {
+        order: [
+          ['paymentDate', 'DESC'],
+          ['createdAt', 'DESC'],
+        ],
+      },
       indexes: [
         { fields: ['loanId'] },
-        { fields: ['status'] },
+        { fields: ['userId'] },
+        { fields: ['officerId'] },
         { fields: ['paymentDate'] },
-        { fields: ['branch_id'] },
-        { fields: ['tenant_id'] },
-        { fields: ['created_at'] },
+        { fields: ['status'] },
+        { fields: ['reference'] },
+        { fields: ['gatewayRef'] },
+        { fields: ['createdAt'] },
       ],
     }
   );
 
   LoanPayment.associate = (models) => {
     if (models.Loan && !LoanPayment.associations?.Loan) {
-      LoanPayment.belongsTo(models.Loan, {
-        as: 'Loan',
-        foreignKey: 'loanId',
-        targetKey: 'id',
-      });
+      LoanPayment.belongsTo(models.Loan, { foreignKey: 'loanId', as: 'Loan' });
     }
-    if (models.Borrower && !LoanPayment.associations?.Borrower) {
-      LoanPayment.belongsTo(models.Borrower, {
-        as: 'Borrower',
-        foreignKey: 'borrowerId',
-        targetKey: 'id',
-        constraints: false,
-      });
-    }
-    if (models.User && !LoanPayment.associations?.Officer) {
-      LoanPayment.belongsTo(models.User, {
-        as: 'Officer',
-        foreignKey: 'officerId',
-        targetKey: 'id',
-        constraints: false, // integer → UUID mismatch guarded
-      });
+    if (models.User) {
+      if (!LoanPayment.associations?.User) {
+        LoanPayment.belongsTo(models.User, { foreignKey: 'userId', as: 'User', constraints: false });
+      }
+      if (!LoanPayment.associations?.Officer) {
+        LoanPayment.belongsTo(models.User, { foreignKey: 'officerId', as: 'Officer', constraints: false });
+      }
     }
   };
 

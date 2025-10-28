@@ -134,18 +134,137 @@ async function attachOutstanding(uiRows, asOf, req) {
 
 /* ----------------------------- status endpoint ---------------------------- */
 
+/* ----------------------------- status endpoint ---------------------------- */
+
+/** Month-aware add that stays on the last valid day when needed (e.g., Jan 31 + 1m → Feb 29/28). */
+function addMonthsDateOnly(dateInput, months) {
+  if (!dateInput) return null;
+  const s = String(dateInput);
+  const y = Number(s.slice(0,4));
+  const m = Number(s.slice(5,7));
+  const d = Number(s.slice(8,10));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
+    // Fallback: let JS parse and still try to behave
+    const dt = new Date(s);
+    if (isNaN(dt)) return null;
+    const t = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + Number(months), dt.getUTCDate()));
+    if (t.getUTCMonth() !== ((dt.getUTCMonth() + Number(months)) % 12 + 12) % 12) t.setUTCDate(0);
+    return t.toISOString().slice(0,10);
+  }
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const t  = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + Number(months), dt.getUTCDate()));
+  if (t.getUTCMonth() !== ((m - 1 + Number(months)) % 12 + 12) % 12) t.setUTCDate(0);
+  return t.toISOString().slice(0,10);
+}
+
+/** Resolve the best "start date" column a loan uses. */
+function pickStartKey() {
+  return pickAttrKey(Loan, [
+    'disbursementDate','disbursement_date',
+    'startDate','start_date',
+    'createdAt','created_at'
+  ]);
+}
+
+/** Resolve a reasonable "officer" foreign key on loans. */
+function pickOfficerKey() {
+  return pickAttrKey(Loan, [
+    'officerId','loanOfficerId','userId','disbursedBy','disbursed_by'
+  ]);
+}
+
+/** Resolve the user's display name column. */
+function pickUserNameKey() {
+  return pickAttrKey(User, ['name','fullName','full_name','displayName','display_name']);
+}
+
+/** Extended fetch to include optional extra attr keys (e.g., officer FK). */
+async function fetchBaseLoans(where, req, extraAttrKeys = []) {
+  if (!Loan) return [];
+  const idKey       = pickAttrKey(Loan, ['id']);
+  const borrowerKey = pickAttrKey(Loan, ['borrowerId','borrower_id']);
+  const productKey  = pickAttrKey(Loan, ['productId','product_id']);
+  const amountKey   = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
+  const rateKey     = pickAttrKey(Loan, ['interestRate','interest_rate','interestRateYear','interestRatePerYear']);
+  const currencyKey = pickAttrKey(Loan, ['currency']);
+  const startKey    = pickStartKey();
+  const statusKey   = pickAttrKey(Loan, ['status']);
+  const termKey     = pickTermKey();
+  const matKey      = pickMaturityKey();
+
+  const attrs = [idKey, borrowerKey, productKey, amountKey, rateKey, currencyKey, startKey, statusKey, termKey, matKey, ...extraAttrKeys].filter(Boolean);
+
+  const rows = await Loan.findAll({
+    where: { ...where, ...tenantFilter(Loan, req) },
+    attributes: attrs,
+    order: startKey ? [[startKey, 'DESC']] : undefined,
+    limit: 1000,
+    raw: true,
+  });
+
+  const borrowerIds = Array.from(new Set(rows.map(r => r[borrowerKey]).filter(Boolean))).map(String);
+  const productIds  = Array.from(new Set(rows.map(r => r[productKey]).filter(Boolean))).map(String);
+
+  let borrowers = {}, products = {};
+  if (Borrower && borrowerIds.length) {
+    const bNameKey = pickAttrKey(Borrower, ['name']);
+    const bList = await Borrower.findAll({
+      where: { id: { [Op.in]: borrowerIds }, ...tenantFilter(Borrower, req) },
+      attributes: ['id', ...(bNameKey?[bNameKey]:[])],
+      raw: true
+    });
+    borrowers = Object.fromEntries(bList.map(b => [String(b.id), (b[bNameKey] || b.name || '')]));
+  }
+  if (LoanProduct && productIds.length) {
+    const pNameKey = pickAttrKey(LoanProduct, ['name']);
+    const pList = await LoanProduct.findAll({
+      where: { id: { [Op.in]: productIds }, ...tenantFilter(LoanProduct, req) },
+      attributes: ['id', ...(pNameKey?[pNameKey]:[])],
+      raw: true
+    });
+    products = Object.fromEntries(pList.map(p => [String(p.id), (p[pNameKey] || p.name || '')]));
+  }
+
+  return {
+    rows,
+    keys: { idKey, borrowerKey, productKey, amountKey, rateKey, currencyKey, startKey, statusKey, termKey, matKey },
+    borrowers,
+    products
+  };
+}
+
+async function attachOfficerNames(uiRows, baseRows, officerKey, req) {
+  if (!User || !officerKey) return uiRows;
+  const uNameKey = pickUserNameKey() || 'name';
+  const officerIds = Array.from(new Set(baseRows.map(r => r[officerKey]).filter(Boolean))).map(String);
+  if (!officerIds.length) return uiRows;
+
+  const list = await User.findAll({
+    where: { id: { [Op.in]: officerIds }, ...tenantFilter(User, req) },
+    attributes: ['id', uNameKey].filter(Boolean),
+    raw: true
+  });
+  const nameMap = Object.fromEntries(list.map(u => [String(u.id), u[uNameKey] || u.name || '']));
+
+  uiRows.forEach((r, i) => {
+    const raw = baseRows[i]?.[officerKey];
+    r.officerName = raw ? (nameMap[String(raw)] || '—') : '—';
+  });
+  return uiRows;
+}
+
 exports.listByStatus = async (req, res) => {
   try {
-    const status = String(req.query.status || req.params.status || 'disbursed').toLowerCase();
+    const status   = String(req.query.status || req.params.status || 'disbursed').toLowerCase();
     const startDate = req.query.startDate ? new Date(req.query.startDate) : null;
     const endDate   = req.query.endDate   ? new Date(req.query.endDate)   : null;
     const asOf      = req.query.asOf      ? new Date(req.query.asOf)      : new Date();
 
-    const disbDateKey = pickAttrKey(Loan, ['disbursementDate','disbursement_date','startDate','start_date','createdAt','created_at']);
+    const disbDateKey = pickStartKey();
     const statusKey   = pickAttrKey(Loan, ['status']);
     const productKey  = pickAttrKey(Loan, ['productId','product_id']);
     const amountKey   = pickAttrKey(Loan, ['amount','principal','principalAmount','loanAmount']);
-    const officerKey  = pickAttrKey(Loan, ['officerId','loanOfficerId','userId','disbursedBy','disbursed_by']);
+    const officerKey  = pickOfficerKey();              // NEW: officer detection
     const matKey      = pickMaturityKey();
     const termKey     = pickTermKey();
 
@@ -164,40 +283,56 @@ exports.listByStatus = async (req, res) => {
     }
     const scoped = orConds.length ? { ...where, [Op.or]: orConds } : where;
 
-    const base = await fetchBaseLoans(scoped, req);
+    // Fetch loans with optional officer FK included
+    const base = await fetchBaseLoans(scoped, req, officerKey ? [officerKey] : []);
     const { rows, keys, borrowers, products } = base;
 
-    let ui = rows.map(r => ({
-      id: r[keys.idKey],
-      borrowerId: r[keys.borrowerKey],
-      borrowerName: borrowers[String(r[keys.borrowerKey])] || '—',
-      productId: r[keys.productKey],
-      productName: products[String(r[keys.productKey])] || '—',
-      principalAmount: safeNumber(r[keys.amountKey]),
-      interestRateYear: r[keys.rateKey] != null ? Number(r[keys.rateKey]) : null,
-      currency: r[keys.currencyKey] || 'TZS',
-      disbursementDate: r[keys.startKey] || null,
-      status: r[keys.statusKey] || null,
-      termMonths: r[keys.termKey] != null ? Number(r[keys.termKey]) : null,
-      maturityDate: r[keys.matKey] || null,
-    }));
+    // Shape base UI rows
+    let ui = rows.map(r => {
+      const id              = r[keys.idKey];
+      const borrowerId      = r[keys.borrowerKey];
+      const productId       = r[keys.productKey];
+      const principalAmount = safeNumber(r[keys.amountKey]);
+      const interestRate    = r[keys.rateKey] != null ? Number(r[keys.rateKey]) : null;
+      const currency        = r[keys.currencyKey] || 'TZS';
+      const start           = r[keys.startKey] || null;
+      const dbMaturity      = r[keys.matKey] || null;
+      const termMonths      = r[keys.termKey] != null ? Number(r[keys.termKey]) : null;
 
-    ui = await attachOutstanding(ui, asOf, req);
+      // Compute maturity if not present in DB
+      const maturityDate = dbMaturity || (start && termMonths ? addMonthsDateOnly(String(start).slice(0,10), termMonths) : null);
 
-    ui.forEach(r => {
-      if (!r.maturityDate && r.disbursementDate && r.termMonths) {
-        const d = new Date(r.disbursementDate);
-        d.setMonth(d.getMonth() + r.termMonths);
-        r.maturityDate = d;
-      }
+      return {
+        id,
+        borrowerId,
+        borrowerName: borrowers[String(borrowerId)] || '—',
+        productId,
+        productName: products[String(productId)] || '—',
+        principalAmount,
+        interestRateYear: interestRate,
+        currency,
+        disbursementDate: start || null,
+        status: r[keys.statusKey] || null,
+        termMonths,
+        maturityDate,
+        officerName: '—', // filled below
+      };
     });
 
+    // Totals/outstanding (kept from your prior logic)
+    ui = await attachOutstanding(ui, asOf, req);
+
+    // Officer names (NEW)
+    ui = await attachOfficerNames(ui, rows, officerKey, req);
+
+    // Free text filter
     const q = (req.query.q || '').toString().trim().toLowerCase();
     if (q) {
       ui = ui.filter(r =>
         String(r.id).toLowerCase().includes(q) ||
         r.borrowerName.toLowerCase().includes(q) ||
-        r.productName.toLowerCase().includes(q)
+        r.productName.toLowerCase().includes(q) ||
+        r.officerName.toLowerCase().includes(q)
       );
     }
 
@@ -207,7 +342,7 @@ exports.listByStatus = async (req, res) => {
       return Math.floor(ms / (24*3600*1000));
     };
 
-    // Status post-filters
+    // Status post-filters (unchanged semantics)
     if (status === 'no-repayments') {
       ui = ui.filter(r => safeNumber(r.paidToDate) === 0);
     }
@@ -236,10 +371,10 @@ exports.listByStatus = async (req, res) => {
 
     const table = {
       columns: [
-        { key:'disbursementDate', label:'Date' },
-        { key:'borrowerName',     label:'Borrower Name' },
-        { key:'productName',      label:'Loan Product' },
-        { key:'principalAmount',  label:'Principal Amount', currency:true },
+        { key:'disbursementDate',     label:'Date' },
+        { key:'borrowerName',         label:'Borrower Name' },
+        { key:'productName',          label:'Loan Product' },
+        { key:'principalAmount',      label:'Principal Amount', currency:true },
         { key:'outstandingPrincipal', label:'Outstanding Principal', currency:true },
         { key:'outstandingInterest',  label:'Outstanding Interest',  currency:true },
         { key:'outstandingFees',      label:'Outstanding Fees',      currency:true },
@@ -247,7 +382,7 @@ exports.listByStatus = async (req, res) => {
         { key:'totalOutstanding',     label:'Total Outstanding',     currency:true },
         { key:'interestRateYear',     label:'Interest Rate/Year (%)' },
         { key:'termMonths',           label:'Loan Duration (Months)' },
-        { key:'officerName',          label:'Loan Officer' },
+        { key:'officerName',          label:'Loan Officer' }, // now populated
         { key:'status',               label:'Status' },
       ],
       rows: ui.map(r => ({
@@ -256,7 +391,6 @@ exports.listByStatus = async (req, res) => {
         outstandingInterest:  0,
         outstandingFees:      0,
         outstandingPenalty:   0,
-        officerName: '—',
       })),
     };
 
@@ -272,3 +406,4 @@ exports.listByStatus = async (req, res) => {
     res.status(500).json({ error: 'Failed to load loans by status' });
   }
 };
+
