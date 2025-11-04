@@ -841,7 +841,7 @@ const getLoanById = async (req, res) => {
         const orderParts = [];
         if (attrs.paymentDate) orderParts.push(['paymentDate', 'DESC']);
         else if (attrs.date) orderParts.push(['date', 'DESC']);
-        orderParts.push(['created_at', 'DESC']); // safer fallback than createdAt
+        orderParts.push(['createdAt', 'DESC']); // safer fallback than createdAt
 
         const rawRows = await RepaymentModel.findAll({
           where: { loanId: loan.id },
@@ -977,7 +977,6 @@ const updateLoan = async (req, res) => {
     res.status(500).json({ error: "Error updating loan", detail: err?.parent?.message || err?.message });
   }
 };
-
 
 /* ===========================
    DELETE LOAN
