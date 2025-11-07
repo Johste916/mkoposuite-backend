@@ -1,6 +1,6 @@
 // controllers/repaymentController.js
 const fs = require("fs");
-const { Op, fn, col, literal, Sequelize } = require("sequelize");
+const { Op, fn, col, literal, QueryTypes } = require("sequelize");
 const {
   LoanRepayment,
   LoanPayment,
@@ -9,7 +9,7 @@ const {
   LoanSchedule,
   SavingsTransaction,
   Communication,
-  User,                 // ⬅️ include User for officer name
+  User,               // <-- ADDED (for officer names if available)
   sequelize,
 } = require("../models");
 // helper: round to 2dp to avoid 0.01 drift
@@ -22,16 +22,15 @@ const Notifier = require("../services/notifier")({ Communication, Borrower });
 const Gateway = require("../services/paymentGateway")();
 
 /* ============================================================
-   SCHEMA PROBE + SAFE ATTRIBUTE PICKERS (Loan + LoanSchedule)
+   SCHEMA PROBE + SAFE ATTRIBUTE PICKER
    ============================================================ */
 let _loanTableColumns = null; // { [colName]: true }
 async function getLoanTableColumns() {
   if (_loanTableColumns) return _loanTableColumns;
   try {
     const qi = sequelize.getQueryInterface();
-    // works with {schema, tableName} or string
-    const tn = Loan.getTableName();
-    const desc = await qi.describeTable(tn);
+    const tableName = Loan?.getTableName?.() || "loans";
+    const desc = await qi.describeTable(tableName);
     _loanTableColumns = Object.fromEntries(Object.keys(desc).map((k) => [k, true]));
   } catch {
     _loanTableColumns = {};
@@ -40,7 +39,7 @@ async function getLoanTableColumns() {
 }
 
 function mapAttrToField(attrName) {
-  const ra = Loan.rawAttributes || {};
+  const ra = Loan?.rawAttributes || {};
   const def = ra[attrName];
   if (!def) return null;
   return def.field || attrName;
@@ -58,40 +57,10 @@ async function pickExistingLoanAttributes(attrNames = []) {
   return selected.length ? selected : undefined;
 }
 
-/* ---------- LoanSchedule physical column helpers ---------- */
-let _lsCols = null; // { [colName]: true }
-function lsAttrToField(attrName) {
-  const ra = (LoanSchedule && LoanSchedule.rawAttributes) || {};
-  const def = ra[attrName];
-  if (!def) return null;
-  return def.field || attrName;
-}
-async function getLoanScheduleColumns() {
-  if (_lsCols) return _lsCols;
-  try {
-    const qi = sequelize.getQueryInterface();
-    const tn = LoanSchedule.getTableName();
-    const desc = await qi.describeTable(tn);
-    _lsCols = Object.fromEntries(Object.keys(desc).map((k) => [k, true]));
-  } catch {
-    _lsCols = {};
-  }
-  return _lsCols;
-}
-function qTableName(Model) {
-  const tn = Model.getTableName();
-  return typeof tn === "string" ? `"${tn}"` : `"${tn.schema}"."${tn.tableName}"`;
-}
-function lsP(colCamel, fallbackSnake) {
-  // quote physical column for LoanSchedule
-  const field = lsAttrToField(colCamel) || fallbackSnake || colCamel;
-  return `"${field}"`;
-}
-
-const BORROWER_ATTRS = ["id", "name", "firstName", "lastName", "phone", "branchId", "email"];
+const BORROWER_ATTRS = ["id", "name", "phone", "email"];
 
 // Default minimal attributes safe across schema variations
-const LOAN_BASE_ATTRS = ["id", "borrowerId", "currency", "reference", "status", "branchId", "createdAt"];
+const LOAN_BASE_ATTRS = ["id", "borrowerId", "currency", "reference", "status"];
 // When we need to compute balances
 const LOAN_AMOUNT_ATTRS = [...LOAN_BASE_ATTRS, "amount", "totalInterest", "outstanding", "totalPaid"];
 
@@ -101,36 +70,31 @@ async function loanInclude({ where = {}, borrowerWhere, needAmounts = false } = 
 
   const borrowerInclude = {
     model: Borrower,
+    as: Loan?.associations?.Borrower?.as || "Borrower",
     attributes: BORROWER_ATTRS,
     ...(borrowerWhere ? { where: borrowerWhere } : {}),
     required: !!borrowerWhere,
   };
 
-  const inc = {
+  const officerAssocAs = Loan?.associations?.loanOfficer?.as || "loanOfficer";
+  const officerInclude = User
+    ? {
+        model: User,
+        as: officerAssocAs,
+        attributes: ["id", "name", "firstName", "lastName", "email"],
+        required: false,
+      }
+    : null;
+
+  const include = [borrowerInclude];
+  if (officerInclude) include.push(officerInclude);
+
+  return {
     model: Loan,
     ...(safeAttrs ? { attributes: safeAttrs } : {}),
     where,
-    include: [borrowerInclude],
+    include,
   };
-
-  // Try to include loan officer if association exists
-  if (User && Loan.associations) {
-    const officerAssoc =
-      Loan.associations.loanOfficer ||
-      Loan.associations.Officer ||
-      Loan.associations.User ||
-      null;
-    if (officerAssoc) {
-      inc.include.push({
-        model: User,
-        as: officerAssoc.as || "loanOfficer",
-        attributes: ["id", "name", "firstName", "lastName", "email", "branchId"],
-        required: false,
-      });
-    }
-  }
-
-  return inc;
 }
 
 async function loanRefSupported() {
@@ -167,32 +131,24 @@ function getRepaymentAmountValue(r) {
   return Number(r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0);
 }
 
-/* ===== Names, outstanding, alias helpers ===== */
-const fullName = (row) => {
-  const j = row?.toJSON ? row.toJSON() : row || {};
-  const explicit = j.name || null;
-  const composed = [j.firstName, j.lastName].filter(Boolean).join(" ");
-  return (explicit && explicit.trim()) || (composed && composed.trim()) || null;
-};
-const computeOutstandingFromLoanRow = (j) => {
-  const pick = (obj, names) => {
-    for (const n of names) if (obj[n] != null) return obj[n];
-    return undefined;
-  };
-  const tot = pick(j, ["outstanding", "outstandingAmount", "outstandingTotal"]);
-  if (typeof tot === "number") return tot;
-  const p = pick(j, ["principalOutstanding", "principal_outstanding"]);
-  const i = pick(j, ["interestOutstanding", "interest_outstanding"]);
-  if (typeof p === "number" || typeof i === "number") return Number(p || 0) + Number(i || 0);
-  return Number(j.amount || 0) - Number(j.totalPaid || 0);
-};
-function resolveAssocAlias(Host, Target) {
-  if (!Host?.associations) return null;
-  for (const [k, a] of Object.entries(Host.associations)) {
-    if (a?.target === Target) return a.as || k;
-  }
-  if (Target === Borrower) return Host.associations?.Borrower?.as || "Borrower";
-  if (Target === User) return Host.associations?.loanOfficer?.as || "loanOfficer";
+/* pretty name for officer */
+function officerPrettyName(officer) {
+  if (!officer) return null;
+  const explicit =
+    officer.name ||
+    [officer.firstName, officer.lastName].filter(Boolean).join(" ") ||
+    null;
+
+  const titleize = (s) =>
+    String(s || "")
+      .replace(/[_\.\-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+
+  if (explicit && /\s/.test(explicit) && !/^[a-z0-9._-]+$/i.test(explicit)) return explicit.trim();
+  if (explicit && !explicit.includes("@")) return titleize(explicit);
+  if (officer.email) return titleize(officer.email.split("@")[0]);
   return null;
 }
 
@@ -209,11 +165,9 @@ async function updateLoanFinancials(loan, deltaPaid, t) {
 
   const outstandingField = mapAttrToField("outstanding");
   if (outstandingField && cols[outstandingField]) {
-    // Prefer adjusting from current outstanding if present
     if (loan.outstanding != null) {
       updates.outstanding = Math.max(0, Number(loan.outstanding || 0) - Number(deltaPaid || 0));
     } else {
-      // Fallback derive if amount + totalInterest are available
       const principal = Number(loan.amount || 0);
       const totalInterest = Number(loan.totalInterest || 0);
       const newTotalPaid =
@@ -402,206 +356,6 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
   }
 }
 
-
-/* ============================================================
-   🗓️  REPAYMENT SCHEDULE LIST  (New for your page)
-   - Joins Loan → Borrower and Loan → Officer safely
-   - Computes earliest unpaid installment (LoanSchedule) per loan
-   - Supports filters: q, branchId, officerId, status, dueRange
-   ============================================================ */
-async function buildNextDueLiteral(dueRange = "next30") {
-  if (!LoanSchedule || !sequelize) return literal("NULL");
-  await getLoanScheduleColumns(); // warm cache
-
-  const qTbl = qTableName(LoanSchedule);
-  const loanIdCol = lsP("loanId", "loan_id");
-  const dueCol    = lsP("dueDate", "due_date");
-
-  const pCol   = lsP("principal");
-  const iCol   = lsP("interest");
-  const fCol   = lsP("fees");
-  const penCol = lsP("penalties", "penalty");
-
-  const ppCol   = lsP("principalPaid", "principal_paid");
-  const ipCol   = lsP("interestPaid",  "interest_paid");
-  const fpCol   = lsP("feesPaid",      "fees_paid");
-  const penpCol = lsP("penaltiesPaid", "penalties_paid");
-
-  const unpaidCond = `COALESCE(${ppCol},0)+COALESCE(${ipCol},0)+COALESCE(${fpCol},0)+COALESCE(${penpCol},0) < COALESCE(${pCol},0)+COALESCE(${iCol},0)+COALESCE(${fCol},0)+COALESCE(${penCol},0)`;
-
-  let rangeSql = "";
-  const key = String(dueRange).toLowerCase();
-  if (key === "overdue") {
-    rangeSql = `AND ls.${dueCol} < NOW()`;
-  } else if (key === "next7" || key === "next_7" || key === "next 7 days") {
-    rangeSql = `AND ls.${dueCol} >= NOW() AND ls.${dueCol} <= NOW() + INTERVAL '7 days'`;
-  } else if (key === "all") {
-    rangeSql = ``; // any unpaid regardless of date
-  } else {
-    // default next30
-    rangeSql = `AND ls.${dueCol} >= NOW() AND ls.${dueCol} <= NOW() + INTERVAL '30 days'`;
-  }
-
-  const sql = `(SELECT MIN(ls.${dueCol})
-                  FROM ${qTbl} ls
-                 WHERE ls.${loanIdCol} = "Loan"."id"
-                   AND (${unpaidCond})
-                   ${rangeSql})`;
-  return literal(sql);
-}
-
-const listSchedule = async (req, res) => {
-  try {
-    if (!Loan) return res.json({ items: [], total: 0 });
-
-    const {
-      q = "",
-      branchId,
-      officerId,
-      status = "active",          // "active" | "all" | explicit code
-      dueRange = "next30",        // "next30" | "next7" | "overdue" | "all"
-      page = 1,
-      pageSize = 50,
-      includeClosed,              // truthy to include closed/settled
-    } = req.query;
-
-    const limit = Math.max(1, Number(pageSize));
-    const offset = (Math.max(1, Number(page)) - 1) * limit;
-
-    // Where on Loan
-    const loanCols = await getLoanTableColumns();
-    const where = {};
-
-    // Status logic
-    const wantAll = String(status).toLowerCase() === "all" || String(includeClosed).toLowerCase() === "true";
-    if (!wantAll && loanCols["status"]) {
-      const s = String(status).toLowerCase();
-      if (s === "active") {
-        where.status = { [Op.in]: ["active", "disbursed", "current"] };
-      } else {
-        where.status = status;
-      }
-    }
-
-    // Officer filter
-    if ((loanCols["loan_officer_id"] || loanCols["loanOfficerId"]) && officerId) {
-      where.loanOfficerId = officerId;
-    }
-
-    // Branch filter: prefer Loan.branchId; otherwise via Borrower.branchId
-    let borrowerWhere;
-    if (branchId) {
-      if (loanCols["branch_id"] || loanCols["branchId"]) {
-        where.branchId = branchId;
-      } else {
-        borrowerWhere = { ...(borrowerWhere || {}), branchId };
-      }
-    }
-
-    // Search by loan ref / borrower
-    const likeOp = (sequelize?.getDialect?.() === "postgres") ? Op.iLike : Op.like;
-    if (q && q.trim()) {
-      const needle = `%${q.trim()}%`;
-      where[Op.or] = [
-        ...(loanCols["reference"] ? [{ reference: { [likeOp]: needle } }] : []),
-        ...(loanCols["code"]      ? [{ code:      { [likeOp]: needle } }] : []),
-        ...(loanCols["number"]    ? [{ number:    { [likeOp]: needle } }] : []),
-      ];
-      borrowerWhere = {
-        ...(borrowerWhere || {}),
-        [Op.or]: [{ name: { [likeOp]: needle } }, { phone: { [likeOp]: needle } }],
-      };
-    }
-
-    // figure out include aliases
-    const borrowerAlias = resolveAssocAlias(Loan, Borrower) || "Borrower";
-    const officerAlias  = resolveAssocAlias(Loan, User)     || "loanOfficer";
-
-    // include
-    const include = [];
-    if (Borrower && Loan.associations && Loan.associations[borrowerAlias]) {
-      include.push({
-        model: Borrower,
-        as: borrowerAlias,
-        attributes: BORROWER_ATTRS,
-        ...(borrowerWhere ? { where: borrowerWhere, required: true } : { required: false }),
-      });
-    }
-    if (User && Loan.associations && Loan.associations[officerAlias]) {
-      include.push({
-        model: User,
-        as: officerAlias,
-        attributes: ["id", "name", "firstName", "lastName", "email"],
-        required: false,
-      });
-    }
-
-    // compute next due date per loan from LoanSchedule
-    const nextDueLit = await buildNextDueLiteral(dueRange);
-
-    // Choose a safe createdAt / id fallback for deterministic ordering
-    const createdAttr =
-      (Loan.rawAttributes?.createdAt && "createdAt") ||
-      (Loan.rawAttributes?.created_at && "created_at") ||
-      "id";
-
-    const { rows, count } = await Loan.findAndCountAll({
-      where,
-      include,
-      attributes: {
-        include: [[nextDueLit, "nextDueDate"]],
-      },
-      order: [
-        [sequelize.literal('"nextDueDate" IS NULL'), "ASC"], // non-null first
-        [sequelize.literal('"nextDueDate"'), "ASC"],
-        [createdAttr, "DESC"],
-      ],
-      limit,
-      offset,
-      subQuery: false,
-    });
-
-    const items = rows.map((r) => {
-      const j = r.toJSON ? r.toJSON() : r;
-
-      // loan ref
-      const loanRef = j.reference || j.code || j.number || `LN-${j.id}`;
-
-      // borrower & officer names
-      const b = j[borrowerAlias];
-      const o = j[officerAlias];
-      const borrowerName = fullName(b) || "";
-      const officerName  = fullName(o) || (o?.email || "") || "";
-
-      // outstanding
-      const outstanding = Number(computeOutstandingFromLoanRow(j) || 0);
-
-      return {
-        id: j.id,
-        loanRef,
-        borrowerId: b?.id || null,
-        borrowerName,
-        officerId: o?.id || null,
-        officerName,
-        outstanding,
-        nextDueDate: j.nextDueDate || null,
-        status: j.status || j.state || "—",
-      };
-    });
-
-    res.json({
-      items,
-      total: count,
-      page: Number(page),
-      limit,
-    });
-  } catch (err) {
-    console.error("repayment schedule list error:", err);
-    res.status(500).json({ error: "Failed to load repayment schedule" });
-  }
-};
-
-
 /* =========================
    📥 LIST
 ========================== */
@@ -691,7 +445,7 @@ const getAllRepayments = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    🔍 BY BORROWER / LOAN
 ========================== */
 const getRepaymentsByBorrower = async (req, res) => {
@@ -753,7 +507,136 @@ const getRepaymentById = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
+   🗓️  SCHEDULE GRID (NEW)
+   Fills: borrower / officer / next due / outstanding / status
+===========================*/
+const listScheduleLoans = async (req, res) => {
+  try {
+    const {
+      q = "",
+      branchId,
+      officerId,
+      status,              // e.g. 'active'
+      includeClosed = "false",
+      dueInDays = "30",
+      page = 1,
+      pageSize = 50,
+    } = req.query;
+
+    const limit = Math.max(1, Number(pageSize));
+    const offset = (Math.max(1, Number(page)) - 1) * limit;
+
+    // --- Build loan filters via Sequelize (so we don't care about exact table names) ---
+    const loanWhere = {};
+    if (status) loanWhere.status = status;
+    if (officerId) {
+      const officerField = mapAttrToField("loanOfficerId") || "loanOfficerId";
+      loanWhere[officerField] = officerId;
+    }
+    if (branchId && Borrower?.rawAttributes?.branchId) {
+      // filter by borrower branch through include.where (safer)
+    }
+
+    let borrowerWhere;
+    if (q && q.trim()) {
+      const needle = `%${q.trim()}%`;
+      borrowerWhere = {
+        [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }],
+      };
+    }
+
+    const inc = await loanInclude({
+      where: loanWhere,
+      borrowerWhere,
+      needAmounts: false,
+    });
+
+    // If filtering by borrower branch, add it to include
+    if (branchId && Borrower?.rawAttributes?.branchId) {
+      const borrowerInc = inc.include.find((i) => (i.as || i.model?.name) === (Loan?.associations?.Borrower?.as || "Borrower"));
+      if (borrowerInc) {
+        borrowerInc.where = { ...(borrowerInc.where || {}), branchId: branchId };
+        borrowerInc.required = true;
+      }
+    }
+
+    const { rows: loans, count } = await Loan.findAndCountAll({
+      ...(inc.attributes ? { attributes: inc.attributes } : {}),
+      where: inc.where,
+      include: inc.include,
+      order: [["createdAt", "DESC"]],
+      limit,
+      offset,
+    });
+
+    if (!loans.length) return res.json({ items: [], total: 0, page: Number(page), limit });
+
+    // --- Aggregate next due & outstanding from public.loan_schedules via raw SQL (we know the columns) ---
+    const loanIds = loans.map((l) => l.id);
+    const sql = `
+      SELECT loan_id,
+             MIN(CASE WHEN
+                 (COALESCE(principal,0)+COALESCE(interest,0)+COALESCE(fees,0)+COALESCE(penalties,0))
+               > (COALESCE(principal_paid,0)+COALESCE(interest_paid,0)+COALESCE(fees_paid,0)+COALESCE(penalties_paid,0))
+               THEN due_date END)                AS next_due,
+             SUM( (COALESCE(principal,0)+COALESCE(interest,0)+COALESCE(fees,0)+COALESCE(penalties,0))
+                 - (COALESCE(principal_paid,0)+COALESCE(interest_paid,0)+COALESCE(fees_paid,0)+COALESCE(penalties_paid,0)) ) AS outstanding
+      FROM public.loan_schedules
+      WHERE loan_id IN (${loanIds.map((_, i) => `$${i + 1}`).join(",")})
+      GROUP BY loan_id
+    `;
+    const agg = await sequelize.query(sql, {
+      type: QueryTypes.SELECT,
+      bind: loanIds,
+    });
+    const byLoanId = new Map(agg.map((r) => [Number(r.loan_id), r]));
+
+    // optional due-in-days filter (applied after computing next due)
+    const days = Number(dueInDays) || 30;
+    const now = new Date();
+    const end = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const items = loans.map((l) => {
+      const a = byLoanId.get(Number(l.id)) || {};
+      const nextDue = a.next_due ? new Date(a.next_due) : null;
+      const outstanding = Number(a.outstanding || 0);
+
+      const borrower = l.Borrower || {};
+      const officer = l[Loan?.associations?.loanOfficer?.as || "loanOfficer"];
+
+      return {
+        loanId: l.id,
+        loanRef: l.reference || `L-${l.id}`,
+        borrowerId: borrower.id || null,
+        borrower: borrower.name || "",
+        officerId: officer?.id || null,
+        officer: officerPrettyName(officer) || null,
+        nextDue: nextDue ? nextDue.toISOString().slice(0, 10) : null,
+        outstanding,
+        status: l.status || null,
+        currency: l.currency || "TZS",
+      };
+    });
+
+    // apply due-window filter if requested (default 30 days; allow "all" via dueInDays=0)
+    const withinWindow = days > 0
+      ? items.filter((it) => (it.nextDue ? new Date(it.nextDue) <= end : false))
+      : items;
+
+    res.json({
+      items: withinWindow,
+      total: count,
+      page: Number(page),
+      limit,
+    });
+  } catch (err) {
+    console.error("listScheduleLoans error:", err);
+    res.status(500).json({ error: "Failed to load schedule" });
+  }
+};
+
+/* ===========================
    🧮 PREVIEW
 ========================== */
 const previewAllocation = async (req, res) => {
@@ -763,7 +646,7 @@ const previewAllocation = async (req, res) => {
     // Fetch the loan with safe attributes
     const loan = await Loan.findByPk(loanId, {
       attributes: await pickExistingLoanAttributes(LOAN_BASE_ATTRS),
-      include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: Loan?.associations?.Borrower?.as || "Borrower" }],
     });
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
@@ -786,7 +669,7 @@ const previewAllocation = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    💰 CREATE (manual, immediate post)
 ========================== */
 const createRepayment = async (req, res) => {
@@ -820,7 +703,7 @@ const createRepayment = async (req, res) => {
     // Fetch loan with only columns we actually need to compute balances
     const loan = await Loan.findByPk(loanId, {
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
-      include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: Loan?.associations?.Borrower?.as || "Borrower" }],
       transaction: t,
     });
     if (!loan) {
@@ -903,7 +786,7 @@ const createRepayment = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    ✨ BULK JSON (PENDING rows)
 ========================== */
 const createBulkRepayments = async (req, res) => {
@@ -987,7 +870,7 @@ const createBulkRepayments = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    📄 CSV UPLOAD (PENDING rows)
 ========================== */
 const parseCsvBuffer = async (buffer) => {
@@ -1066,7 +949,7 @@ const uploadRepaymentsCsv = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    ✅ APPROVALS
 ========================== */
 const listPendingApprovals = async (req, res) => {
@@ -1165,7 +1048,7 @@ const rejectRepayment = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    🚫 VOID / REVERSE (applied rows)
 ========================== */
 const voidRepayment = async (req, res) => {
@@ -1216,7 +1099,7 @@ const voidRepayment = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    📊 REPORTS
 ========================== */
 const getRepaymentsSummary = async (req, res) => {
@@ -1252,7 +1135,7 @@ const getRepaymentsSummary = async (req, res) => {
         [fn("SUM", col(amtAttr)), "amount"],
       ],
       group: ["method"],
-      order: [[literal("amount"), "DESC"]], // sort by sum desc
+      order: [[literal("amount"), "DESC"]],
     });
 
     const byMethod = byMethodRows.map((r) => ({
@@ -1306,7 +1189,7 @@ const getRepaymentsTimeSeries = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    📤 EXPORT CSV
 ========================== */
 const exportRepaymentsCsv = async (req, res) => {
@@ -1386,7 +1269,7 @@ const exportRepaymentsCsv = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    🔔 WEBHOOKS (mobile & bank)
 ========================== */
 const webhookMobileMoney = async (req, res) => {
@@ -1412,7 +1295,7 @@ const webhookMobileMoney = async (req, res) => {
     const loan = await Loan.findOne({
       where: { reference: n.loanReference },
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
-      include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: Loan?.associations?.Borrower?.as || "Borrower" }],
       transaction: t,
     });
     if (!loan) {
@@ -1500,7 +1383,7 @@ const webhookBank = async (req, res) => {
     const loan = await Loan.findOne({
       where: { reference: n.loanReference },
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
-      include: [{ model: Borrower, attributes: BORROWER_ATTRS }],
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: Loan?.associations?.Borrower?.as || "Borrower" }],
       transaction: t,
     });
     if (!loan) {
@@ -1565,7 +1448,7 @@ const webhookBank = async (req, res) => {
   }
 };
 
-/* ==========================
+/* ===========================
    ✏️ UPDATE & DELETE (compat)
 ========================== */
 const updateRepayment = async (req, res) => {
@@ -1591,13 +1474,10 @@ const deleteRepayment = async (req, res) => {
   return voidRepayment(req, res);
 };
 
-/* ==========================
+/* ===========================
    EXPORTS
 ========================== */
 module.exports = {
-  // schedule (NEW)
-  listSchedule,
-
   // core
   getAllRepayments,
   getRepaymentsByBorrower,
@@ -1607,6 +1487,8 @@ module.exports = {
   createRepayment,
   updateRepayment,
   deleteRepayment,
+  // schedule (NEW)
+  listScheduleLoans,
   // bulk & csv
   createBulkRepayments,
   uploadRepaymentsCsv,

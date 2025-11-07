@@ -89,15 +89,14 @@ module.exports = (sequelize, DataTypes) => {
     const [y, m, d] = String(dateStr).split('-').map(Number);
     const dt = new Date(Date.UTC(y, m - 1, d || 1));
     const target = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + months, dt.getUTCDate()));
-    // handle month overflow (e.g., Jan 31 + 1 month → Feb end)
     if (target.getUTCMonth() !== ((m - 1 + months) % 12 + 12) % 12) target.setUTCDate(0);
     return target.toISOString().slice(0, 10);
   }
 
   Loan.associate = (models) => {
-    if (models.Borrower && !Loan.associations?.borrower) {
+    if (models.Borrower && !Loan.associations?.Borrower) {
       Loan.belongsTo(models.Borrower, {
-        as: 'borrower',
+        as: 'Borrower',                 // ✅ capitalized to match controllers
         foreignKey: 'borrowerId',
         targetKey: 'id',
         constraints: false,
@@ -106,7 +105,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.LoanProduct && !Loan.associations?.product) {
       Loan.belongsTo(models.LoanProduct, {
         as: 'product',
-        foreignKey: 'productId', // mapped to DB column product_id
+        foreignKey: 'productId',
         targetKey: 'id',
         constraints: false,
       });

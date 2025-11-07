@@ -22,7 +22,6 @@ module.exports = (sequelize, DataTypes) => {
           return `${fn} ${ln}`.trim();
         },
         set(v) {
-          // Keep "name" as the canonical persisted display name
           this.setDataValue('name', (v || '').toString().trim());
         },
       },
@@ -66,7 +65,7 @@ module.exports = (sequelize, DataTypes) => {
       nextOfKinRelationship:{ type: DataTypes.STRING,     allowNull: true, field: 'nextOfKinRelationship' },
 
       // Grouping / misc profile
-      groupId:        { type: DataTypes.TEXT,       allowNull: true, field: 'groupId' }, // kept TEXT to match your DB
+      groupId:        { type: DataTypes.TEXT,       allowNull: true, field: 'groupId' },
       loanType:       { type: DataTypes.TEXT,       allowNull: true, field: 'loanType', defaultValue: 'individual' },
       regDate:        { type: DataTypes.DATEONLY,   allowNull: true, field: 'regDate' },
       maritalStatus:  { type: DataTypes.STRING(32), allowNull: true, field: 'maritalStatus' },
@@ -89,13 +88,12 @@ module.exports = (sequelize, DataTypes) => {
     },
     {
       schema: 'public',
-      tableName: 'Borrowers',          // keep existing cased table name
+      tableName: 'Borrowers',          // ✅ actual table name (capitalized)
       freezeTableName: true,
       timestamps: true,                // createdAt/updatedAt (camel) exist
       underscored: false,
       hooks: {
         beforeValidate(instance) {
-          // Trim common strings to keep data clean
           const trim = (v) => (typeof v === 'string' ? v.trim() : v);
           instance.set('name', trim(instance.get('name') || ''));
           instance.set('firstName', trim(instance.get('firstName') || null));
@@ -104,7 +102,6 @@ module.exports = (sequelize, DataTypes) => {
           instance.set('phone', trim(instance.get('phone') || null));
           instance.set('secondaryPhone', trim(instance.get('secondaryPhone') || null));
 
-          // Backfill name from first/last if missing
           if (!instance.get('name')) {
             const fn = instance.get('firstName') || '';
             const ln = instance.get('lastName') || '';
@@ -128,9 +125,9 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   Borrower.associate = (models) => {
-    if (models.Branch && !Borrower.associations?.Branch) {
+    if (models.Branch && !Borrower.associations?.branch) {
       Borrower.belongsTo(models.Branch, {
-        as: 'Branch',
+        as: 'branch',
         foreignKey: 'branchId', // maps to DB column branch_id
         targetKey: 'id',
         constraints: false,
@@ -139,7 +136,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.User && !Borrower.associations?.loanOfficer) {
       Borrower.belongsTo(models.User, {
         as: 'loanOfficer',
-        foreignKey: 'loanOfficerId', // UUID; controllers already guard for presence/role
+        foreignKey: 'loanOfficerId', // UUID; stored as loan_officer_id
         targetKey: 'id',
         constraints: false,
       });

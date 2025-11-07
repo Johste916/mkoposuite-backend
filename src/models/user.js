@@ -16,6 +16,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       // DB column is snake, attribute is snake (fine)
       password_hash: { type: DataTypes.STRING, allowNull: false },
+
       // virtual setter for raw passwords
       password: {
         type: DataTypes.VIRTUAL,
