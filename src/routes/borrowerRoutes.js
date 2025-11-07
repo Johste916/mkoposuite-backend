@@ -1,3 +1,4 @@
+// routes/borrowers.js
 "use strict";
 
 const express = require('express');
@@ -23,7 +24,7 @@ const requireMulterSingleFile = hasMulter
 /* ---------------- Try load the new Groups controller (optional) ----------- */
 let groupCtrl = null;
 try {
-  const models = require('../models'); // works because routes run inside the API project
+  const models = require('../models');
   const build = require('../controllers/borrowerGroupController');
   groupCtrl = build && typeof build === 'function' ? build({ models }) : null;
 } catch { /* keep null to fallback to ctrl.* */ }
@@ -34,7 +35,6 @@ router.get('/groups/reports/summary',    authenticateUser, groupReportsCtrl.getG
 router.get('/reports',                   authenticateUser, ctrl.globalBorrowerReport);
 
 /* ---------------- Groups ---------------- */
-/* Prefer new controller if available; otherwise fallback to existing ctrl.* */
 router.get('/groups',                    authenticateUser, (req, res, next) =>
   groupCtrl ? groupCtrl.list(req, res, next) : ctrl.listGroups(req, res, next)
 );
@@ -44,7 +44,7 @@ router.post('/groups',                   authenticateUser, (req, res, next) =>
 router.get('/groups/:groupId',           authenticateUser, (req, res, next) =>
   groupCtrl ? groupCtrl.getOne(req, res, next) : ctrl.getGroup(req, res, next)
 );
-router.put('/groups/:groupId',           authenticateUser, ctrl.updateGroup); // keep your existing PUT
+router.put('/groups/:groupId',           authenticateUser, ctrl.updateGroup);
 router.post('/groups/:groupId/members',  authenticateUser, (req, res, next) =>
   groupCtrl ? groupCtrl.addMember(req, res, next) : ctrl.addGroupMember(req, res, next)
 );
@@ -54,22 +54,25 @@ router.delete('/groups/:groupId/members/:borrowerId', authenticateUser, (req, re
 router.get('/groups/reports',            authenticateUser, ctrl.groupReports);
 router.post('/groups/:groupId/import',   authenticateUser, requireMulterSingleFile, ctrl.importGroupMembers);
 
+/* ---------------- Lists that might conflict with :id — keep BEFORE -------- */
+router.get('/blacklist/list',            authenticateUser, ctrl.listBlacklisted);
+router.get('/kyc/queue',                 authenticateUser, ctrl.listKycQueue);
+
 /* ---------------- Borrowers CRUD ---------------- */
 router.get('/',                          authenticateUser, ctrl.getAllBorrowers);
 
 /**
  * Frontend sends multipart/form-data (optional photo). We must parse it.
  * Using upload.any() keeps backward compatibility if no files are sent.
- * Role-aware Loan Officer assignment is handled in controller.createBorrower.
  */
 router.post('/',                         authenticateUser, requireMulterAny, ctrl.createBorrower);
 
 router.put('/:id',                       authenticateUser, ctrl.updateBorrower);
-router.patch('/:id',                     authenticateUser, ctrl.updateBorrower); // ✅ allow PATCH fallback
-router.post('/:id/disable',              authenticateUser, ctrl.disableBorrower); // ✅ explicit disable route
+router.patch('/:id',                     authenticateUser, ctrl.updateBorrower);
+router.post('/:id/disable',              authenticateUser, ctrl.disableBorrower);
 router.delete('/:id',                    authenticateUser, ctrl.deleteBorrower);
 
-// Explicit branch assign/unassign (additive, optional to use)
+// Explicit branch assign/unassign
 router.post('/:id/branch',               authenticateUser, ctrl.assignBranch);
 router.delete('/:id/branch',             authenticateUser, ctrl.unassignBranch);
 
@@ -87,18 +90,13 @@ router.get('/:id/savings',               authenticateUser, ctrl.getSavingsByBorr
 // Blacklist
 router.post('/:id/blacklist',            authenticateUser, ctrl.blacklist);
 router.delete('/:id/blacklist',          authenticateUser, ctrl.unblacklist);
-router.get('/blacklist/list',            authenticateUser, ctrl.listBlacklisted);
 
 // KYC
 router.post('/:id/kyc',                  authenticateUser, requireMulterAny, ctrl.uploadKyc);
 router.get('/:id/kyc',                   authenticateUser, ctrl.listKyc);
-router.get('/kyc/queue',                 authenticateUser, ctrl.listKycQueue);
 
-// Import borrowers
-router.post('/import',                   authenticateUser, requireMulterSingleFile, ctrl.importBorrowers);
-
-// Per borrower summary
-router.get('/:id',                       authenticateUser, ctrl.getBorrowerById);
+// Per borrower summary & single
 router.get('/:id/report/summary',        authenticateUser, ctrl.summaryReport);
+router.get('/:id',                       authenticateUser, ctrl.getBorrowerById);
 
 module.exports = router;

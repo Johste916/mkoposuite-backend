@@ -1,3 +1,4 @@
+// src/models/loanProduct.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
@@ -42,7 +43,7 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       timestamps: true,
       underscored: false,
-      createdAt: 'createdAt', // your DB uses camel for timestamps
+      createdAt: 'createdAt',
       updatedAt: 'updatedAt',
       indexes: [
         { unique: true, fields: ['code'] },

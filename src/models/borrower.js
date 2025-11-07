@@ -7,6 +7,7 @@ module.exports = (sequelize, DataTypes) => {
     {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
 
+      // Names
       name:      { type: DataTypes.STRING, allowNull: false, field: 'name' },
       firstName: { type: DataTypes.TEXT,   allowNull: true,  field: 'firstName' },
       lastName:  { type: DataTypes.TEXT,   allowNull: true,  field: 'lastName' },
@@ -14,21 +15,31 @@ module.exports = (sequelize, DataTypes) => {
       fullName: {
         type: DataTypes.VIRTUAL,
         get() {
-          const n = this.getDataValue('name');
-          if (n && String(n).trim()) return n;
-          const fn = this.getDataValue('firstName') || '';
-          const ln = this.getDataValue('lastName') || '';
+          const n = (this.getDataValue('name') || '').trim();
+          if (n) return n;
+          const fn = (this.getDataValue('firstName') || '').trim();
+          const ln = (this.getDataValue('lastName') || '').trim();
           return `${fn} ${ln}`.trim();
         },
-        set(v) { this.setDataValue('name', v); },
+        set(v) {
+          // Keep "name" as the canonical persisted display name
+          this.setDataValue('name', (v || '').toString().trim());
+        },
       },
 
+      // IDs & contacts
       nationalId:     { type: DataTypes.STRING, allowNull: true, field: 'nationalId' },
       idNumber:       { type: DataTypes.TEXT,   allowNull: true, field: 'idNumber' },
       phone:          { type: DataTypes.STRING, allowNull: true, field: 'phone' },
       secondaryPhone: { type: DataTypes.TEXT,   allowNull: true, field: 'secondaryPhone' },
-      email:          { type: DataTypes.STRING, allowNull: true, field: 'email' },
+      email:          {
+        type: DataTypes.STRING,
+        allowNull: true,
+        field: 'email',
+        validate: { isEmail: { msg: 'Invalid email format' } },
+      },
 
+      // Addressing
       address:     { type: DataTypes.STRING, allowNull: true, field: 'address' },
       addressLine: { type: DataTypes.TEXT,   allowNull: true, field: 'addressLine' },
       street:      { type: DataTypes.TEXT,   allowNull: true, field: 'street' },
@@ -37,10 +48,12 @@ module.exports = (sequelize, DataTypes) => {
       district:    { type: DataTypes.TEXT,   allowNull: true, field: 'district' },
       ward:        { type: DataTypes.TEXT,   allowNull: true, field: 'ward' },
 
+      // FKs / tenancy
       branchId:      { type: DataTypes.INTEGER, allowNull: true, field: 'branch_id' },
       loanOfficerId: { type: DataTypes.UUID,    allowNull: true, field: 'loan_officer_id' },
       tenantId:      { type: DataTypes.INTEGER, allowNull: true, field: 'tenant_id' },
 
+      // KYC / profile
       gender:               { type: DataTypes.STRING(16), allowNull: true, field: 'gender' },
       birthDate:            { type: DataTypes.DATEONLY,   allowNull: true, field: 'birthDate' },
       employmentStatus:     { type: DataTypes.TEXT,       allowNull: true, field: 'employmentStatus' },
@@ -52,7 +65,8 @@ module.exports = (sequelize, DataTypes) => {
       nextKinPhone:         { type: DataTypes.TEXT,       allowNull: true, field: 'nextKinPhone' },
       nextOfKinRelationship:{ type: DataTypes.STRING,     allowNull: true, field: 'nextOfKinRelationship' },
 
-      groupId:        { type: DataTypes.TEXT,       allowNull: true, field: 'groupId' },
+      // Grouping / misc profile
+      groupId:        { type: DataTypes.TEXT,       allowNull: true, field: 'groupId' }, // kept TEXT to match your DB
       loanType:       { type: DataTypes.TEXT,       allowNull: true, field: 'loanType', defaultValue: 'individual' },
       regDate:        { type: DataTypes.DATEONLY,   allowNull: true, field: 'regDate' },
       maritalStatus:  { type: DataTypes.STRING(32), allowNull: true, field: 'maritalStatus' },
@@ -61,13 +75,16 @@ module.exports = (sequelize, DataTypes) => {
       tin:            { type: DataTypes.STRING(32), allowNull: true, field: 'tin' },
       nationality:    { type: DataTypes.STRING(64), allowNull: true, field: 'nationality' },
 
+      // Media
       photoUrl:        { type: DataTypes.STRING, allowNull: true, field: 'photoUrl' },
       profilePhotoUrl: { type: DataTypes.TEXT,   allowNull: true, field: 'profilePhotoUrl' },
 
+      // Blacklist
       blacklistReason: { type: DataTypes.TEXT,     allowNull: true, field: 'blacklistReason' },
       blacklistUntil:  { type: DataTypes.DATEONLY, allowNull: true, field: 'blacklistUntil' },
       blacklistedAt:   { type: DataTypes.DATE,     allowNull: true, field: 'blacklistedAt' },
 
+      // Status
       status: { type: DataTypes.STRING(32), allowNull: false, defaultValue: 'active', field: 'status' },
     },
     {
@@ -76,6 +93,26 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       timestamps: true,                // createdAt/updatedAt (camel) exist
       underscored: false,
+      hooks: {
+        beforeValidate(instance) {
+          // Trim common strings to keep data clean
+          const trim = (v) => (typeof v === 'string' ? v.trim() : v);
+          instance.set('name', trim(instance.get('name') || ''));
+          instance.set('firstName', trim(instance.get('firstName') || null));
+          instance.set('lastName', trim(instance.get('lastName') || null));
+          instance.set('email', trim(instance.get('email') || null));
+          instance.set('phone', trim(instance.get('phone') || null));
+          instance.set('secondaryPhone', trim(instance.get('secondaryPhone') || null));
+
+          // Backfill name from first/last if missing
+          if (!instance.get('name')) {
+            const fn = instance.get('firstName') || '';
+            const ln = instance.get('lastName') || '';
+            const composed = `${fn} ${ln}`.trim();
+            if (composed) instance.set('name', composed);
+          }
+        },
+      },
       indexes: [
         { fields: ['name'] },
         { fields: ['phone'] },
@@ -94,7 +131,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Branch && !Borrower.associations?.Branch) {
       Borrower.belongsTo(models.Branch, {
         as: 'Branch',
-        foreignKey: 'branchId',
+        foreignKey: 'branchId', // maps to DB column branch_id
         targetKey: 'id',
         constraints: false,
       });
@@ -102,7 +139,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.User && !Borrower.associations?.loanOfficer) {
       Borrower.belongsTo(models.User, {
         as: 'loanOfficer',
-        foreignKey: 'loanOfficerId',
+        foreignKey: 'loanOfficerId', // UUID; controllers already guard for presence/role
         targetKey: 'id',
         constraints: false,
       });

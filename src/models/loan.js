@@ -60,7 +60,7 @@ module.exports = (sequelize, DataTypes) => {
       schema: 'public',
       tableName: 'loans',
       freezeTableName: true,
-      timestamps: true,          // uses createdAt/updatedAt by default
+      timestamps: true,
       underscored: false,
       hooks: {
         beforeValidate: (loan) => {
@@ -120,7 +120,7 @@ module.exports = (sequelize, DataTypes) => {
       });
     }
 
-    // Optional user links (UUID) — keep constraints off to avoid FK requirement
+    // Optional user links (UUID)
     if (models.User) {
       if (!Loan.associations?.approvedByUser) {
         Loan.belongsTo(models.User, {
