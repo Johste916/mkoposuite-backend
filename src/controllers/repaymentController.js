@@ -471,17 +471,28 @@ const getRepaymentsByLoan = async (req, res) => {
   try {
     const loanId = req.params.loanId || req.params.id;
     if (!loanId) return res.status(400).json({ error: "loanId required" });
-    const dateAttr = repaymentDateAttr();
+    const dateAttr = repaymentDateAttr(); // will pick paymentDate/date/paidAt/createdAt
+    const amtAttr  = repaymentAmountAttr() || 'amountPaid';
 
-    const repayments = await Repayment.findAll({
+    const rows = await Repayment.findAll({
       where: { loanId },
-      include: [await loanInclude()],
       order: [
         [dateAttr, "DESC"],
         ["createdAt", "DESC"],
       ],
     });
-    res.json(repayments);
+
+    // Map to FE shape
+    const items = rows.map((r) => ({
+      id: r.id,
+      date: getRepaymentDateValue(r),             // -> FE: r.date
+      amount: getRepaymentAmountValue(r),         // -> FE: r.amount
+      method: r.method || "",
+      ref: r.reference || r.receiptNo || "",
+      postedBy: r.postedByName || r.postedByEmail || r.postedBy || "", // -> FE: r.postedBy
+    }));
+
+    res.json(items);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Error fetching loan repayments" });
