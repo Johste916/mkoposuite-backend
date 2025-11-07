@@ -1,6 +1,5 @@
-// src/controllers/loanProductController.js
 const { Op } = require('sequelize');
-const { LoanProduct } = require('../models');
+const { LoanProduct, sequelize } = require('../models');
 
 /* ----------------------------- helpers ----------------------------- */
 const num = (v) => (v === '' || v == null || isNaN(Number(v)) ? null : Number(v));
@@ -147,8 +146,8 @@ const serialize = (row) => {
 
     eligibility: r.eligibility || {},
     meta: r.meta || {},
-    createdAt: r.createdAt,
-    updatedAt: r.updatedAt,
+    createdAt: r.createdAt ?? r.created_at ?? null,
+    updatedAt: r.updatedAt ?? r.updated_at ?? null,
   };
 
   // also expose snake_case/alt aliases so older UIs keep working
@@ -193,7 +192,8 @@ exports.list = async (req, res) => {
 
     const { rows, count } = await LoanProduct.findAndCountAll({
       where,
-      order: [['createdAt', 'DESC']],
+      // IMPORTANT: physical column to avoid "createdAt" error
+      order: [[sequelize.col('created_at'), 'DESC']],
       limit,
       offset,
     });

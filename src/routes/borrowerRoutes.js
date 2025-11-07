@@ -1,4 +1,3 @@
-// routes/borrowers.js
 "use strict";
 
 const express = require('express');
@@ -34,6 +33,11 @@ router.get('/reports/summary',           authenticateUser, borrowerReportsCtrl.g
 router.get('/groups/reports/summary',    authenticateUser, groupReportsCtrl.getGroupSummary);
 router.get('/reports',                   authenticateUser, ctrl.globalBorrowerReport);
 
+/* ---------------- Quick metrics BEFORE :id to avoid collisions ----------- */
+router.get('/count',                     authenticateUser, ctrl.getCount);
+router.get('/stats',                     authenticateUser, ctrl.getStats);
+router.get('/top',                       authenticateUser, ctrl.getTop);
+
 /* ---------------- Groups ---------------- */
 router.get('/groups',                    authenticateUser, (req, res, next) =>
   groupCtrl ? groupCtrl.list(req, res, next) : ctrl.listGroups(req, res, next)
@@ -67,36 +71,36 @@ router.get('/',                          authenticateUser, ctrl.getAllBorrowers)
  */
 router.post('/',                         authenticateUser, requireMulterAny, ctrl.createBorrower);
 
-router.put('/:id',                       authenticateUser, ctrl.updateBorrower);
-router.patch('/:id',                     authenticateUser, ctrl.updateBorrower);
-router.post('/:id/disable',              authenticateUser, ctrl.disableBorrower);
-router.delete('/:id',                    authenticateUser, ctrl.deleteBorrower);
+router.put('/:id(\\d+)',                 authenticateUser, ctrl.updateBorrower);
+router.patch('/:id(\\d+)',               authenticateUser, ctrl.updateBorrower);
+router.post('/:id(\\d+)/disable',        authenticateUser, ctrl.disableBorrower);
+router.delete('/:id(\\d+)',              authenticateUser, ctrl.deleteBorrower);
 
 // Explicit branch assign/unassign
-router.post('/:id/branch',               authenticateUser, ctrl.assignBranch);
-router.delete('/:id/branch',             authenticateUser, ctrl.unassignBranch);
+router.post('/:id(\\d+)/branch',         authenticateUser, ctrl.assignBranch);
+router.delete('/:id(\\d+)/branch',       authenticateUser, ctrl.unassignBranch);
 
 // Nested
-router.get('/:id/loans',                 authenticateUser, ctrl.getLoansByBorrower);
-router.get('/:id/repayments',            authenticateUser, ctrl.getRepaymentsByBorrower);
+router.get('/:id(\\d+)/loans',           authenticateUser, ctrl.getLoansByBorrower);
+router.get('/:id(\\d+)/repayments',      authenticateUser, ctrl.getRepaymentsByBorrower);
 
 // Comments
-router.get('/:id/comments',              authenticateUser, ctrl.listComments);
-router.post('/:id/comments',             authenticateUser, ctrl.addComment);
+router.get('/:id(\\d+)/comments',        authenticateUser, ctrl.listComments);
+router.post('/:id(\\d+)/comments',       authenticateUser, ctrl.addComment);
 
 // Savings
-router.get('/:id/savings',               authenticateUser, ctrl.getSavingsByBorrower);
+router.get('/:id(\\d+)/savings',         authenticateUser, ctrl.getSavingsByBorrower);
 
 // Blacklist
-router.post('/:id/blacklist',            authenticateUser, ctrl.blacklist);
-router.delete('/:id/blacklist',          authenticateUser, ctrl.unblacklist);
+router.post('/:id(\\d+)/blacklist',      authenticateUser, ctrl.blacklist);
+router.delete('/:id(\\d+)/blacklist',    authenticateUser, ctrl.unblacklist);
 
 // KYC
-router.post('/:id/kyc',                  authenticateUser, requireMulterAny, ctrl.uploadKyc);
-router.get('/:id/kyc',                   authenticateUser, ctrl.listKyc);
+router.post('/:id(\\d+)/kyc',            authenticateUser, requireMulterAny, ctrl.uploadKyc);
+router.get('/:id(\\d+)/kyc',             authenticateUser, ctrl.listKyc);
 
 // Per borrower summary & single
-router.get('/:id/report/summary',        authenticateUser, ctrl.summaryReport);
-router.get('/:id',                       authenticateUser, ctrl.getBorrowerById);
+router.get('/:id(\\d+)/report/summary',  authenticateUser, ctrl.summaryReport);
+router.get('/:id(\\d+)',                 authenticateUser, ctrl.getBorrowerById);
 
 module.exports = router;
