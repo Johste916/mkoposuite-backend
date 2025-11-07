@@ -1,6 +1,6 @@
 // controllers/repaymentController.js
 const fs = require("fs");
-const { Op, fn, col, literal } = require("sequelize");
+const { Op, fn, col, literal, Sequelize } = require("sequelize");
 const {
   LoanRepayment,
   LoanPayment,
@@ -9,6 +9,7 @@ const {
   LoanSchedule,
   SavingsTransaction,
   Communication,
+  User,                 // ⬅️ include User for officer name
   sequelize,
 } = require("../models");
 // helper: round to 2dp to avoid 0.01 drift
@@ -21,14 +22,16 @@ const Notifier = require("../services/notifier")({ Communication, Borrower });
 const Gateway = require("../services/paymentGateway")();
 
 /* ============================================================
-   SCHEMA PROBE + SAFE ATTRIBUTE PICKER
+   SCHEMA PROBE + SAFE ATTRIBUTE PICKERS (Loan + LoanSchedule)
    ============================================================ */
 let _loanTableColumns = null; // { [colName]: true }
 async function getLoanTableColumns() {
   if (_loanTableColumns) return _loanTableColumns;
   try {
     const qi = sequelize.getQueryInterface();
-    const desc = await qi.describeTable("loans"); // { colName: {...}, ... }
+    // works with {schema, tableName} or string
+    const tn = Loan.getTableName();
+    const desc = await qi.describeTable(tn);
     _loanTableColumns = Object.fromEntries(Object.keys(desc).map((k) => [k, true]));
   } catch {
     _loanTableColumns = {};
@@ -55,10 +58,40 @@ async function pickExistingLoanAttributes(attrNames = []) {
   return selected.length ? selected : undefined;
 }
 
-const BORROWER_ATTRS = ["id", "name", "phone", "email"];
+/* ---------- LoanSchedule physical column helpers ---------- */
+let _lsCols = null; // { [colName]: true }
+function lsAttrToField(attrName) {
+  const ra = (LoanSchedule && LoanSchedule.rawAttributes) || {};
+  const def = ra[attrName];
+  if (!def) return null;
+  return def.field || attrName;
+}
+async function getLoanScheduleColumns() {
+  if (_lsCols) return _lsCols;
+  try {
+    const qi = sequelize.getQueryInterface();
+    const tn = LoanSchedule.getTableName();
+    const desc = await qi.describeTable(tn);
+    _lsCols = Object.fromEntries(Object.keys(desc).map((k) => [k, true]));
+  } catch {
+    _lsCols = {};
+  }
+  return _lsCols;
+}
+function qTableName(Model) {
+  const tn = Model.getTableName();
+  return typeof tn === "string" ? `"${tn}"` : `"${tn.schema}"."${tn.tableName}"`;
+}
+function lsP(colCamel, fallbackSnake) {
+  // quote physical column for LoanSchedule
+  const field = lsAttrToField(colCamel) || fallbackSnake || colCamel;
+  return `"${field}"`;
+}
+
+const BORROWER_ATTRS = ["id", "name", "firstName", "lastName", "phone", "branchId", "email"];
 
 // Default minimal attributes safe across schema variations
-const LOAN_BASE_ATTRS = ["id", "borrowerId", "currency", "reference"];
+const LOAN_BASE_ATTRS = ["id", "borrowerId", "currency", "reference", "status", "branchId", "createdAt"];
 // When we need to compute balances
 const LOAN_AMOUNT_ATTRS = [...LOAN_BASE_ATTRS, "amount", "totalInterest", "outstanding", "totalPaid"];
 
@@ -70,14 +103,34 @@ async function loanInclude({ where = {}, borrowerWhere, needAmounts = false } = 
     model: Borrower,
     attributes: BORROWER_ATTRS,
     ...(borrowerWhere ? { where: borrowerWhere } : {}),
+    required: !!borrowerWhere,
   };
 
-  return {
+  const inc = {
     model: Loan,
     ...(safeAttrs ? { attributes: safeAttrs } : {}),
     where,
     include: [borrowerInclude],
   };
+
+  // Try to include loan officer if association exists
+  if (User && Loan.associations) {
+    const officerAssoc =
+      Loan.associations.loanOfficer ||
+      Loan.associations.Officer ||
+      Loan.associations.User ||
+      null;
+    if (officerAssoc) {
+      inc.include.push({
+        model: User,
+        as: officerAssoc.as || "loanOfficer",
+        attributes: ["id", "name", "firstName", "lastName", "email", "branchId"],
+        required: false,
+      });
+    }
+  }
+
+  return inc;
 }
 
 async function loanRefSupported() {
@@ -112,6 +165,35 @@ function getRepaymentDateValue(r) {
 }
 function getRepaymentAmountValue(r) {
   return Number(r.amount != null ? r.amount : r.amountPaid != null ? r.amountPaid : 0);
+}
+
+/* ===== Names, outstanding, alias helpers ===== */
+const fullName = (row) => {
+  const j = row?.toJSON ? row.toJSON() : row || {};
+  const explicit = j.name || null;
+  const composed = [j.firstName, j.lastName].filter(Boolean).join(" ");
+  return (explicit && explicit.trim()) || (composed && composed.trim()) || null;
+};
+const computeOutstandingFromLoanRow = (j) => {
+  const pick = (obj, names) => {
+    for (const n of names) if (obj[n] != null) return obj[n];
+    return undefined;
+  };
+  const tot = pick(j, ["outstanding", "outstandingAmount", "outstandingTotal"]);
+  if (typeof tot === "number") return tot;
+  const p = pick(j, ["principalOutstanding", "principal_outstanding"]);
+  const i = pick(j, ["interestOutstanding", "interest_outstanding"]);
+  if (typeof p === "number" || typeof i === "number") return Number(p || 0) + Number(i || 0);
+  return Number(j.amount || 0) - Number(j.totalPaid || 0);
+};
+function resolveAssocAlias(Host, Target) {
+  if (!Host?.associations) return null;
+  for (const [k, a] of Object.entries(Host.associations)) {
+    if (a?.target === Target) return a.as || k;
+  }
+  if (Target === Borrower) return Host.associations?.Borrower?.as || "Borrower";
+  if (Target === User) return Host.associations?.loanOfficer?.as || "loanOfficer";
+  return null;
 }
 
 /* ===== Safely update loan totals (avoid touching non-existent columns) ===== */
@@ -319,6 +401,205 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     await row.update(updateDoc, { transaction: t });
   }
 }
+
+
+/* ============================================================
+   🗓️  REPAYMENT SCHEDULE LIST  (New for your page)
+   - Joins Loan → Borrower and Loan → Officer safely
+   - Computes earliest unpaid installment (LoanSchedule) per loan
+   - Supports filters: q, branchId, officerId, status, dueRange
+   ============================================================ */
+async function buildNextDueLiteral(dueRange = "next30") {
+  if (!LoanSchedule || !sequelize) return literal("NULL");
+  await getLoanScheduleColumns(); // warm cache
+
+  const qTbl = qTableName(LoanSchedule);
+  const loanIdCol = lsP("loanId", "loan_id");
+  const dueCol    = lsP("dueDate", "due_date");
+
+  const pCol   = lsP("principal");
+  const iCol   = lsP("interest");
+  const fCol   = lsP("fees");
+  const penCol = lsP("penalties", "penalty");
+
+  const ppCol   = lsP("principalPaid", "principal_paid");
+  const ipCol   = lsP("interestPaid",  "interest_paid");
+  const fpCol   = lsP("feesPaid",      "fees_paid");
+  const penpCol = lsP("penaltiesPaid", "penalties_paid");
+
+  const unpaidCond = `COALESCE(${ppCol},0)+COALESCE(${ipCol},0)+COALESCE(${fpCol},0)+COALESCE(${penpCol},0) < COALESCE(${pCol},0)+COALESCE(${iCol},0)+COALESCE(${fCol},0)+COALESCE(${penCol},0)`;
+
+  let rangeSql = "";
+  const key = String(dueRange).toLowerCase();
+  if (key === "overdue") {
+    rangeSql = `AND ls.${dueCol} < NOW()`;
+  } else if (key === "next7" || key === "next_7" || key === "next 7 days") {
+    rangeSql = `AND ls.${dueCol} >= NOW() AND ls.${dueCol} <= NOW() + INTERVAL '7 days'`;
+  } else if (key === "all") {
+    rangeSql = ``; // any unpaid regardless of date
+  } else {
+    // default next30
+    rangeSql = `AND ls.${dueCol} >= NOW() AND ls.${dueCol} <= NOW() + INTERVAL '30 days'`;
+  }
+
+  const sql = `(SELECT MIN(ls.${dueCol})
+                  FROM ${qTbl} ls
+                 WHERE ls.${loanIdCol} = "Loan"."id"
+                   AND (${unpaidCond})
+                   ${rangeSql})`;
+  return literal(sql);
+}
+
+const listSchedule = async (req, res) => {
+  try {
+    if (!Loan) return res.json({ items: [], total: 0 });
+
+    const {
+      q = "",
+      branchId,
+      officerId,
+      status = "active",          // "active" | "all" | explicit code
+      dueRange = "next30",        // "next30" | "next7" | "overdue" | "all"
+      page = 1,
+      pageSize = 50,
+      includeClosed,              // truthy to include closed/settled
+    } = req.query;
+
+    const limit = Math.max(1, Number(pageSize));
+    const offset = (Math.max(1, Number(page)) - 1) * limit;
+
+    // Where on Loan
+    const loanCols = await getLoanTableColumns();
+    const where = {};
+
+    // Status logic
+    const wantAll = String(status).toLowerCase() === "all" || String(includeClosed).toLowerCase() === "true";
+    if (!wantAll && loanCols["status"]) {
+      const s = String(status).toLowerCase();
+      if (s === "active") {
+        where.status = { [Op.in]: ["active", "disbursed", "current"] };
+      } else {
+        where.status = status;
+      }
+    }
+
+    // Officer filter
+    if ((loanCols["loan_officer_id"] || loanCols["loanOfficerId"]) && officerId) {
+      where.loanOfficerId = officerId;
+    }
+
+    // Branch filter: prefer Loan.branchId; otherwise via Borrower.branchId
+    let borrowerWhere;
+    if (branchId) {
+      if (loanCols["branch_id"] || loanCols["branchId"]) {
+        where.branchId = branchId;
+      } else {
+        borrowerWhere = { ...(borrowerWhere || {}), branchId };
+      }
+    }
+
+    // Search by loan ref / borrower
+    const likeOp = (sequelize?.getDialect?.() === "postgres") ? Op.iLike : Op.like;
+    if (q && q.trim()) {
+      const needle = `%${q.trim()}%`;
+      where[Op.or] = [
+        ...(loanCols["reference"] ? [{ reference: { [likeOp]: needle } }] : []),
+        ...(loanCols["code"]      ? [{ code:      { [likeOp]: needle } }] : []),
+        ...(loanCols["number"]    ? [{ number:    { [likeOp]: needle } }] : []),
+      ];
+      borrowerWhere = {
+        ...(borrowerWhere || {}),
+        [Op.or]: [{ name: { [likeOp]: needle } }, { phone: { [likeOp]: needle } }],
+      };
+    }
+
+    // figure out include aliases
+    const borrowerAlias = resolveAssocAlias(Loan, Borrower) || "Borrower";
+    const officerAlias  = resolveAssocAlias(Loan, User)     || "loanOfficer";
+
+    // include
+    const include = [];
+    if (Borrower && Loan.associations && Loan.associations[borrowerAlias]) {
+      include.push({
+        model: Borrower,
+        as: borrowerAlias,
+        attributes: BORROWER_ATTRS,
+        ...(borrowerWhere ? { where: borrowerWhere, required: true } : { required: false }),
+      });
+    }
+    if (User && Loan.associations && Loan.associations[officerAlias]) {
+      include.push({
+        model: User,
+        as: officerAlias,
+        attributes: ["id", "name", "firstName", "lastName", "email"],
+        required: false,
+      });
+    }
+
+    // compute next due date per loan from LoanSchedule
+    const nextDueLit = await buildNextDueLiteral(dueRange);
+
+    // Choose a safe createdAt / id fallback for deterministic ordering
+    const createdAttr =
+      (Loan.rawAttributes?.createdAt && "createdAt") ||
+      (Loan.rawAttributes?.created_at && "created_at") ||
+      "id";
+
+    const { rows, count } = await Loan.findAndCountAll({
+      where,
+      include,
+      attributes: {
+        include: [[nextDueLit, "nextDueDate"]],
+      },
+      order: [
+        [sequelize.literal('"nextDueDate" IS NULL'), "ASC"], // non-null first
+        [sequelize.literal('"nextDueDate"'), "ASC"],
+        [createdAttr, "DESC"],
+      ],
+      limit,
+      offset,
+      subQuery: false,
+    });
+
+    const items = rows.map((r) => {
+      const j = r.toJSON ? r.toJSON() : r;
+
+      // loan ref
+      const loanRef = j.reference || j.code || j.number || `LN-${j.id}`;
+
+      // borrower & officer names
+      const b = j[borrowerAlias];
+      const o = j[officerAlias];
+      const borrowerName = fullName(b) || "";
+      const officerName  = fullName(o) || (o?.email || "") || "";
+
+      // outstanding
+      const outstanding = Number(computeOutstandingFromLoanRow(j) || 0);
+
+      return {
+        id: j.id,
+        loanRef,
+        borrowerId: b?.id || null,
+        borrowerName,
+        officerId: o?.id || null,
+        officerName,
+        outstanding,
+        nextDueDate: j.nextDueDate || null,
+        status: j.status || j.state || "—",
+      };
+    });
+
+    res.json({
+      items,
+      total: count,
+      page: Number(page),
+      limit,
+    });
+  } catch (err) {
+    console.error("repayment schedule list error:", err);
+    res.status(500).json({ error: "Failed to load repayment schedule" });
+  }
+};
 
 
 /* =========================
@@ -971,7 +1252,7 @@ const getRepaymentsSummary = async (req, res) => {
         [fn("SUM", col(amtAttr)), "amount"],
       ],
       group: ["method"],
-      order: [[literal("amount"), "DESC"]],
+      order: [[literal("amount"), "DESC"]], // sort by sum desc
     });
 
     const byMethod = byMethodRows.map((r) => ({
@@ -1314,6 +1595,9 @@ const deleteRepayment = async (req, res) => {
    EXPORTS
 ========================== */
 module.exports = {
+  // schedule (NEW)
+  listSchedule,
+
   // core
   getAllRepayments,
   getRepaymentsByBorrower,
