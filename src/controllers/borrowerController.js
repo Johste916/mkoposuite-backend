@@ -1,7 +1,6 @@
-// controllers/borrowerController.js
 "use strict";
 
-const { Op } = require("sequelize");
+const { Op, fn, col, literal } = require("sequelize");
 const models = require("../models");
 const fs = require("fs");
 const path = require("path");
@@ -581,6 +580,13 @@ exports.getBorrowerById = async (req, res) => {
   try {
     if (!Borrower) return res.status(404).json({ error: "Borrower not found" });
 
+    // STRICT numeric id guard to avoid /count|/stats|/top hitting here
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) {
+      return res.status(400).json({ error: "Invalid borrower id" });
+    }
+    const numericId = Number(rawId);
+
     const include = [];
     if (Branch && Borrower.associations?.Branch) {
       include.push({ model: Branch, as: "Branch", attributes: ["id", "name"] });
@@ -589,7 +595,7 @@ exports.getBorrowerById = async (req, res) => {
       include.push({ model: User, as: "loanOfficer", attributes: ["id", "name", "firstName", "lastName"] });
     }
 
-    const b = await Borrower.findByPk(req.params.id, { include });
+    const b = await Borrower.findByPk(numericId, { include });
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     const derived = await computeBorrowerDerived(b.id);
@@ -610,7 +616,10 @@ exports.getBorrowerById = async (req, res) => {
 exports.updateBorrower = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     // Single-branch policy
@@ -724,7 +733,11 @@ exports.updateBorrower = async (req, res) => {
 exports.disableBorrower = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
     await b.update({ status: "disabled" });
     const derived = await computeBorrowerDerived(b.id);
@@ -738,7 +751,11 @@ exports.disableBorrower = async (req, res) => {
 exports.deleteBorrower = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     await b.destroy();
@@ -756,7 +773,10 @@ exports.assignBranch = async (req, res) => {
     if (!Borrower.rawAttributes.branchId)
       return res.status(422).json({ error: "Borrower model has no branchId column" });
 
-    const b = await Borrower.findByPk(req.params.id);
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     const newBranchId = Number.parseInt(String(req.body?.branchId), 10);
@@ -801,7 +821,10 @@ exports.unassignBranch = async (req, res) => {
     if (!Borrower.rawAttributes.branchId)
       return res.status(422).json({ error: "Borrower model has no branchId column" });
 
-    const b = await Borrower.findByPk(req.params.id);
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     const allowNull = Borrower.rawAttributes.branchId.allowNull !== false;
@@ -846,7 +869,11 @@ exports.listLoanOfficers = async (req, res) => {
 exports.assignOfficer = async (req, res) => {
   try {
     if (!Borrower || !User) return res.status(501).json({ error: "Models not available" });
-    const borrowerId = req.params.id;
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+    const borrowerId = Number(rawId);
+
     const { loanOfficerId } = req.body || {};
     if (!loanOfficerId) return res.status(400).json({ error: "loanOfficerId is required" });
 
@@ -891,7 +918,11 @@ exports.assignOfficer = async (req, res) => {
 exports.unassignOfficer = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     if (!canAssignLoanOfficer(req))
@@ -915,7 +946,10 @@ exports.getLoansByBorrower = async (req, res) => {
   try {
     if (!Loan) return res.json([]);
 
-    const borrower = await Borrower.findByPk(req.params.id, { attributes: ["id", "createdAt"] });
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.json([]);
+
+    const borrower = await Borrower.findByPk(Number(rawId), { attributes: ["id", "createdAt"] });
     if (!borrower) return res.json([]);
 
     const loanCols = await getExistingColumns(Loan);
@@ -941,6 +975,10 @@ exports.getLoansByBorrower = async (req, res) => {
 exports.getRepaymentsByBorrower = async (req, res) => {
   try {
     if (!Loan || !LoanRepayment) return res.json([]);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.json([]);
+
     const repayAttrs = await safeAttributes(LoanRepayment, [
       "id",
       "loanId",
@@ -953,7 +991,7 @@ exports.getRepaymentsByBorrower = async (req, res) => {
     ]);
     const rows = await LoanRepayment.findAll({
       attributes: repayAttrs,
-      include: [{ model: Loan, where: { borrowerId: req.params.id }, attributes: [] }],
+      include: [{ model: Loan, where: { borrowerId: Number(rawId) }, attributes: [] }],
       order: [["dueDate", "DESC"], ["createdAt", "DESC"]],
       limit: 500,
     });
@@ -968,8 +1006,12 @@ exports.getRepaymentsByBorrower = async (req, res) => {
 exports.listComments = async (req, res) => {
   try {
     if (!BorrowerComment) return res.json([]);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.json([]);
+
     const rows = await BorrowerComment.findAll({
-      where: { borrowerId: req.params.id },
+      where: { borrowerId: Number(rawId) },
       order: [["createdAt", "DESC"]],
       limit: 200,
     });
@@ -987,20 +1029,24 @@ exports.addComment = async (req, res) => {
       return res.status(400).json({ error: "content is required" });
 
     if (!Borrower) return res.status(404).json({ error: "Borrower not found" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     if (!BorrowerComment) {
       return res.status(201).json({
         id: 0,
-        borrowerId: req.params.id,
+        borrowerId: Number(rawId),
         content: content.trim(),
         createdAt: new Date().toISOString(),
       });
     }
 
     const created = await BorrowerComment.create({
-      borrowerId: req.params.id,
+      borrowerId: Number(rawId),
       content: content.trim(),
       userId: req.user?.id || null,
     });
@@ -1016,6 +1062,15 @@ exports.addComment = async (req, res) => {
 exports.getSavingsByBorrower = async (req, res) => {
   try {
     if (!SavingsTransaction) {
+      return res.json({
+        balance: 0,
+        transactions: [],
+        totals: { deposits: 0, withdrawals: 0, charges: 0, interest: 0 },
+      });
+    }
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) {
       return res.json({
         balance: 0,
         transactions: [],
@@ -1041,7 +1096,7 @@ exports.getSavingsByBorrower = async (req, res) => {
     const hasDate = existingCols.includes("date");
 
     const txs = await SavingsTransaction.findAll({
-      where: { borrowerId: req.params.id },
+      where: { borrowerId: Number(rawId) },
       attributes: txAttrs,
       order: hasDate ? [["date", "DESC"], ["createdAt", "DESC"]] : [["createdAt", "DESC"]],
       limit: 500,
@@ -1086,7 +1141,11 @@ exports.getSavingsByBorrower = async (req, res) => {
 exports.blacklist = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     const cols = await getExistingColumns(Borrower);
@@ -1123,7 +1182,11 @@ exports.blacklist = async (req, res) => {
 exports.unblacklist = async (req, res) => {
   try {
     if (!Borrower) return res.status(501).json({ error: "Borrower model not available" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     const cols = await getExistingColumns(Borrower);
@@ -1146,12 +1209,15 @@ exports.unblacklist = async (req, res) => {
 exports.listBlacklisted = async (_req, res) => {
   try {
     if (!Borrower) return res.json([]);
-    // Only filter if status column exists to avoid SQL errors in legacy schemas
     const hasStatus = !!Borrower.rawAttributes?.status;
-    const borrowers = await Borrower.findAll({
+    const hasBlacklistedAt = !!Borrower.rawAttributes?.blacklistedAt;
+
+    const options = {
       ...(hasStatus ? { where: { status: "blacklisted" } } : {}),
-      order: [["blacklistedAt", "DESC"]],
-    });
+    };
+    if (hasBlacklistedAt) options.order = [["blacklistedAt", "DESC"]];
+
+    const borrowers = await Borrower.findAll(options);
 
     const items = borrowers.map((b) => {
       const j = b.toJSON ? b.toJSON() : b;
@@ -1188,7 +1254,11 @@ exports.listBlacklisted = async (_req, res) => {
 exports.uploadKyc = async (req, res) => {
   try {
     if (!Borrower) return res.status(404).json({ error: "Borrower not found" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     const files = (req.files || (req.file ? [req.file] : [])).map((f) => ({
@@ -1223,7 +1293,11 @@ exports.uploadKyc = async (req, res) => {
 exports.listKyc = async (req, res) => {
   try {
     if (!Borrower) return res.status(404).json({ error: "Borrower not found" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     if (!KYCDocument) return res.json({ borrowerId: b.id, items: [] });
@@ -1243,7 +1317,10 @@ exports.listKyc = async (req, res) => {
 exports.listKycQueue = async (_req, res) => {
   try {
     if (!Borrower) return res.json([]);
-    const borrowers = await Borrower.findAll({ where: { status: "pending_kyc" } });
+    const where = Borrower.rawAttributes?.status
+      ? { status: "pending_kyc" }
+      : {};
+    const borrowers = await Borrower.findAll({ where });
     res.json(borrowers.map(toApi));
   } catch (error) {
     console.error("listKycQueue error:", error);
@@ -1518,7 +1595,11 @@ exports.importBorrowers = async (req, res) => {
 exports.summaryReport = async (req, res) => {
   try {
     if (!Borrower) return res.status(404).json({ error: "Borrower not found" });
-    const b = await Borrower.findByPk(req.params.id);
+
+    const rawId = String(req.params.id || "");
+    if (!/^\d+$/.test(rawId)) return res.status(400).json({ error: "Invalid borrower id" });
+
+    const b = await Borrower.findByPk(Number(rawId));
     if (!b) return res.status(404).json({ error: "Borrower not found" });
 
     let loans = [];
@@ -1607,5 +1688,76 @@ exports.globalBorrowerReport = async (req, res) => {
   } catch (error) {
     console.error("globalBorrowerReport error:", error);
     res.status(500).json({ error: "Failed to generate borrower report" });
+  }
+};
+
+/* -------------------- NEW: Count / Stats / Top -------------------- */
+exports.getCount = async (req, res) => {
+  try {
+    if (!Borrower) return res.json({ count: 0 });
+    const where = {};
+    if (req.query.status && Borrower.rawAttributes?.status) {
+      where.status = req.query.status;
+    }
+    if (req.query.branchId) {
+      where.branchId = req.query.branchId;
+    }
+    const count = await Borrower.count({ where });
+    res.json({ count });
+  } catch (e) {
+    console.error("getCount error:", e);
+    res.status(500).json({ error: "Failed to count borrowers" });
+  }
+};
+
+exports.getStats = async (_req, res) => {
+  try {
+    if (!Borrower) return res.json({ total: 0, byStatus: {} });
+
+    const total = await Borrower.count();
+
+    let byStatus = {};
+    if (Borrower.rawAttributes?.status) {
+      const rows = await Borrower.findAll({
+        attributes: ["status", [fn("COUNT", col("id")), "count"]],
+        group: ["status"],
+      });
+      rows.forEach((r) => {
+        const j = r.toJSON();
+        byStatus[j.status || "unknown"] = Number(j.count || 0);
+      });
+    }
+
+    res.json({ total, byStatus });
+  } catch (e) {
+    console.error("getStats error:", e);
+    res.status(500).json({ error: "Failed to build stats" });
+  }
+};
+
+exports.getTop = async (req, res) => {
+  try {
+    if (!Borrower) return res.json({ items: [] });
+
+    const limit = Math.max(1, Number(req.query.limit || 10));
+
+    // Take the most recent borrowers, then compute derived outstanding and sort by it
+    const recent = await Borrower.findAll({
+      order: [["createdAt", "DESC"]],
+      limit: Math.max(limit * 3, limit), // overfetch a bit
+    });
+
+    const withDerived = await Promise.all(
+      recent.map(async (b) => {
+        const d = await computeBorrowerDerived(b.id);
+        return { ...toApi(b), outstanding: d.outstanding };
+      })
+    );
+
+    withDerived.sort((a, b) => (b.outstanding || 0) - (a.outstanding || 0));
+    res.json({ items: withDerived.slice(0, limit) });
+  } catch (e) {
+    console.error("getTop error:", e);
+    res.status(500).json({ error: "Failed to fetch top borrowers" });
   }
 };
