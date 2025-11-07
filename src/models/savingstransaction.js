@@ -1,4 +1,3 @@
-// backend/src/models/SavingsTransaction.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
@@ -6,6 +5,7 @@ module.exports = (sequelize, DataTypes) => {
     'SavingsTransaction',
     {
       id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+
       borrowerId: { type: DataTypes.INTEGER, allowNull: false },
 
       type: {
@@ -24,16 +24,18 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: 'pending',
       },
-      createdBy: { type: DataTypes.STRING, allowNull: true },   // keep as string to avoid int/uuid mismatch
-      approvedBy: { type: DataTypes.STRING, allowNull: true },
-      approvedAt: { type: DataTypes.DATE, allowNull: true },
-      approvalComment: { type: DataTypes.TEXT, allowNull: true },
+      createdBy:       { type: DataTypes.STRING, allowNull: true }, // string to avoid int/uuid mismatch
+      approvedBy:      { type: DataTypes.STRING, allowNull: true },
+      approvedAt:      { type: DataTypes.DATE,  allowNull: true },
+      approvalComment: { type: DataTypes.TEXT,  allowNull: true },
 
       reversed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     },
     {
-      tableName: 'SavingsTransactions',
-      timestamps: true,
+      tableName: 'SavingsTransactions',      // keep as-is to match existing table
+      freezeTableName: true,
+      timestamps: true,                      // aligns with global camel createdAt/updatedAt
+      underscored: false,
       indexes: [
         { fields: ['borrowerId'] },
         { fields: ['type'] },

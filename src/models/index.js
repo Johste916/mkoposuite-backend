@@ -72,15 +72,20 @@ db.Branch        = tryLoad(() => require('./branch')(sequelize, DataTypes), 'Bra
 db.Borrower      = tryLoad(() => require('./borrower')(sequelize, DataTypes), 'Borrower');
 db.Loan          = tryLoad(() => require('./loan')(sequelize, DataTypes), 'Loan');
 db.LoanRepayment = tryLoad(() => require('./loanrepayment')(sequelize, DataTypes), 'LoanRepayment');
-db.LoanPayment   = tryLoad(() => require('./loanpayment')(sequelize, DataTypes), 'LoanPayment');
 
-/* 🆕 Ensure LoanSchedule is registered regardless of file casing */
+/* LoanPayment: allow either file casing; prefer capitalized */
+db.LoanPayment =
+  tryLoad(() => require('./LoanPayment')(sequelize, DataTypes), 'LoanPayment') ||
+  tryLoad(() => require('./loanpayment')(sequelize, DataTypes), 'LoanPayment');
+
+/* LoanSchedule: handle common casings */
 db.LoanSchedule =
-  tryLoad(() => require('./loanSchedule')(sequelize, DataTypes), 'LoanSchedule') ||
-  tryLoad(() => require('./loanSchedule')(sequelize, DataTypes), 'LoanSchedule'); 
+  tryLoad(() => require('./LoanSchedule')(sequelize, DataTypes), 'LoanSchedule') ||
+  tryLoad(() => require('./loanSchedule')(sequelize, DataTypes), 'loanSchedule') ||
+  tryLoad(() => require('./loanschedule')(sequelize, DataTypes), 'loanschedule');
 
-db.Setting       = require('./setting')(sequelize, DataTypes);
-db.LoanProduct   = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes), 'LoanProduct');
+db.Setting     = require('./setting')(sequelize, DataTypes);
+db.LoanProduct = tryLoad(() => require('./LoanProduct')(sequelize, DataTypes), 'LoanProduct');
 
 /* ✅ Banks & Transactions */
 db.Bank            = tryLoad(() => require('./bank')(sequelize, DataTypes), 'Bank');
@@ -100,8 +105,10 @@ db.UserRole       = tryLoad(() => require('./UserRole')(sequelize, DataTypes), '
 db.Permission     = tryLoad(() => require('./Permission')(sequelize, DataTypes), 'Permission');
 db.RolePermission = tryLoad(() => require('./RolePermission')(sequelize, DataTypes), 'RolePermission');
 
-/* Savings (required) */
-db.SavingsTransaction = tryLoad(() => require('./savingstransaction')(sequelize, DataTypes), 'SavingsTransaction');
+/* Savings (required) — support both casings */
+db.SavingsTransaction =
+  tryLoad(() => require('./SavingsTransaction')(sequelize, DataTypes), 'SavingsTransaction') ||
+  tryLoad(() => require('./savingstransaction')(sequelize, DataTypes), 'SavingsTransaction');
 
 /* Optional modules */
 db.ReportSubscription      = tryLoad(() => require('./ReportSubscription')(sequelize, DataTypes), 'ReportSubscription');
@@ -143,6 +150,9 @@ db.PlanEntitlement = tryLoad(() => require('./planentitlement')(sequelize, DataT
 db.BorrowerGroup       = tryLoad(() => require('./borrowergroup')(sequelize, DataTypes), 'BorrowerGroup');
 db.BorrowerGroupMember = tryLoad(() => require('./borrowergroupmember')(sequelize, DataTypes), 'BorrowerGroupMember');
 
+/* Optional: multi-branch mapping via user_branches_rt (UserBranch) if present */
+db.UserBranch = tryLoad(() => require('./UserBranch')(sequelize, DataTypes), 'UserBranch');
+
 /* ------------------------------------------------------------------
    ✅ Repayment model compatibility shim
 ------------------------------------------------------------------- */
@@ -179,7 +189,6 @@ if (db.Loan && db.Borrower) {
 }
 
 if (db.Loan && db.Branch) {
-  // Keep the explicit alias only to avoid ambiguity
   db.Loan.belongsTo(db.Branch, { foreignKey: 'branchId', as: 'branch' });
   db.Branch.hasMany(db.Loan,   { foreignKey: 'branchId', as: 'loans' });
 }
@@ -427,7 +436,7 @@ if (db.BorrowerGroup && db.Borrower && db.BorrowerGroupMember) {
   });
 }
 
-/* ---------- RBAC associations (THIS FIXES YOUR INCLUDE ISSUE) ---------- */
+/* ---------- RBAC associations ---------- */
 if (db.User && db.Role) {
   const throughUR = db.UserRole || 'UserRoles';
   db.User.belongsToMany(db.Role, {
@@ -478,12 +487,6 @@ if (db.User && db.Branch && db.UserBranch) {
 
 /* ------------------------------------------------------------------
    ✅ Runtime auto-alias shim
-   - If an include has a model but no `as`, we fill the correct alias
-     based on defined associations for the source model.
-   - Covers findAll, findOne, findAndCountAll, count, aggregate.
-   - This unblocks queries like:
-       LoanPayment.findAll({ include: [{ model: Loan }] })
-     even though LoanPayment↔Loan is defined with { as: 'loan' }.
 ------------------------------------------------------------------- */
 (() => {
   try {
@@ -500,13 +503,10 @@ if (db.User && db.Branch && db.UserBranch) {
     const normalizeArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 
     function resolveAliasFor(sourceModel, inc) {
-      // Already has alias? keep it.
       if (!sourceModel || inc.as || !inc.model) return inc;
-
       const assocs = sourceModel.associations || {};
       const all = Object.values(assocs);
 
-      // If foreignKey is provided, prefer match on both target + foreignKey
       if (inc.foreignKey) {
         const byFK = all.find(a =>
           a && a.target === inc.model && String(a.foreignKey) === String(inc.foreignKey)
@@ -514,24 +514,21 @@ if (db.User && db.Branch && db.UserBranch) {
         if (byFK) { inc.as = byFK.as; return inc; }
       }
 
-      // Otherwise, pick the first association whose target matches this model
       const byTarget = all.find(a => a && a.target === inc.model);
       if (byTarget) {
         inc.as = byTarget.as;
         return inc;
       }
-      return inc; // leave as-is
+      return inc;
     }
 
     function isModelClass(x) {
-      try {
-        return x && x.prototype && x.prototype instanceof Model;
-      } catch { return false; }
+      try { return x && x.prototype && x.prototype instanceof Model; }
+      catch { return false; }
     }
 
     function fixIncludesTree(include, sourceModel) {
       const list = normalizeArray(include).map(raw => {
-        // Allow shorthand form: { model: X } or X
         const inc = (raw && raw.model)
           ? { ...raw }
           : isModelClass(raw)
@@ -539,8 +536,6 @@ if (db.User && db.Branch && db.UserBranch) {
             : { ...(raw || {}) };
 
         resolveAliasFor(sourceModel, inc);
-
-        // Recurse for nested includes
         if (inc.include) inc.include = fixIncludesTree(inc.include, inc.model);
         return inc;
       });
@@ -554,9 +549,9 @@ if (db.User && db.Branch && db.UserBranch) {
       return orig.call(this, options, ...rest);
     };
 
-    if (Model.findAll)           Model.findAll           = wrap(Model.findAll);
-    if (Model.findOne)           Model.findOne           = wrap(Model.findOne);
-    if (Model.findAndCountAll)   Model.findAndCountAll   = wrap(Model.findAndCountAll);
+    if (Model.findAll)         Model.findAll         = wrap(Model.findAll);
+    if (Model.findOne)         Model.findOne         = wrap(Model.findOne);
+    if (Model.findAndCountAll) Model.findAndCountAll = wrap(Model.findAndCountAll);
 
     if (Model.count) {
       const orig = Model.count;

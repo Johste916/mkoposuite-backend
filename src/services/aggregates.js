@@ -14,7 +14,7 @@ const isMissing = (e) => e?.original?.code === '42P01' || e?.parent?.code === '4
 async function recomputeLoanAggregates(loanId, tx = null) {
   const models = M();
   const Loan = models.Loan || models.Loans;
-  const Rep = models.LoanRepayment || models.LoanRepayments || models.LoanPayments;
+  const Rep  = models.LoanRepayment || models.LoanRepayments || models.LoanPayments;
   if (!Loan || !Rep) return;
 
   const loan = await Loan.findByPk(loanId, { transaction: tx });
@@ -25,25 +25,35 @@ async function recomputeLoanAggregates(loanId, tx = null) {
   if (has(Rep, 'status')) repWhere.status = { [Op.in]: ['posted', 'approved', 'completed', 'success'] };
   if (has(Rep, 'voided')) repWhere.voided = false;
 
-  const [{ totalPaid = 0 }] = await Rep.findAll({
-    where: repWhere,
-    attributes: [[sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('amount')), 0), 'totalPaid']],
-    raw: true,
-    transaction: tx,
-  });
+  // <-- FIX: choose the correct amount column dynamically
+  const amountCol =
+    has(Rep, 'amountPaid') ? 'amountPaid' :
+    has(Rep, 'amount')     ? 'amount'     :
+    null;
 
-  const L = Loan; // shorthand for attribute checks
-  const principalKey = pick(L, ['principal', 'principalAmount', 'amount', 'loanAmount']);
-  const feesKey      = pick(L, ['feesTotal', 'totalFees', 'fees']);
-  const totalKey     = pick(L, ['totalDue', 'total', 'totalAmount']);
-  const repaidKey    = pick(L, ['totalRepaid', 'amountRepaid', 'repaid']);
+  let paid = 0;
+  if (amountCol) {
+    const rows = await Rep.findAll({
+      where: repWhere,
+      attributes: [[sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col(amountCol)), 0), 'totalPaid']],
+      raw: true,
+      transaction: tx,
+    });
+    paid = Number(rows?.[0]?.totalPaid || 0);
+  }
+
+  // Determine loan columns dynamically
+  const L = Loan;
+  const principalKey   = pick(L, ['principal', 'principalAmount', 'amount', 'loanAmount']);
+  const feesKey        = pick(L, ['feesTotal', 'totalFees', 'fees']);
+  const totalKey       = pick(L, ['totalDue', 'total', 'totalAmount']);
+  const repaidKey      = pick(L, ['totalRepaid', 'amountRepaid', 'repaid']);
   const outstandingKey = pick(L, ['outstanding', 'principalOutstanding', 'balanceOutstanding', 'remainingAmount']);
-  const statusKey    = pick(L, ['status', 'loanStatus']);
+  const statusKey      = pick(L, ['status', 'loanStatus']);
 
-  const principal = principalKey ? Number(loan[principalKey] || 0) : 0;
-  const fees      = feesKey ? Number(loan[feesKey] || 0) : 0;
-  const totalDue  = totalKey ? Number(loan[totalKey] || (principal + fees)) : (principal + fees);
-  const paid      = Number(totalPaid || 0);
+  const principal   = principalKey ? Number(loan[principalKey] || 0) : 0;
+  const fees        = feesKey ? Number(loan[feesKey] || 0) : 0;
+  const totalDue    = totalKey ? Number(loan[totalKey] || (principal + fees)) : (principal + fees);
   const outstanding = Math.max(0, totalDue - paid);
 
   const patch = {};
@@ -98,9 +108,9 @@ async function recomputeBorrowerAggregates(borrowerId, tx = null) {
   const totalOutstanding = Math.max(0, totalDue - totRepaid);
 
   const B = Borrower;
-  const dueKey   = pick(B, ['totalDue', 'loansTotalDue']);
-  const outKey   = pick(B, ['totalOutstanding', 'outstanding', 'loansOutstanding']);
-  const paidKey  = pick(B, ['totalRepaid', 'loansRepaid']);
+  const dueKey  = pick(B, ['totalDue', 'loansTotalDue']);
+  const outKey  = pick(B, ['totalOutstanding', 'outstanding', 'loansOutstanding']);
+  const paidKey = pick(B, ['totalRepaid', 'loansRepaid']);
 
   const patch = {};
   if (dueKey)  patch[dueKey] = totalDue;
@@ -130,7 +140,6 @@ async function refreshReportMatviews() {
 async function recomputeLoanAndBorrower(loanId, borrowerId, tx = null) {
   const out = await recomputeLoanAggregates(loanId, tx);
   if (borrowerId) await recomputeBorrowerAggregates(borrowerId, tx);
-  // Optionally keep report MV fresh
   if (process.env.REFRESH_REPORTS_ON_WRITE === '1') await refreshReportMatviews();
   return out;
 }

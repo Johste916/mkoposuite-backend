@@ -1,60 +1,46 @@
 // backend/src/models/AuditLog.js
+'use strict';
+
 module.exports = (sequelize, DataTypes) => {
   const AuditLog = sequelize.define(
     'AuditLog',
     {
-      id: {
-        type: DataTypes.INTEGER,
-        autoIncrement: true,
-        primaryKey: true,
-      },
+      id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
 
-      // IMPORTANT: Users.id is UUID in your DB — match that here
+      // Users.id is UUID in your DB — keep mapping to snake column
       userId: {
         field: 'user_id',
         type: DataTypes.UUID,
         allowNull: true,
-        references: { model: 'Users', key: 'id' }, // quoted table "Users"
+        references: { model: 'Users', key: 'id' },
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
       },
 
-      // Your Branch PK is integer (per your existing models)
+      // Branch PK is integer
       branchId: {
         field: 'branch_id',
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: { model: 'branches', key: 'id' }, // unquoted (lowercase) table
+        references: { model: 'branches', key: 'id' },
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
       },
 
-      category: {
-        type: DataTypes.STRING(64),
-        allowNull: true,
-      },
-      action: {
-        type: DataTypes.STRING(128),
-        allowNull: true,
-      },
-      message: {
-        type: DataTypes.TEXT,
-        allowNull: true,
-      },
-      ip: {
-        type: DataTypes.STRING(64),
-        allowNull: true,
-      },
-      reversed: {
-        type: DataTypes.BOOLEAN,
-        allowNull: false,
-        defaultValue: false,
-      },
+      category: { type: DataTypes.STRING(64),  allowNull: true },
+      action:   { type: DataTypes.STRING(128), allowNull: true },
+      message:  { type: DataTypes.TEXT,        allowNull: true },
+      ip:       { type: DataTypes.STRING(64),  allowNull: true },
+
+      reversed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     },
     {
       tableName: 'audit_logs',
-      underscored: true,
+      freezeTableName: true,
       timestamps: true,
+      underscored: false,          // align with global camel timestamps
+      createdAt: 'createdAt',
+      updatedAt: 'updatedAt',
     }
   );
 

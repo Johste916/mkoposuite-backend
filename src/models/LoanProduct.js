@@ -1,12 +1,14 @@
 // src/models/LoanProduct.js
+'use strict';
+
 module.exports = (sequelize, DataTypes) => {
   const LoanProduct = sequelize.define(
     'LoanProduct',
     {
-      name:           { type: DataTypes.STRING, allowNull: false },
-      code:           { type: DataTypes.STRING, allowNull: false, unique: true },
+      name: { type: DataTypes.STRING, allowNull: false },
+      code: { type: DataTypes.STRING, allowNull: false, unique: true },
 
-      status:         { type: DataTypes.ENUM('active', 'inactive'), allowNull: false, defaultValue: 'active' },
+      status: { type: DataTypes.ENUM('active', 'inactive'), allowNull: false, defaultValue: 'active' },
 
       interestMethod: { type: DataTypes.ENUM('flat', 'reducing'), allowNull: false, defaultValue: 'flat' },
       interestRate:   { type: DataTypes.DECIMAL(10, 4), allowNull: false, defaultValue: 0 },
@@ -34,9 +36,12 @@ module.exports = (sequelize, DataTypes) => {
       meta:           { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
     },
     {
-      tableName: 'loan_products', // your table is snake
-      underscored: true,          // created_at/updated_at if present
+      tableName: 'loan_products',  // existing snake table
+      freezeTableName: true,
       timestamps: true,
+      underscored: false,          // align with global camel timestamps
+      createdAt: 'createdAt',
+      updatedAt: 'updatedAt',
       indexes: [
         { unique: true, fields: ['code'] },
         { fields: ['status'] },
