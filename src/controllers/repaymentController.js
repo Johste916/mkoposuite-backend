@@ -1,6 +1,8 @@
 // controllers/repaymentController.js
-const fs = require("fs");
-const { Op, fn, col, literal, QueryTypes } = require("sequelize");
+'use strict';
+
+const fs = require('fs');
+const { Op, fn, col, literal, QueryTypes } = require('sequelize');
 const {
   LoanRepayment,
   LoanPayment,
@@ -9,27 +11,27 @@ const {
   LoanSchedule,
   SavingsTransaction,
   Communication,
-  User,               // <-- ADDED (for officer names if available)
+  User,
   sequelize,
-} = require("../models");
-// helper: round to 2dp to avoid 0.01 drift
+} = require('../models');
+
+const Notifier = require('../services/notifier')({ Communication, Borrower });
+const Gateway = require('../services/paymentGateway')();
+
+// ---------- Helpers ----------
 const r2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
-const Repayment = LoanRepayment || LoanPayment;
+// ✅ Force the real table-backed model (loan_payments), ignore legacy/view models
+const Repayment = LoanPayment || LoanRepayment;
 const hasSavings = !!SavingsTransaction;
 
-const Notifier = require("../services/notifier")({ Communication, Borrower });
-const Gateway = require("../services/paymentGateway")();
-
-/* ============================================================
-   SCHEMA PROBE + SAFE ATTRIBUTE PICKER
-   ============================================================ */
+// ------- Table / column probing for safe queries -------
 let _loanTableColumns = null; // { [colName]: true }
 async function getLoanTableColumns() {
   if (_loanTableColumns) return _loanTableColumns;
   try {
     const qi = sequelize.getQueryInterface();
-    const tableName = Loan?.getTableName?.() || "loans";
+    const tableName = (Loan?.getTableName?.() || 'loans');
     const desc = await qi.describeTable(tableName);
     _loanTableColumns = Object.fromEntries(Object.keys(desc).map((k) => [k, true]));
   } catch {
@@ -53,67 +55,80 @@ async function pickExistingLoanAttributes(attrNames = []) {
     if (!field) continue;
     if (cols[field]) selected.push(name);
   }
-  if (!selected.includes("id") && cols["id"]) selected.push("id");
+  if (!selected.includes('id') && cols['id']) selected.push('id');
   return selected.length ? selected : undefined;
 }
 
-const BORROWER_ATTRS = ["id", "name", "phone", "email"];
+const BORROWER_ATTRS = ['id', 'name', 'phone', 'email'];
+const LOAN_BASE_ATTRS = ['id', 'borrowerId', 'currency', 'reference', 'status'];
+const LOAN_AMOUNT_ATTRS = [...LOAN_BASE_ATTRS, 'amount', 'totalInterest', 'outstanding', 'totalPaid'];
 
-// Default minimal attributes safe across schema variations
-const LOAN_BASE_ATTRS = ["id", "borrowerId", "currency", "reference", "status"];
-// When we need to compute balances
-const LOAN_AMOUNT_ATTRS = [...LOAN_BASE_ATTRS, "amount", "totalInterest", "outstanding", "totalPaid"];
+// Get association alias by target model, fallback to provided default
+function getAlias(sourceModel, targetModel, defaultAlias) {
+  try {
+    const hit = Object.values(sourceModel?.associations || {}).find((a) => a?.target === targetModel);
+    return hit?.as || defaultAlias;
+  } catch {
+    return defaultAlias;
+  }
+}
 
+// Build a consistent include tree: Repayment -> Loan (as 'loan') -> Borrower (as 'borrower') -> User (as 'loanOfficer')
 async function loanInclude({ where = {}, borrowerWhere, needAmounts = false } = {}) {
   const attrsWanted = needAmounts ? LOAN_AMOUNT_ATTRS : LOAN_BASE_ATTRS;
   const safeAttrs = await pickExistingLoanAttributes(attrsWanted);
 
+  const loanAs = getAlias(Repayment, Loan, 'loan');
+  const borrowerAs = getAlias(Loan, Borrower, 'borrower');
+
+  // nested officer on Borrower
+  const officerAs = User ? getAlias(Borrower, User, 'loanOfficer') : null;
+
   const borrowerInclude = {
     model: Borrower,
-    as: Loan?.associations?.Borrower?.as || "Borrower",
+    as: borrowerAs,
     attributes: BORROWER_ATTRS,
-    ...(borrowerWhere ? { where: borrowerWhere } : {}),
-    required: !!borrowerWhere,
+    ...(borrowerWhere ? { where: borrowerWhere, required: true } : { required: false }),
   };
 
-  const officerAssocAs = Loan?.associations?.loanOfficer?.as || "loanOfficer";
-  const officerInclude = User
-    ? {
+  if (User && officerAs) {
+    borrowerInclude.include = [
+      {
         model: User,
-        as: officerAssocAs,
-        attributes: ["id", "name", "firstName", "lastName", "email"],
+        as: officerAs,
+        attributes: ['id', 'name', 'firstName', 'lastName', 'email'],
         required: false,
-      }
-    : null;
-
-  const include = [borrowerInclude];
-  if (officerInclude) include.push(officerInclude);
+      },
+    ];
+  }
 
   return {
     model: Loan,
+    as: loanAs, // ensure included property is instance.loan
     ...(safeAttrs ? { attributes: safeAttrs } : {}),
     where,
-    include,
+    include: [borrowerInclude],
+    required: !!(where && Object.keys(where).length) || !!borrowerWhere,
   };
 }
 
 async function loanRefSupported() {
   const cols = await getLoanTableColumns();
-  return !!cols["reference"];
+  return !!cols['reference'];
 }
 
 /* =============== util helpers (attr pickers) =============== */
 function repaymentDateAttr() {
   const attrs = (Repayment && Repayment.rawAttributes) || {};
-  if ("date" in attrs) return "date";
-  if ("paymentDate" in attrs) return "paymentDate";
-  if ("paidAt" in attrs) return "paidAt";
-  return "createdAt";
+  if ('date' in attrs) return 'date';
+  if ('paymentDate' in attrs) return 'paymentDate';
+  if ('paidAt' in attrs) return 'paidAt';
+  return 'createdAt';
 }
 function repaymentAmountAttr() {
   const attrs = (Repayment && Repayment.rawAttributes) || {};
-  if ("amount" in attrs) return "amount";
-  if ("amountPaid" in attrs) return "amountPaid";
+  if ('amount' in attrs) return 'amount';
+  if ('amountPaid' in attrs) return 'amountPaid';
   return null;
 }
 function getRepaymentDateValue(r) {
@@ -136,34 +151,32 @@ function officerPrettyName(officer) {
   if (!officer) return null;
   const explicit =
     officer.name ||
-    [officer.firstName, officer.lastName].filter(Boolean).join(" ") ||
+    [officer.firstName, officer.lastName].filter(Boolean).join(' ') ||
     null;
-
   const titleize = (s) =>
-    String(s || "")
-      .replace(/[_\.\-]+/g, " ")
-      .replace(/\s+/g, " ")
+    String(s || '')
+      .replace(/[_\.\-]+/g, ' ')
+      .replace(/\s+/g, ' ')
       .trim()
       .replace(/\b\w/g, (c) => c.toUpperCase());
 
   if (explicit && /\s/.test(explicit) && !/^[a-z0-9._-]+$/i.test(explicit)) return explicit.trim();
-  if (explicit && !explicit.includes("@")) return titleize(explicit);
-  if (officer.email) return titleize(officer.email.split("@")[0]);
+  if (explicit && !explicit.includes('@')) return titleize(explicit);
+  if (officer.email) return titleize(officer.email.split('@')[0]);
   return null;
 }
 
 /* ===== Safely update loan totals (avoid touching non-existent columns) ===== */
 async function updateLoanFinancials(loan, deltaPaid, t) {
-  // deltaPaid: +amount when approving/applying; -amount when voiding/reversing
   const cols = await getLoanTableColumns();
   const updates = {};
 
-  const totalPaidField = mapAttrToField("totalPaid");
+  const totalPaidField = mapAttrToField('totalPaid');
   if (totalPaidField && cols[totalPaidField]) {
     updates.totalPaid = Math.max(0, Number(loan.totalPaid || 0) + Number(deltaPaid || 0));
   }
 
-  const outstandingField = mapAttrToField("outstanding");
+  const outstandingField = mapAttrToField('outstanding');
   if (outstandingField && cols[outstandingField]) {
     if (loan.outstanding != null) {
       updates.outstanding = Math.max(0, Number(loan.outstanding || 0) - Number(deltaPaid || 0));
@@ -193,27 +206,27 @@ const shapeReceipt = (repayment, allocation = []) => {
     { principal: 0, interest: 0, fees: 0, penalties: 0 }
   );
 
-  const loan = repayment.Loan || {};
-  const borrower = loan.Borrower || {};
+  const loan = repayment.loan || {};
+  const borrower = loan.borrower || {};
 
   return {
     id: repayment.id,
     receiptNo: repayment.receiptNo || `RCPT-${repayment.id}`,
     date: getRepaymentDateValue(repayment),
     amount: getRepaymentAmountValue(repayment),
-    currency: repayment.currency || loan.currency || "TZS",
-    method: repayment.method || "cash",
+    currency: repayment.currency || loan.currency || 'TZS',
+    method: repayment.method || 'cash',
     reference: repayment.reference || repayment.ref || null,
     notes: repayment.notes || null,
     loan: {
       id: loan.id,
       reference: loan.reference || `L-${loan.id}`,
-      borrowerName: borrower?.name || "",
+      borrowerName: borrower?.name || '',
     },
     postedBy: repayment.postedBy
       ? {
-          name: repayment.postedByName || "User",
-          email: repayment.postedByEmail || "",
+          name: repayment.postedByName || 'User',
+          email: repayment.postedByEmail || '',
         }
       : null,
     allocation,
@@ -226,7 +239,7 @@ async function computeAllocations({
   loanId,
   amount,
   date,
-  strategy = "oldest_due_first",
+  strategy = 'oldest_due_first',
   customOrder,
   waivePenalties = false,
 }) {
@@ -240,8 +253,8 @@ async function computeAllocations({
   const schedule = await LoanSchedule.findAll({
     where: { loanId },
     order: [
-      ["dueDate", "ASC"],
-      ["period", "ASC"],
+      ['dueDate', 'ASC'],
+      ['period', 'ASC'],
     ],
     raw: true,
   });
@@ -271,17 +284,17 @@ async function computeAllocations({
   });
 
   let order;
-  if (strategy === "principal_first") order = ["principal", "interest", "fees", "penalties"];
-  else if (strategy === "interest_first") order = ["interest", "fees", "penalties", "principal"];
-  else if (strategy === "fees_first") order = ["fees", "interest", "penalties", "principal"];
-  else if (strategy === "custom")
-    order = String(customOrder || "")
-      .split(",")
+  if (strategy === 'principal_first') order = ['principal', 'interest', 'fees', 'penalties'];
+  else if (strategy === 'interest_first') order = ['interest', 'fees', 'penalties', 'principal'];
+  else if (strategy === 'fees_first') order = ['fees', 'interest', 'penalties', 'principal'];
+  else if (strategy === 'custom')
+    order = String(customOrder || '')
+      .split(',')
       .map((x) => x.trim())
       .filter(Boolean);
-  else order = ["penalties", "interest", "fees", "principal"];
+  else order = ['penalties', 'interest', 'fees', 'principal'];
 
-  if (waivePenalties) order = order.filter((x) => x !== "penalties");
+  if (waivePenalties) order = order.filter((x) => x !== 'penalties');
 
   let left = Number(amount);
   const allocations = [];
@@ -318,13 +331,11 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     const row = await LoanSchedule.findOne({ where: { loanId, period: line.period }, transaction: t });
     if (!row) continue;
 
-    // compute next paid subtotals
     const nextPrincipalPaid = r2(Number(row.principalPaid || 0) + sign * Number(line.principal || 0));
     const nextInterestPaid  = r2(Number(row.interestPaid  || 0) + sign * Number(line.interest  || 0));
     const nextFeesPaid      = r2(Number(row.feesPaid      || 0) + sign * Number(line.fees      || 0));
     const nextPensPaid      = r2(Number(row.penaltiesPaid || 0) + sign * Number(line.penalties || 0));
 
-    // figure out what was originally due for the period
     const duePrincipal = r2(Number(row.principal  ?? 0));
     const dueInterest  = r2(Number(row.interest   ?? 0));
     const dueFees      = r2(Number(row.fees       ?? 0));
@@ -333,22 +344,20 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
     const totalDue  = r2(duePrincipal + dueInterest + dueFees + duePens);
     const totalPaid = r2(nextPrincipalPaid + nextInterestPaid + nextFeesPaid + nextPensPaid);
 
-    // period state
-    const fullySettled = totalPaid >= totalDue - 0.01; // epsilon for rounding
+    const fullySettled = totalPaid >= totalDue - 0.01;
     const status = fullySettled
-      ? "paid"
+      ? 'paid'
       : (row.dueDate ? new Date(row.dueDate) : asOf) < asOf
-        ? "overdue"
-        : "upcoming";
+        ? 'overdue'
+        : 'upcoming';
 
-    // build update doc — IMPORTANT: paid is boolean (no numeric writes)
     const updateDoc = {
       principalPaid: Math.max(0, nextPrincipalPaid),
       interestPaid:  Math.max(0, nextInterestPaid),
       feesPaid:      Math.max(0, nextFeesPaid),
       penaltiesPaid: Math.max(0, nextPensPaid),
-      paid:          !!fullySettled,   // ✅ boolean
-      status,                          // ✅ enum value
+      paid:          !!fullySettled,   // boolean
+      status,
       updated_at: new Date(),
     };
 
@@ -362,12 +371,12 @@ async function applyAllocationToSchedule({ loanId, allocations, asOfDate, t, sig
 const getAllRepayments = async (req, res) => {
   try {
     const {
-      q = "",
+      q = '',
       loanId,
       borrowerId,
       dateFrom,
       dateTo,
-      status, // NEW: allow filtering by status e.g., "pending"
+      status,
       page = 1,
       pageSize = 20,
     } = req.query;
@@ -383,8 +392,6 @@ const getAllRepayments = async (req, res) => {
       if (dateTo) and[Op.lte] = new Date(dateTo);
       where[dateAttr] = and;
     }
-
-    // optional status filter if model supports it
     if (status && (Repayment.rawAttributes || {}).status) {
       where.status = status;
     }
@@ -396,43 +403,39 @@ const getAllRepayments = async (req, res) => {
     let borrowerWhere;
     if (q && q.trim()) {
       const needle = `%${q.trim()}%`;
-      borrowerWhere = {
-        [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }],
-      };
+      borrowerWhere = { [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }] };
     }
 
-    const inc = await loanInclude({
-      where: loanWhere,
-      borrowerWhere,
-      needAmounts: false,
-    });
+    const inc = await loanInclude({ where: loanWhere, borrowerWhere, needAmounts: false });
     if (q && q.trim()) inc.required = true;
 
     const { rows, count } = await Repayment.findAndCountAll({
       where,
       include: [inc],
       order: [
-        [dateAttr, "DESC"],
-        ["createdAt", "DESC"],
+        [dateAttr, 'DESC'],
+        ['createdAt', 'DESC'],
       ],
       limit,
       offset,
     });
 
+    const borrowerAs = getAlias(Loan, Borrower, 'borrower');
+
     const filtered =
       q && q.trim()
         ? rows.filter((r) => {
-            const borrower = r.Loan?.Borrower || {};
+            const borrower = r.loan?.[borrowerAs] || {};
             const hay = [
               borrower.name,
               borrower.phone,
-              r.Loan?.reference,
+              r.loan?.reference,
               r.reference,
               r.method,
               r.receiptNo,
             ]
               .filter(Boolean)
-              .join(" ")
+              .join(' ')
               .toLowerCase();
             return hay.includes(q.trim().toLowerCase());
           })
@@ -440,8 +443,8 @@ const getAllRepayments = async (req, res) => {
 
     res.json({ items: filtered, total: q ? filtered.length : count });
   } catch (err) {
-    console.error("Fetch repayments error:", err);
-    res.status(500).json({ error: "Failed to fetch repayments" });
+    console.error('Fetch repayments error:', err);
+    res.status(500).json({ error: 'Failed to fetch repayments' });
   }
 };
 
@@ -456,46 +459,44 @@ const getRepaymentsByBorrower = async (req, res) => {
     const repayments = await Repayment.findAll({
       include: [await loanInclude({ where: { borrowerId } })],
       order: [
-        [dateAttr, "DESC"],
-        ["createdAt", "DESC"],
+        [dateAttr, 'DESC'],
+        ['createdAt', 'DESC'],
       ],
     });
     res.json(repayments);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Error fetching borrower repayments" });
+    res.status(500).json({ error: 'Error fetching borrower repayments' });
   }
 };
 
 const getRepaymentsByLoan = async (req, res) => {
   try {
     const loanId = req.params.loanId || req.params.id;
-    if (!loanId) return res.status(400).json({ error: "loanId required" });
-    const dateAttr = repaymentDateAttr(); // will pick paymentDate/date/paidAt/createdAt
-    const amtAttr  = repaymentAmountAttr() || 'amountPaid';
+    if (!loanId) return res.status(400).json({ error: 'loanId required' });
+    const dateAttr = repaymentDateAttr();
 
     const rows = await Repayment.findAll({
       where: { loanId },
       order: [
-        [dateAttr, "DESC"],
-        ["createdAt", "DESC"],
+        [dateAttr, 'DESC'],
+        ['createdAt', 'DESC'],
       ],
     });
 
-    // Map to FE shape
     const items = rows.map((r) => ({
       id: r.id,
-      date: getRepaymentDateValue(r),             // -> FE: r.date
-      amount: getRepaymentAmountValue(r),         // -> FE: r.amount
-      method: r.method || "",
-      ref: r.reference || r.receiptNo || "",
-      postedBy: r.postedByName || r.postedByEmail || r.postedBy || "", // -> FE: r.postedBy
+      date: getRepaymentDateValue(r),
+      amount: getRepaymentAmountValue(r),
+      method: r.method || '',
+      ref: r.reference || r.receiptNo || '',
+      postedBy: r.postedByName || r.postedByEmail || r.postedBy || '',
     }));
 
     res.json(items);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Error fetching loan repayments" });
+    res.status(500).json({ error: 'Error fetching loan repayments' });
   }
 };
 
@@ -503,34 +504,33 @@ const getRepaymentById = async (req, res) => {
   try {
     const { id } = req.params;
     if (!/^\d+$/.test(String(id))) {
-      return res.status(400).json({ error: "Invalid receipt id" });
+      return res.status(400).json({ error: 'Invalid receipt id' });
     }
     const repayment = await Repayment.findByPk(id, {
       include: [await loanInclude()],
     });
-    if (!repayment) return res.status(404).json({ error: "Repayment not found" });
+    if (!repayment) return res.status(404).json({ error: 'Repayment not found' });
 
     const allocation = repayment.allocation || [];
     res.json(shapeReceipt(repayment, allocation));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Error fetching repayment" });
+    res.status(500).json({ error: 'Error fetching repayment' });
   }
 };
 
 /* ===========================
-   🗓️  SCHEDULE GRID (NEW)
-   Fills: borrower / officer / next due / outstanding / status
+   🗓️  SCHEDULE GRID
 ===========================*/
 const listScheduleLoans = async (req, res) => {
   try {
     const {
-      q = "",
+      q = '',
       branchId,
       officerId,
-      status,              // e.g. 'active'
-      includeClosed = "false",
-      dueInDays = "30",
+      status,
+      includeClosed = 'false',
+      dueInDays = '30',
       page = 1,
       pageSize = 50,
     } = req.query;
@@ -538,37 +538,41 @@ const listScheduleLoans = async (req, res) => {
     const limit = Math.max(1, Number(pageSize));
     const offset = (Math.max(1, Number(page)) - 1) * limit;
 
-    // --- Build loan filters via Sequelize (so we don't care about exact table names) ---
     const loanWhere = {};
     if (status) loanWhere.status = status;
-    if (officerId) {
-      const officerField = mapAttrToField("loanOfficerId") || "loanOfficerId";
-      loanWhere[officerField] = officerId;
-    }
-    if (branchId && Borrower?.rawAttributes?.branchId) {
-      // filter by borrower branch through include.where (safer)
-    }
+
+    // officer is on Borrower, not Loan — handled below via nested include filter
 
     let borrowerWhere;
     if (q && q.trim()) {
       const needle = `%${q.trim()}%`;
-      borrowerWhere = {
-        [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }],
-      };
+      borrowerWhere = { [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }] };
     }
 
-    const inc = await loanInclude({
-      where: loanWhere,
-      borrowerWhere,
-      needAmounts: false,
-    });
+    const inc = await loanInclude({ where: loanWhere, borrowerWhere, needAmounts: false });
 
-    // If filtering by borrower branch, add it to include
+    // add branch filter on borrower if available
     if (branchId && Borrower?.rawAttributes?.branchId) {
-      const borrowerInc = inc.include.find((i) => (i.as || i.model?.name) === (Loan?.associations?.Borrower?.as || "Borrower"));
+      const borrowerAs = getAlias(Loan, Borrower, 'borrower');
+      const borrowerInc = (inc.include || []).find((i) => i.as === borrowerAs);
       if (borrowerInc) {
         borrowerInc.where = { ...(borrowerInc.where || {}), branchId: branchId };
         borrowerInc.required = true;
+      }
+    }
+
+    // add officer filter on borrower if requested
+    if (officerId && User) {
+      const borrowerAs = getAlias(Loan, Borrower, 'borrower');
+      const officerAs = getAlias(Borrower, User, 'loanOfficer');
+      const borrowerInc = (inc.include || []).find((i) => i.as === borrowerAs);
+      if (borrowerInc) {
+        const nested = (borrowerInc.include || []).find((i) => i.as === officerAs);
+        if (nested) {
+          nested.where = { ...(nested.where || {}), id: officerId };
+          borrowerInc.required = true;
+          nested.required = true;
+        }
       }
     }
 
@@ -576,14 +580,13 @@ const listScheduleLoans = async (req, res) => {
       ...(inc.attributes ? { attributes: inc.attributes } : {}),
       where: inc.where,
       include: inc.include,
-      order: [["createdAt", "DESC"]],
+      order: [['createdAt', 'DESC']],
       limit,
       offset,
     });
 
     if (!loans.length) return res.json({ items: [], total: 0, page: Number(page), limit });
 
-    // --- Aggregate next due & outstanding from public.loan_schedules via raw SQL (we know the columns) ---
     const loanIds = loans.map((l) => l.id);
     const sql = `
       SELECT loan_id,
@@ -594,16 +597,15 @@ const listScheduleLoans = async (req, res) => {
              SUM( (COALESCE(principal,0)+COALESCE(interest,0)+COALESCE(fees,0)+COALESCE(penalties,0))
                  - (COALESCE(principal_paid,0)+COALESCE(interest_paid,0)+COALESCE(fees_paid,0)+COALESCE(penalties_paid,0)) ) AS outstanding
       FROM public.loan_schedules
-      WHERE loan_id IN (${loanIds.map((_, i) => `$${i + 1}`).join(",")})
+      WHERE loan_id IN (${loanIds.map((_, i) => `$${i + 1}`).join(',')})
       GROUP BY loan_id
     `;
-    const agg = await sequelize.query(sql, {
-      type: QueryTypes.SELECT,
-      bind: loanIds,
-    });
+    const agg = await sequelize.query(sql, { type: QueryTypes.SELECT, bind: loanIds });
     const byLoanId = new Map(agg.map((r) => [Number(r.loan_id), r]));
 
-    // optional due-in-days filter (applied after computing next due)
+    const borrowerAs = getAlias(Loan, Borrower, 'borrower');
+    const officerAs = getAlias(Borrower, User, 'loanOfficer');
+
     const days = Number(dueInDays) || 30;
     const now = new Date();
     const end = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
@@ -613,37 +615,31 @@ const listScheduleLoans = async (req, res) => {
       const nextDue = a.next_due ? new Date(a.next_due) : null;
       const outstanding = Number(a.outstanding || 0);
 
-      const borrower = l.Borrower || {};
-      const officer = l[Loan?.associations?.loanOfficer?.as || "loanOfficer"];
+      const borrower = l[borrowerAs] || {};
+      const officer = borrower?.[officerAs];
 
       return {
         loanId: l.id,
         loanRef: l.reference || `L-${l.id}`,
         borrowerId: borrower.id || null,
-        borrower: borrower.name || "",
+        borrower: borrower.name || '',
         officerId: officer?.id || null,
         officer: officerPrettyName(officer) || null,
         nextDue: nextDue ? nextDue.toISOString().slice(0, 10) : null,
         outstanding,
         status: l.status || null,
-        currency: l.currency || "TZS",
+        currency: l.currency || 'TZS',
       };
     });
 
-    // apply due-window filter if requested (default 30 days; allow "all" via dueInDays=0)
     const withinWindow = days > 0
       ? items.filter((it) => (it.nextDue ? new Date(it.nextDue) <= end : false))
       : items;
 
-    res.json({
-      items: withinWindow,
-      total: count,
-      page: Number(page),
-      limit,
-    });
+    res.json({ items: withinWindow, total: count, page: Number(page), limit });
   } catch (err) {
-    console.error("listScheduleLoans error:", err);
-    res.status(500).json({ error: "Failed to load schedule" });
+    console.error('listScheduleLoans error:', err);
+    res.status(500).json({ error: 'Failed to load schedule' });
   }
 };
 
@@ -654,29 +650,23 @@ const previewAllocation = async (req, res) => {
   try {
     const { loanId, amount, date, strategy, customOrder, waivePenalties } = req.body;
 
-    // Fetch the loan with safe attributes
+    const borrowerAs = getAlias(Loan, Borrower, 'borrower');
+
     const loan = await Loan.findByPk(loanId, {
       attributes: await pickExistingLoanAttributes(LOAN_BASE_ATTRS),
-      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: Loan?.associations?.Borrower?.as || "Borrower" }],
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: borrowerAs }],
     });
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    if (!loan) return res.status(404).json({ error: 'Loan not found' });
 
-    const result = await computeAllocations({
-      loanId,
-      amount,
-      date,
-      strategy,
-      customOrder,
-      waivePenalties,
-    });
+    const result = await computeAllocations({ loanId, amount, date, strategy, customOrder, waivePenalties });
     res.json({
       ...result,
-      loanCurrency: loan.currency || "TZS",
-      borrowerName: loan.Borrower?.name || "",
+      loanCurrency: loan.currency || 'TZS',
+      borrowerName: loan[borrowerAs]?.name || '',
     });
   } catch (err) {
-    console.error("previewAllocation error:", err);
-    res.status(500).json({ error: "Preview allocation failed" });
+    console.error('previewAllocation error:', err);
+    res.status(500).json({ error: 'Preview allocation failed' });
   }
 };
 
@@ -686,18 +676,18 @@ const previewAllocation = async (req, res) => {
 const createRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const role = String(req.user?.role || "").toLowerCase();
-    const allowed = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const role = String(req.user?.role || '').toLowerCase();
+    const allowed = ['admin', 'loanofficer', 'loan_officer', 'loan-officer'];
     if (!allowed.includes(role)) {
       await t.rollback();
-      return res.status(403).json({ error: "Not permitted to create repayments" });
+      return res.status(403).json({ error: 'Not permitted to create repayments' });
     }
 
     const {
       loanId,
       amount,
       date,
-      method = "cash",
+      method = 'cash',
       reference,
       notes,
       strategy,
@@ -708,21 +698,22 @@ const createRepayment = async (req, res) => {
 
     if (!loanId || !Number(amount) || !date) {
       await t.rollback();
-      return res.status(400).json({ error: "loanId, amount and date are required" });
+      return res.status(400).json({ error: 'loanId, amount and date are required' });
     }
 
-    // Fetch loan with only columns we actually need to compute balances
+    const borrowerAs = getAlias(Loan, Borrower, 'borrower');
+
     const loan = await Loan.findByPk(loanId, {
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
-      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: Loan?.associations?.Borrower?.as || "Borrower" }],
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: borrowerAs }],
       transaction: t,
     });
     if (!loan) {
       await t.rollback();
-      return res.status(404).json({ error: "Loan not found" });
+      return res.status(404).json({ error: 'Loan not found' });
     }
 
-    const { allocations, totals } = await computeAllocations({
+    const { allocations } = await computeAllocations({
       loanId,
       amount,
       date,
@@ -731,7 +722,6 @@ const createRepayment = async (req, res) => {
       waivePenalties,
     });
 
-    // Build payload flexibly
     const payload = {
       loanId,
       amountPaid: Number(amount),
@@ -740,34 +730,31 @@ const createRepayment = async (req, res) => {
       reference: reference || null,
       notes: notes || null,
       allocation: allocations,
-      currency: loan.currency || "TZS",
-      status: "approved",
+      currency: loan.currency || 'TZS',
+      status: 'approved',
       applied: true,
       postedBy: req.user?.id,
       postedByName: req.user?.name,
       postedByEmail: req.user?.email,
     };
 
-    // Keep only valid attributes
     const attrs = (Repayment && Repayment.rawAttributes) || {};
     for (const k of Object.keys(payload)) if (!(k in attrs)) delete payload[k];
 
     const repayment = await Repayment.create(payload, { transaction: t });
 
-    // Apply allocations + aggregates
     await applyAllocationToSchedule({ loanId, allocations, asOfDate: date, t, sign: +1 });
     await updateLoanFinancials(loan, +Number(amount), t);
 
-    // Optional: credit borrower savings (auto-deposit)
     if (hasSavings) {
       await SavingsTransaction.create(
         {
           borrowerId: loan.borrowerId,
           amount: Number(amount),
-          type: "deposit",
+          type: 'deposit',
           narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
           reference: payload.reference || `RCPT-${repayment.id}`,
-          date: date,
+          date,
         },
         { transaction: t }
       );
@@ -775,9 +762,8 @@ const createRepayment = async (req, res) => {
 
     await t.commit();
 
-    // Notify borrower
     await Notifier.notifyBorrowerRepayment({
-      borrower: loan.Borrower,
+      borrower: loan[borrowerAs],
       amount: Number(amount),
       loanRef: loan.reference || loan.id,
       method,
@@ -788,12 +774,11 @@ const createRepayment = async (req, res) => {
     res.status(201).json({
       repaymentId: repayment.id,
       receipt: issueReceipt ? shapeReceipt(repFull || repayment, allocations) : undefined,
-      totals,
     });
   } catch (err) {
     await t.rollback();
-    console.error("Create repayment error:", err);
-    res.status(500).json({ error: "Error saving repayment" });
+    console.error('Create repayment error:', err);
+    res.status(500).json({ error: 'Error saving repayment' });
   }
 };
 
@@ -803,19 +788,18 @@ const createRepayment = async (req, res) => {
 const createBulkRepayments = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const role = String(req.user?.role || "").toLowerCase();
-    const allowed = ["admin", "loanofficer", "loan_officer", "loan-officer"];
+    const role = String(req.user?.role || '').toLowerCase();
+    const allowed = ['admin', 'loanofficer', 'loan_officer', 'loan-officer'];
     if (!allowed.includes(role)) {
       await t.rollback();
-      return res.status(403).json({ error: "Not permitted" });
+      return res.status(403).json({ error: 'Not permitted' });
     }
 
-    // Accept: array body, {items: [...]}, or {rows: [...]}
     const itemsInput = Array.isArray(req.body) ? req.body : req.body?.items || req.body?.rows || [];
     const items = Array.isArray(itemsInput) ? itemsInput : [];
     if (!items.length) {
       await t.rollback();
-      return res.status(400).json({ error: "Provide an array of repayments" });
+      return res.status(400).json({ error: 'Provide an array of repayments' });
     }
 
     const hasRef = await loanRefSupported();
@@ -828,7 +812,7 @@ const createBulkRepayments = async (req, res) => {
         loanRef,
         amount,
         date,
-        method = "cash",
+        method = 'cash',
         reference,
         notes,
       } = it;
@@ -839,19 +823,14 @@ const createBulkRepayments = async (req, res) => {
       } else if (loanReference || loanRef) {
         if (!hasRef) {
           await t.rollback();
-          return res
-            .status(409)
-            .json({ error: "Loan reference column not available. Run the migration first." });
+          return res.status(409).json({ error: 'Loan reference column not available. Run the migration first.' });
         }
-        loan = await Loan.findOne({
-          where: { reference: loanReference || loanRef },
-          transaction: t,
-        });
+        loan = await Loan.findOne({ where: { reference: loanReference || loanRef }, transaction: t });
       }
 
       if (!loan)
         throw new Error(
-          `Loan not found (loanId=${inLoanId || "N/A"}; loanReference=${loanReference || loanRef || "N/A"})`
+          `Loan not found (loanId=${inLoanId || 'N/A'}; loanReference=${loanReference || loanRef || 'N/A'})`
         );
 
       const payload = {
@@ -861,9 +840,9 @@ const createBulkRepayments = async (req, res) => {
         method,
         reference: reference || null,
         notes: notes || null,
-        status: "pending",
+        status: 'pending',
         applied: false,
-        currency: loan.currency || "TZS",
+        currency: loan.currency || 'TZS',
       };
       const attrs = Repayment.rawAttributes || {};
       for (const k of Object.keys(payload)) if (!(k in attrs)) delete payload[k];
@@ -873,11 +852,11 @@ const createBulkRepayments = async (req, res) => {
     }
 
     await t.commit();
-    res.status(201).json({ message: "Bulk repayments queued for approval", ids: created });
+    res.status(201).json({ message: 'Bulk repayments queued for approval', ids: created });
   } catch (err) {
     await t.rollback();
-    console.error("Bulk create error:", err);
-    res.status(500).json({ error: err.message || "Bulk creation failed" });
+    console.error('Bulk create error:', err);
+    res.status(500).json({ error: err.message || 'Bulk creation failed' });
   }
 };
 
@@ -885,13 +864,13 @@ const createBulkRepayments = async (req, res) => {
    📄 CSV UPLOAD (PENDING rows)
 ========================== */
 const parseCsvBuffer = async (buffer) => {
-  const text = buffer.toString("utf8");
+  const text = buffer.toString('utf8');
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
   if (!lines.length) return [];
-  const header = lines[0].split(",").map((h) => h.trim());
+  const header = lines[0].split(',').map((h) => h.trim());
   const out = [];
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(",").map((c) => c.trim());
+    const cols = lines[i].split(',').map((c) => c.trim());
     const row = {};
     header.forEach((h, idx) => (row[h] = cols[idx]));
     out.push(row);
@@ -902,7 +881,6 @@ const parseCsvBuffer = async (buffer) => {
 const uploadRepaymentsCsv = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    // Support memory or disk storage
     let buf = null;
     if (req.file?.buffer) buf = req.file.buffer;
     else if (req.file?.path) buf = fs.readFileSync(req.file.path);
@@ -914,33 +892,31 @@ const uploadRepaymentsCsv = async (req, res) => {
     const hasRef = await loanRefSupported();
     if (!hasRef) {
       await t.rollback();
-      return res
-        .status(409)
-        .json({ error: "Loan reference column not available. Run the migration first." });
+      return res.status(409).json({ error: 'Loan reference column not available. Run the migration first.' });
     }
 
     const rows = await parseCsvBuffer(buf);
     if (!rows.length) {
       await t.rollback();
-      return res.status(400).json({ error: "CSV is empty" });
+      return res.status(400).json({ error: 'CSV is empty' });
     }
 
     const created = [];
     for (const r of rows) {
-      const loanRef = r.loanRef || r.loanReference || r.loan_ref || r.reference;
-      const loan = await Loan.findOne({ where: { reference: loanRef }, transaction: t });
-      if (!loan) throw new Error(`Loan not found for reference ${loanRef}`);
+      const lref = r.loanRef || r.loanReference || r.loan_ref || r.reference;
+      const loan = await Loan.findOne({ where: { reference: lref }, transaction: t });
+      if (!loan) throw new Error(`Loan not found for reference ${lref}`);
 
       const payload = {
         loanId: loan.id,
         amountPaid: Number(r.amount || 0),
         paymentDate: r.date,
-        method: r.method || "cash",
+        method: r.method || 'cash',
         reference: r.reference || null,
         notes: r.notes || null,
-        status: "pending",
+        status: 'pending',
         applied: false,
-        currency: loan.currency || "TZS",
+        currency: loan.currency || 'TZS',
       };
       const attrs = Repayment.rawAttributes || {};
       for (const k of Object.keys(payload)) if (!(k in attrs)) delete payload[k];
@@ -950,13 +926,11 @@ const uploadRepaymentsCsv = async (req, res) => {
     }
 
     await t.commit();
-    res
-      .status(201)
-      .json({ message: "CSV uploaded, repayments queued for approval", ids: created });
+    res.status(201).json({ message: 'CSV uploaded, repayments queued for approval', ids: created });
   } catch (err) {
     await t.rollback();
-    console.error("CSV upload error:", err);
-    res.status(500).json({ error: err.message || "CSV upload failed" });
+    console.error('CSV upload error:', err);
+    res.status(500).json({ error: err.message || 'CSV upload failed' });
   }
 };
 
@@ -966,62 +940,57 @@ const uploadRepaymentsCsv = async (req, res) => {
 const listPendingApprovals = async (req, res) => {
   try {
     const items = await Repayment.findAll({
-      where: { status: "pending" },
+      where: { status: 'pending' },
       include: [await loanInclude()],
-      order: [["createdAt", "ASC"]],
+      order: [['createdAt', 'ASC']],
     });
     res.json(items);
   } catch (err) {
-    console.error("listPendingApprovals error:", err);
-    res.status(500).json({ error: "Failed to fetch pending approvals" });
+    console.error('listPendingApprovals error:', err);
+    res.status(500).json({ error: 'Failed to fetch pending approvals' });
   }
 };
 
 const approveRepayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
+    const borrowerAs = getAlias(Loan, Borrower, 'borrower');
+
     const repayment = await Repayment.findByPk(req.params.id, {
       include: [await loanInclude({ needAmounts: true })],
       transaction: t,
     });
     if (!repayment) {
       await t.rollback();
-      return res.status(404).json({ error: "Repayment not found" });
+      return res.status(404).json({ error: 'Repayment not found' });
     }
-    if (repayment.status !== "pending") {
+    if (repayment.status !== 'pending') {
       await t.rollback();
-      return res.status(400).json({ error: "Repayment is not pending" });
+      return res.status(400).json({ error: 'Repayment is not pending' });
     }
 
-    const loan = repayment.Loan;
+    const loan = repayment.loan;
     const date = getRepaymentDateValue(repayment) || new Date().toISOString().slice(0, 10);
     const allocations =
       repayment.allocation ||
-      (
-        await computeAllocations({
-          loanId: loan.id,
-          amount: getRepaymentAmountValue(repayment),
-          date,
-        })
-      ).allocations;
+      (await computeAllocations({ loanId: loan.id, amount: getRepaymentAmountValue(repayment), date })).allocations;
 
     await applyAllocationToSchedule({ loanId: loan.id, allocations, asOfDate: date, t, sign: +1 });
 
     const paidThis = getRepaymentAmountValue(repayment);
     await updateLoanFinancials(loan, +Number(paidThis), t);
 
-    await repayment.update({ status: "approved", applied: true, allocation: allocations }, { transaction: t });
+    await repayment.update({ status: 'approved', applied: true, allocation: allocations }, { transaction: t });
 
-    // Optional savings deposit
     if (hasSavings) {
       await SavingsTransaction.create(
         {
           borrowerId: loan.borrowerId,
           amount: Number(paidThis),
-          type: "deposit",
+          type: 'deposit',
           narrative: `Loan repayment deposit for ${loan.reference || loan.id}`,
           reference: repayment.reference || `RCPT-${repayment.id}`,
-          date: date,
+          date,
         },
         { transaction: t }
       );
@@ -1030,32 +999,31 @@ const approveRepayment = async (req, res) => {
     await t.commit();
 
     await Notifier.notifyBorrowerRepayment({
-      borrower: loan.Borrower,
+      borrower: loan[borrowerAs],
       amount: Number(paidThis),
       loanRef: loan.reference || loan.id,
-      method: repayment.method || "cash",
+      method: repayment.method || 'cash',
     });
 
-    res.json({ message: "Repayment approved" });
+    res.json({ message: 'Repayment approved' });
   } catch (err) {
     await t.rollback();
-    console.error("approveRepayment error:", err);
-    res.status(500).json({ error: "Approve failed" });
+    console.error('approveRepayment error:', err);
+    res.status(500).json({ error: 'Approve failed' });
   }
 };
 
 const rejectRepayment = async (req, res) => {
   try {
     const repayment = await Repayment.findByPk(req.params.id);
-    if (!repayment) return res.status(404).json({ error: "Repayment not found" });
-    if (repayment.status !== "pending")
-      return res.status(400).json({ error: "Repayment is not pending" });
+    if (!repayment) return res.status(404).json({ error: 'Repayment not found' });
+    if (repayment.status !== 'pending') return res.status(400).json({ error: 'Repayment is not pending' });
 
-    await repayment.update({ status: "rejected", applied: false });
-    res.json({ message: "Repayment rejected" });
+    await repayment.update({ status: 'rejected', applied: false });
+    res.json({ message: 'Repayment rejected' });
   } catch (err) {
-    console.error("rejectRepayment error:", err);
-    res.status(500).json({ error: "Reject failed" });
+    console.error('rejectRepayment error:', err);
+    res.status(500).json({ error: 'Reject failed' });
   }
 };
 
@@ -1071,42 +1039,35 @@ const voidRepayment = async (req, res) => {
     });
     if (!repayment) {
       await t.rollback();
-      return res.status(404).json({ error: "Repayment not found" });
+      return res.status(404).json({ error: 'Repayment not found' });
     }
-    if (repayment.status === "voided") {
+    if (repayment.status === 'voided') {
       await t.rollback();
-      return res.status(400).json({ error: "Already voided" });
+      return res.status(400).json({ error: 'Already voided' });
     }
 
-    const loan = repayment.Loan;
+    const loan = repayment.loan;
     const date = getRepaymentDateValue(repayment) || new Date().toISOString();
 
     if (repayment.applied) {
-      // reverse schedule & totals
       if (repayment.allocation?.length) {
-        await applyAllocationToSchedule({
-          loanId: loan.id,
-          allocations: repayment.allocation,
-          asOfDate: date,
-          t,
-          sign: -1,
-        });
+        await applyAllocationToSchedule({ loanId: loan.id, allocations: repayment.allocation, asOfDate: date, t, sign: -1 });
       }
       const amt = getRepaymentAmountValue(repayment);
       await updateLoanFinancials(loan, -Number(amt || 0), t);
     }
 
     await repayment.update(
-      { status: "voided", applied: false, voidReason: req.body?.voidReason || null },
+      { status: 'voided', applied: false, voidReason: req.body?.voidReason || null },
       { transaction: t }
     );
 
     await t.commit();
-    res.json({ message: "Repayment voided" });
+    res.json({ message: 'Repayment voided' });
   } catch (err) {
     await t.rollback();
-    console.error("Void repayment error:", err);
-    res.status(500).json({ error: "Error voiding repayment" });
+    console.error('Void repayment error:', err);
+    res.status(500).json({ error: 'Error voiding repayment' });
   }
 };
 
@@ -1120,7 +1081,7 @@ const getRepaymentsSummary = async (req, res) => {
     const amtAttr = repaymentAmountAttr();
     if (!amtAttr) return res.json({ totalAmount: 0, totalCount: 0, byMethod: [] });
 
-    const where = { status: "approved" };
+    const where = { status: 'approved' };
     if (dateFrom || dateTo) {
       const and = {};
       if (dateFrom) and[Op.gte] = new Date(dateFrom);
@@ -1141,18 +1102,18 @@ const getRepaymentsSummary = async (req, res) => {
       where,
       include,
       attributes: [
-        "method",
-        [fn("COUNT", col("id")), "count"],
-        [fn("SUM", col(amtAttr)), "amount"],
+        'method',
+        [fn('COUNT', col('id')), 'count'],
+        [fn('SUM', col(amtAttr)), 'amount'],
       ],
-      group: ["method"],
-      order: [[literal("amount"), "DESC"]],
+      group: ['method'],
+      order: [[literal('amount'), 'DESC']],
     });
 
     const byMethod = byMethodRows.map((r) => ({
-      method: r.method || "unknown",
-      count: Number(r.get("count") || 0),
-      amount: Number(r.get("amount") || 0),
+      method: r.method || 'unknown',
+      count: Number(r.get('count') || 0),
+      amount: Number(r.get('amount') || 0),
     }));
 
     res.json({
@@ -1161,19 +1122,19 @@ const getRepaymentsSummary = async (req, res) => {
       byMethod,
     });
   } catch (err) {
-    console.error("Repayments summary error:", err);
-    res.status(500).json({ error: "Failed to build summary" });
+    console.error('Repayments summary error:', err);
+    res.status(500).json({ error: 'Failed to build summary' });
   }
 };
 
 const getRepaymentsTimeSeries = async (req, res) => {
   try {
-    const { dateFrom, dateTo, granularity = "day" } = req.query;
+    const { dateFrom, dateTo, granularity = 'day' } = req.query;
     const dateAttr = repaymentDateAttr();
     const amtAttr = repaymentAmountAttr();
     if (!amtAttr) return res.json({ series: [] });
 
-    const where = { status: "approved" };
+    const where = { status: 'approved' };
     if (dateFrom || dateTo) {
       const and = {};
       if (dateFrom) and[Op.gte] = new Date(dateFrom);
@@ -1181,22 +1142,22 @@ const getRepaymentsTimeSeries = async (req, res) => {
       where[dateAttr] = and;
     }
 
-    const bucketCol = fn("date_trunc", granularity, col(dateAttr));
+    const bucketCol = fn('date_trunc', granularity, col(dateAttr));
     const rows = await Repayment.findAll({
       where,
-      attributes: [[bucketCol, "bucket"], [fn("SUM", col(amtAttr)), "amount"]],
-      group: ["bucket"],
-      order: [[literal("bucket"), "ASC"]],
+      attributes: [[bucketCol, 'bucket'], [fn('SUM', col(amtAttr)), 'amount']],
+      group: ['bucket'],
+      order: [[literal('bucket'), 'ASC']],
     });
 
     const series = rows.map((r) => ({
-      date: r.get("bucket"),
-      amount: Number(r.get("amount") || 0),
+      date: r.get('bucket'),
+      amount: Number(r.get('amount') || 0),
     }));
     res.json({ series });
   } catch (err) {
-    console.error("TimeSeries error:", err);
-    res.status(500).json({ error: "Failed to build time series" });
+    console.error('TimeSeries error:', err);
+    res.status(500).json({ error: 'Failed to build time series' });
   }
 };
 
@@ -1205,7 +1166,7 @@ const getRepaymentsTimeSeries = async (req, res) => {
 ========================== */
 const exportRepaymentsCsv = async (req, res) => {
   try {
-    const { q = "", loanId, borrowerId, dateFrom, dateTo } = req.query;
+    const { q = '', loanId, borrowerId, dateFrom, dateTo } = req.query;
     const dateAttr = repaymentDateAttr();
 
     const where = {};
@@ -1223,9 +1184,7 @@ const exportRepaymentsCsv = async (req, res) => {
     let borrowerWhere;
     if (q && q.trim()) {
       const needle = `%${q.trim()}%`;
-      borrowerWhere = {
-        [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }],
-      };
+      borrowerWhere = { [Op.or]: [{ name: { [Op.iLike]: needle } }, { phone: { [Op.iLike]: needle } }] };
     }
 
     const inc = await loanInclude({ where: loanWhere, borrowerWhere });
@@ -1235,48 +1194,50 @@ const exportRepaymentsCsv = async (req, res) => {
       where,
       include: [inc],
       order: [
-        [dateAttr, "DESC"],
-        ["createdAt", "DESC"],
+        [dateAttr, 'DESC'],
+        ['createdAt', 'DESC'],
       ],
     });
 
+    const borrowerAs = getAlias(Loan, Borrower, 'borrower');
+
     const headers = [
-      "ReceiptNo",
-      "Date",
-      "Amount",
-      "Currency",
-      "Method",
-      "Reference",
-      "Borrower",
-      "LoanRef",
-      "LoanId",
-      "Status",
+      'ReceiptNo',
+      'Date',
+      'Amount',
+      'Currency',
+      'Method',
+      'Reference',
+      'Borrower',
+      'LoanRef',
+      'LoanId',
+      'Status',
     ];
-    const csvLines = [headers.join(",")];
+    const csvLines = [headers.join(',')];
     for (const r of rows) {
-      const loan = r.Loan || {};
-      const br = loan.Borrower || {};
+      const loan = r.loan || {};
+      const br = loan[borrowerAs] || {};
       const line = [
         `"${(r.receiptNo || `RCPT-${r.id}`).replace(/"/g, '""')}"`,
-        `"${(getRepaymentDateValue(r) || "").toString().slice(0, 10)}"`,
+        `"${(getRepaymentDateValue(r) || '').toString().slice(0, 10)}"`,
         `${getRepaymentAmountValue(r)}`,
-        `"${(r.currency || loan.currency || "TZS").replace(/"/g, '""')}"`,
-        `"${(r.method || "").replace(/"/g, '""')}"`,
-        `"${(r.reference || "").replace(/"/g, '""')}"`,
-        `"${(br.name || "").replace(/"/g, '""')}"`,
-        `"${(loan.reference || "").replace(/"/g, '""')}"`,
-        `${loan.id || ""}`,
-        `"${r.status || ""}"`,
+        `"${(r.currency || loan.currency || 'TZS').replace(/"/g, '""')}"`,
+        `"${(r.method || '').replace(/"/g, '""')}"`,
+        `"${(r.reference || '').replace(/"/g, '""')}"`,
+        `"${(br.name || '').replace(/"/g, '""')}"`,
+        `"${(loan.reference || '').replace(/"/g, '""')}"`,
+        `${loan.id || ''}`,
+        `"${r.status || ''}"`,
       ];
-      csvLines.push(line.join(","));
+      csvLines.push(line.join(','));
     }
-    const csv = csvLines.join("\n");
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="repayments.csv"`);
+    const csv = csvLines.join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="repayments.csv"`);
     res.send(csv);
   } catch (err) {
-    console.error("Export repayments error:", err);
-    res.status(500).json({ error: "Failed to export repayments" });
+    console.error('Export repayments error:', err);
+    res.status(500).json({ error: 'Failed to export repayments' });
   }
 };
 
@@ -1286,50 +1247,46 @@ const exportRepaymentsCsv = async (req, res) => {
 const webhookMobileMoney = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    if (!Gateway.verifySignature("mobile", req.headers, req.rawBody || req.body)) {
+    if (!Gateway.verifySignature('mobile', req.headers, req.rawBody || req.body)) {
       await t.rollback();
-      return res.status(401).json({ error: "Invalid signature" });
+      return res.status(401).json({ error: 'Invalid signature' });
     }
-    const n = Gateway.normalizeWebhook("mobile", req.body);
+    const n = Gateway.normalizeWebhook('mobile', req.body);
     if (!n?.loanReference || !n.amount) {
       await t.rollback();
-      return res.status(400).json({ error: "Missing loan reference or amount" });
+      return res.status(400).json({ error: 'Missing loan reference or amount' });
     }
 
     if (!(await loanRefSupported())) {
       await t.rollback();
-      return res
-        .status(409)
-        .json({ error: "Loan reference column not available. Run the migration first." });
+      return res.status(409).json({ error: 'Loan reference column not available. Run the migration first.' });
     }
+
+    const borrowerAs = getAlias(Loan, Borrower, 'borrower');
 
     const loan = await Loan.findOne({
       where: { reference: n.loanReference },
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
-      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: Loan?.associations?.Borrower?.as || "Borrower" }],
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: borrowerAs }],
       transaction: t,
     });
     if (!loan) {
       await t.rollback();
-      return res.status(404).json({ error: "Loan not found" });
+      return res.status(404).json({ error: 'Loan not found' });
     }
 
-    const { allocations } = await computeAllocations({
-      loanId: loan.id,
-      amount: n.amount,
-      date: n.paidAt,
-    });
+    const { allocations } = await computeAllocations({ loanId: loan.id, amount: n.amount, date: n.paidAt });
 
     const repayment = await Repayment.create(
       {
         loanId: loan.id,
         amountPaid: Number(n.amount),
         paymentDate: n.paidAt?.slice(0, 10),
-        method: "mobile",
-        status: "approved",
+        method: 'mobile',
+        status: 'approved',
         applied: true,
-        currency: n.currency || loan.currency || "TZS",
-        gateway: n.gateway || "mobile",
+        currency: n.currency || loan.currency || 'TZS',
+        gateway: n.gateway || 'mobile',
         gatewayRef: n.gatewayRef || null,
         reference: `MM-${n.gatewayRef || Date.now()}`,
         allocation: allocations,
@@ -1345,7 +1302,7 @@ const webhookMobileMoney = async (req, res) => {
         {
           borrowerId: loan.borrowerId,
           amount: Number(n.amount),
-          type: "deposit",
+          type: 'deposit',
           narrative: `Loan repayment deposit (mobile) for ${loan.reference || loan.id}`,
           reference: repayment.reference,
           date: n.paidAt?.slice(0, 10),
@@ -1357,67 +1314,63 @@ const webhookMobileMoney = async (req, res) => {
     await t.commit();
 
     await Notifier.notifyBorrowerRepayment({
-      borrower: loan.Borrower,
+      borrower: loan[borrowerAs],
       amount: Number(n.amount),
       loanRef: loan.reference || loan.id,
-      method: "mobile",
+      method: 'mobile',
     });
 
     res.json({ ok: true });
   } catch (err) {
     await t.rollback();
-    console.error("Mobile webhook error:", err);
-    res.status(500).json({ error: "Webhook failed" });
+    console.error('Mobile webhook error:', err);
+    res.status(500).json({ error: 'Webhook failed' });
   }
 };
 
 const webhookBank = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    if (!Gateway.verifySignature("bank", req.headers, req.rawBody || req.body)) {
+    if (!Gateway.verifySignature('bank', req.headers, req.rawBody || req.body)) {
       await t.rollback();
-      return res.status(401).json({ error: "Invalid signature" });
+      return res.status(401).json({ error: 'Invalid signature' });
     }
-    const n = Gateway.normalizeWebhook("bank", req.body);
+    const n = Gateway.normalizeWebhook('bank', req.body);
     if (!n?.loanReference || !n.amount) {
       await t.rollback();
-      return res.status(400).json({ error: "Missing loan reference or amount" });
+      return res.status(400).json({ error: 'Missing loan reference or amount' });
     }
 
     if (!(await loanRefSupported())) {
       await t.rollback();
-      return res
-        .status(409)
-        .json({ error: "Loan reference column not available. Run the migration first." });
+      return res.status(409).json({ error: 'Loan reference column not available. Run the migration first.' });
     }
+
+    const borrowerAs = getAlias(Loan, Borrower, 'borrower');
 
     const loan = await Loan.findOne({
       where: { reference: n.loanReference },
       attributes: await pickExistingLoanAttributes(LOAN_AMOUNT_ATTRS),
-      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: Loan?.associations?.Borrower?.as || "Borrower" }],
+      include: [{ model: Borrower, attributes: BORROWER_ATTRS, as: borrowerAs }],
       transaction: t,
     });
     if (!loan) {
       await t.rollback();
-      return res.status(404).json({ error: "Loan not found" });
+      return res.status(404).json({ error: 'Loan not found' });
     }
 
-    const { allocations } = await computeAllocations({
-      loanId: loan.id,
-      amount: n.amount,
-      date: n.paidAt,
-    });
+    const { allocations } = await computeAllocations({ loanId: loan.id, amount: n.amount, date: n.paidAt });
 
     const repayment = await Repayment.create(
       {
         loanId: loan.id,
         amountPaid: Number(n.amount),
         paymentDate: n.paidAt?.slice(0, 10),
-        method: "bank",
-        status: "approved",
+        method: 'bank',
+        status: 'approved',
         applied: true,
-        currency: n.currency || loan.currency || "TZS",
-        gateway: "bank",
+        currency: n.currency || loan.currency || 'TZS',
+        gateway: 'bank',
         gatewayRef: n.gatewayRef || null,
         reference: `BK-${n.gatewayRef || Date.now()}`,
         allocation: allocations,
@@ -1433,7 +1386,7 @@ const webhookBank = async (req, res) => {
         {
           borrowerId: loan.borrowerId,
           amount: Number(n.amount),
-          type: "deposit",
+          type: 'deposit',
           narrative: `Loan repayment deposit (bank) for ${loan.reference || loan.id}`,
           reference: repayment.reference,
           date: n.paidAt?.slice(0, 10),
@@ -1445,17 +1398,17 @@ const webhookBank = async (req, res) => {
     await t.commit();
 
     await Notifier.notifyBorrowerRepayment({
-      borrower: loan.Borrower,
+      borrower: loan[borrowerAs],
       amount: Number(n.amount),
       loanRef: loan.reference || loan.id,
-      method: "bank",
+      method: 'bank',
     });
 
     res.json({ ok: true });
   } catch (err) {
     await t.rollback();
-    console.error("Bank webhook error:", err);
-    res.status(500).json({ error: "Webhook failed" });
+    console.error('Bank webhook error:', err);
+    res.status(500).json({ error: 'Webhook failed' });
   }
 };
 
@@ -1465,19 +1418,19 @@ const webhookBank = async (req, res) => {
 const updateRepayment = async (req, res) => {
   try {
     const repayment = await Repayment.findByPk(req.params.id);
-    if (!repayment) return res.status(404).json({ error: "Repayment not found" });
+    if (!repayment) return res.status(404).json({ error: 'Repayment not found' });
 
     const body = { ...req.body };
     const attrs = (Repayment && Repayment.rawAttributes) || {};
-    if (body.date && !("date" in attrs)) delete body.date;
-    if (body.paymentDate && !("paymentDate" in attrs)) delete body.paymentDate;
-    if (body.paidAt && !("paidAt" in attrs)) delete body.paidAt;
+    if (body.date && !('date' in attrs)) delete body.date;
+    if (body.paymentDate && !('paymentDate' in attrs)) delete body.paymentDate;
+    if (body.paidAt && !('paidAt' in attrs)) delete body.paidAt;
 
     await repayment.update(body);
     res.json(repayment);
   } catch (err) {
-    console.error("Update repayment error:", err);
-    res.status(500).json({ error: "Error updating repayment" });
+    console.error('Update repayment error:', err);
+    res.status(500).json({ error: 'Error updating repayment' });
   }
 };
 
@@ -1498,7 +1451,7 @@ module.exports = {
   createRepayment,
   updateRepayment,
   deleteRepayment,
-  // schedule (NEW)
+  // schedule
   listScheduleLoans,
   // bulk & csv
   createBulkRepayments,
