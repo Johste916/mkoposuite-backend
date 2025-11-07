@@ -5,6 +5,7 @@ module.exports = (sequelize, DataTypes) => {
   const LoanProduct = sequelize.define(
     'LoanProduct',
     {
+      id:   { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
       name: { type: DataTypes.STRING, allowNull: false },
       code: { type: DataTypes.STRING, allowNull: false, unique: true },
 
@@ -36,10 +37,11 @@ module.exports = (sequelize, DataTypes) => {
       meta:           { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
     },
     {
+      schema: 'public',
       tableName: 'loan_products',  // existing snake table
       freezeTableName: true,
       timestamps: true,
-      underscored: false,          // align with global camel timestamps
+      underscored: false,          // camel createdAt/updatedAt
       createdAt: 'createdAt',
       updatedAt: 'updatedAt',
       indexes: [
@@ -48,6 +50,17 @@ module.exports = (sequelize, DataTypes) => {
       ],
     }
   );
+
+  LoanProduct.associate = (models) => {
+    if (models.Loan && !LoanProduct.associations?.Loans) {
+      LoanProduct.hasMany(models.Loan, {
+        as: 'Loans',
+        foreignKey: 'productId', // maps to product_id in DB
+        sourceKey: 'id',
+        constraints: false,
+      });
+    }
+  };
 
   return LoanProduct;
 };

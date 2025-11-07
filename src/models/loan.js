@@ -1,3 +1,4 @@
+// src/models/loan.js
 'use strict';
 
 module.exports = (sequelize, DataTypes) => {
@@ -12,7 +13,7 @@ module.exports = (sequelize, DataTypes) => {
       branchId:   { type: DataTypes.INTEGER, allowNull: true,  field: 'branchId' },   // camel in DB
 
       // Business refs / users
-      approvedBy:  { type: DataTypes.UUID, allowNull: true, field: 'approved_by' },  // snake exists
+      approvedBy:  { type: DataTypes.UUID, allowNull: true, field: 'approved_by' },
       rejectedBy:  { type: DataTypes.UUID, allowNull: true, field: 'rejected_by' },
       disbursedBy: { type: DataTypes.UUID, allowNull: true, field: 'disbursed_by' },
 
@@ -24,11 +25,11 @@ module.exports = (sequelize, DataTypes) => {
       startDate:     { type: DataTypes.DATEONLY, allowNull: false, field: 'startDate' },  // camel in DB
       endDate:       { type: DataTypes.DATEONLY, allowNull: false, field: 'endDate' },    // camel in DB
 
-      repaymentFrequency: { type: DataTypes.STRING, allowNull: false, field: 'repaymentFrequency' }, // enum in DB
-      interestMethod:     { type: DataTypes.STRING, allowNull: false, field: 'interestMethod' },     // enum in DB
+      repaymentFrequency: { type: DataTypes.STRING, allowNull: false, field: 'repaymentFrequency' },
+      interestMethod:     { type: DataTypes.STRING, allowNull: false, field: 'interestMethod' },
       status:             { type: DataTypes.STRING, allowNull: false, defaultValue: 'pending', field: 'status' },
 
-      // Dates (dual forms in table — prefer snake where it exists)
+      // Dates with snake columns
       approvalDate:     { type: DataTypes.DATE, allowNull: true, field: 'approval_date' },
       rejectionDate:    { type: DataTypes.DATE, allowNull: true, field: 'rejection_date' },
       disbursementDate: { type: DataTypes.DATE, allowNull: true, field: 'disbursement_date' },
@@ -46,20 +47,21 @@ module.exports = (sequelize, DataTypes) => {
 
       // Close / reschedule
       closedBy:          { type: DataTypes.INTEGER, allowNull: true, field: 'closed_by' },
-      closedDate:        { type: DataTypes.DATE, allowNull: true, field: 'closed_date' },
+      closedDate:        { type: DataTypes.DATE,     allowNull: true, field: 'closed_date' },
       closeReason:       { type: DataTypes.STRING(255), allowNull: true, field: 'close_reason' },
       rescheduledFromId: { type: DataTypes.INTEGER, allowNull: true, field: 'rescheduled_from_id' },
       topUpOfId:         { type: DataTypes.INTEGER, allowNull: true, field: 'top_up_of_id' },
 
-      // Timestamps in your DB are camelCase columns
+      // Timestamps (camel in DB)
       createdAt: { type: DataTypes.DATE, allowNull: true, field: 'createdAt' },
       updatedAt: { type: DataTypes.DATE, allowNull: true, field: 'updatedAt' },
     },
     {
+      schema: 'public',
       tableName: 'loans',
       freezeTableName: true,
       timestamps: true,          // uses createdAt/updatedAt by default
-      underscored: false,        // your table uses camel for timestamps & many cols
+      underscored: false,
       hooks: {
         beforeValidate: (loan) => {
           if (!loan.reference) {
@@ -72,12 +74,12 @@ module.exports = (sequelize, DataTypes) => {
         },
       },
       indexes: [
-        { fields: ['borrowerId'] },
-        { fields: ['product_id'] },
-        { fields: ['branchId'] },
+        { fields: ['borrowerId'] },       // camel column in DB
+        { fields: ['product_id'] },       // snake column in DB
+        { fields: ['branchId'] },         // camel column in DB
         { fields: ['status'] },
         { fields: ['disbursement_date'] },
-        { fields: ['createdAt'] },   // camel in your table
+        { fields: ['createdAt'] },
       ],
     }
   );
@@ -87,9 +89,65 @@ module.exports = (sequelize, DataTypes) => {
     const [y, m, d] = String(dateStr).split('-').map(Number);
     const dt = new Date(Date.UTC(y, m - 1, d || 1));
     const target = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + months, dt.getUTCDate()));
+    // handle month overflow (e.g., Jan 31 + 1 month → Feb end)
     if (target.getUTCMonth() !== ((m - 1 + months) % 12 + 12) % 12) target.setUTCDate(0);
     return target.toISOString().slice(0, 10);
   }
+
+  Loan.associate = (models) => {
+    if (models.Borrower && !Loan.associations?.borrower) {
+      Loan.belongsTo(models.Borrower, {
+        as: 'borrower',
+        foreignKey: 'borrowerId',
+        targetKey: 'id',
+        constraints: false,
+      });
+    }
+    if (models.LoanProduct && !Loan.associations?.product) {
+      Loan.belongsTo(models.LoanProduct, {
+        as: 'product',
+        foreignKey: 'productId', // mapped to DB column product_id
+        targetKey: 'id',
+        constraints: false,
+      });
+    }
+    if (models.Branch && !Loan.associations?.branch) {
+      Loan.belongsTo(models.Branch, {
+        as: 'branch',
+        foreignKey: 'branchId',
+        targetKey: 'id',
+        constraints: false,
+      });
+    }
+
+    // Optional user links (UUID) — keep constraints off to avoid FK requirement
+    if (models.User) {
+      if (!Loan.associations?.approvedByUser) {
+        Loan.belongsTo(models.User, {
+          as: 'approvedByUser',
+          foreignKey: 'approvedBy',
+          targetKey: 'id',
+          constraints: false,
+        });
+      }
+      if (!Loan.associations?.rejectedByUser) {
+        Loan.belongsTo(models.User, {
+          as: 'rejectedByUser',
+          foreignKey: 'rejectedBy',
+          targetKey: 'id',
+          constraints: false,
+        });
+      }
+      if (!Loan.associations?.disbursedByUser) {
+        Loan.belongsTo(models.User, {
+          as: 'disbursedByUser',
+          foreignKey: 'disbursedBy',
+          targetKey: 'id',
+          constraints: false,
+        });
+      }
+    }
+  };
 
   return Loan;
 };

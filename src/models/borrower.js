@@ -71,9 +71,10 @@ module.exports = (sequelize, DataTypes) => {
       status: { type: DataTypes.STRING(32), allowNull: false, defaultValue: 'active', field: 'status' },
     },
     {
-      tableName: 'Borrowers',
+      schema: 'public',
+      tableName: 'Borrowers',          // keep existing cased table name
       freezeTableName: true,
-      timestamps: true,   // this table uses camel timestamps
+      timestamps: true,                // createdAt/updatedAt (camel) exist
       underscored: false,
       indexes: [
         { fields: ['name'] },
@@ -91,10 +92,28 @@ module.exports = (sequelize, DataTypes) => {
 
   Borrower.associate = (models) => {
     if (models.Branch && !Borrower.associations?.Branch) {
-      Borrower.belongsTo(models.Branch, { as: 'Branch', foreignKey: 'branchId', targetKey: 'id' });
+      Borrower.belongsTo(models.Branch, {
+        as: 'Branch',
+        foreignKey: 'branchId',
+        targetKey: 'id',
+        constraints: false,
+      });
     }
     if (models.User && !Borrower.associations?.loanOfficer) {
-      Borrower.belongsTo(models.User, { as: 'loanOfficer', foreignKey: 'loanOfficerId', targetKey: 'id', constraints: false });
+      Borrower.belongsTo(models.User, {
+        as: 'loanOfficer',
+        foreignKey: 'loanOfficerId',
+        targetKey: 'id',
+        constraints: false,
+      });
+    }
+    if (models.Loan && !Borrower.associations?.Loans) {
+      Borrower.hasMany(models.Loan, {
+        as: 'Loans',
+        foreignKey: 'borrowerId',
+        sourceKey: 'id',
+        constraints: false,
+      });
     }
   };
 
