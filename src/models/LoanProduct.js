@@ -9,9 +9,10 @@ module.exports = (sequelize, DataTypes) => {
       name: { type: DataTypes.STRING, allowNull: false, field: 'name' },
       code: { type: DataTypes.STRING, allowNull: false, unique: true, field: 'code' },
 
+      // Postgres enum column
       status: { type: DataTypes.ENUM('active', 'inactive'), allowNull: false, defaultValue: 'active', field: 'status' },
 
-      // map camel -> snake columns
+      // map camel -> snake columns (match DB exactly)
       interestMethod: { type: DataTypes.ENUM('flat', 'reducing'), allowNull: false, defaultValue: 'flat', field: 'interest_method' },
       interestRate:   { type: DataTypes.DECIMAL(10, 4), allowNull: false, defaultValue: 0, field: 'interest_rate' },
 
@@ -33,7 +34,6 @@ module.exports = (sequelize, DataTypes) => {
       feePercent:     { type: DataTypes.DECIMAL(10, 4), allowNull: true, field: 'fee_percent' },
 
       fees:           { type: DataTypes.JSONB, allowNull: false, defaultValue: [], field: 'fees' },
-
       eligibility:    { type: DataTypes.JSONB, allowNull: false, defaultValue: {}, field: 'eligibility' },
       meta:           { type: DataTypes.JSONB, allowNull: false, defaultValue: {}, field: 'meta' },
     },
@@ -42,9 +42,12 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'loan_products',
       freezeTableName: true,
       timestamps: true,
-      underscored: false,
-      createdAt: 'createdAt',
-      updatedAt: 'updatedAt',
+
+      // IMPORTANT: map to physical snake-case columns from your DB dump
+      createdAt: 'created_at',
+      updatedAt: 'updated_at',
+
+      underscored: false, // keep explicit field mappings above
       indexes: [
         { unique: true, fields: ['code'] },
         { fields: ['status'] },
