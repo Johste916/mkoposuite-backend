@@ -526,6 +526,155 @@ async function fetchLoanByPkSafe(id) {
   });
 }
 
+/* --------------------------------------------------------------------
+   NEW: Aggregates helpers used by list & detail to match UI breakdown
+---------------------------------------------------------------------*/
+const __sumCol = (Model, attr) =>
+  sequelize.fn("COALESCE", sequelize.fn("SUM", col(Model.rawAttributes?.[attr]?.field || attr)), 0);
+
+function pickRateMonthly(l) {
+  return Number(l.interestRate ?? l.rate ?? 0);
+}
+function pickTermMonths(l) {
+  return Number(l.termMonths ?? l.durationMonths ?? l.term ?? 0);
+}
+function computeFlatInterest(principal, rateMonthly, term) {
+  return (Number(principal) * Number(rateMonthly) * Number(term)) / 100;
+}
+function computeReducingInterestViaSchedule(l) {
+  const schedule = generateReducingBalanceSchedule({
+    amount: Number(l.amount || 0),
+    interestRate: pickRateMonthly(l),
+    term: pickTermMonths(l),
+    issueDate: l.startDate,
+  }) || [];
+  return schedule.reduce((s, r) => s + Number(r.interest || 0), 0);
+}
+
+/** Group-by sums from LoanPayment/LoanRepayment */
+async function buildPaymentsMap(loanIds) {
+  const M =
+    LoanPayment ||
+    LoanRepayment ||
+    (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment));
+
+  const out = Object.create(null);
+  if (!M || !loanIds.length) return out;
+
+  const attrs = M.rawAttributes || {};
+  const have = (k) => !!attrs[k];
+
+  const aggAttrs = [
+    "loanId",
+    [__sumCol(M, have("amountPaid") ? "amountPaid" : have("amount") ? "amount" : "total"), "totalPaid"],
+  ];
+  if (have("principal")) aggAttrs.push([__sumCol(M, "principal"), "paidPrincipal"]);
+  if (have("interest")) aggAttrs.push([__sumCol(M, "interest"), "paidInterest"]);
+  if (have("fees")) aggAttrs.push([__sumCol(M, "fees"), "paidFees"]);
+  if (have("penalties")) aggAttrs.push([__sumCol(M, "penalties"), "paidPenalties"]);
+
+  const rows = await M.findAll({
+    attributes: aggAttrs,
+    where: { loanId: { [Op.in]: loanIds } },
+    group: ["loanId"],
+    raw: true,
+  });
+
+  for (const r of rows) {
+    out[r.loanId] = {
+      totalPaid: Number(r.totalPaid || 0),
+      paidPrincipal: Number(r.paidPrincipal || 0),
+      paidInterest: Number(r.paidInterest || 0),
+      paidFees: Number(r.paidFees || 0),
+      paidPenalties: Number(r.paidPenalties || 0),
+    };
+  }
+  return out;
+}
+
+/** Group-by interest totals from loan_schedules if table/column exist */
+async function buildScheduleInterestMap(loanIds) {
+  const out = Object.create(null);
+  if (!LoanSchedule || !loanIds.length) return out;
+  if (!(await tableExists("loan_schedules"))) return out;
+
+  const attrs = LoanSchedule.rawAttributes || {};
+  if (!attrs.loanId || !attrs.interest) return out;
+
+  const rows = await LoanSchedule.findAll({
+    attributes: [
+      "loanId",
+      [__sumCol(LoanSchedule, "interest"), "totalInterest"],
+    ],
+    where: { loanId: { [Op.in]: loanIds } },
+    group: ["loanId"],
+    raw: true,
+  });
+
+  for (const r of rows) {
+    out[r.loanId] = { totalInterest: Number(r.totalInterest || 0) };
+  }
+  return out;
+}
+
+function interestFirstAllocation(totalPaid, totalInterest, principal) {
+  const paidInterest = Math.min(Number(totalInterest), Number(totalPaid));
+  const paidPrincipal = Math.min(Number(principal), Math.max(0, Number(totalPaid) - paidInterest));
+  return { paidInterest, paidPrincipal };
+}
+
+function computeAggregatesForLoan(loan, maps) {
+  const principal = Number(loan.amount || 0);
+  const rateMonthly = pickRateMonthly(loan);
+  const term = pickTermMonths(loan);
+
+  // 1) interest: prefer schedule sum; fallback to model/compute
+  let totalInterest =
+    (maps.schedule[loan.id]?.totalInterest ?? null);
+
+  if (!Number.isFinite(totalInterest)) {
+    if (loan.interestMethod === "reducing") {
+      totalInterest = computeReducingInterestViaSchedule(loan);
+    } else {
+      totalInterest = computeFlatInterest(principal, rateMonthly, term);
+    }
+  }
+
+  // 2) payments
+  const pm = maps.payments[loan.id] || {
+    totalPaid: 0, paidPrincipal: 0, paidInterest: 0, paidFees: 0, paidPenalties: 0,
+  };
+
+  // If no split stored, allocate interest-first to keep UI consistent & conservative
+  let paidPrincipal = Number(pm.paidPrincipal || 0);
+  let paidInterest = Number(pm.paidInterest || 0);
+
+  if (paidPrincipal === 0 && paidInterest === 0 && pm.totalPaid > 0) {
+    const alloc = interestFirstAllocation(pm.totalPaid, totalInterest, principal);
+    paidInterest = alloc.paidInterest;
+    paidPrincipal = alloc.paidPrincipal;
+  }
+
+  const paidTotal = Number(pm.totalPaid || (paidPrincipal + paidInterest));
+
+  const principalBalance = Math.max(0, principal - paidPrincipal);
+  const interestBalance  = Math.max(0, totalInterest - paidInterest);
+  const outstandingTotal = Math.max(0, principalBalance + interestBalance);
+
+  return {
+    principal,
+    rateMonthlyPct: rateMonthly,
+    termMonths: term,
+    totalInterest,
+    paidPrincipal,
+    paidInterest,
+    paidTotal,
+    principalBalance,
+    interestBalance,
+    outstandingTotal,
+  };
+}
+
 /* ====================================================================
    CORE: Transition executor usable by multiple endpoints (DRY)
 ==================================================================== */
@@ -779,7 +928,6 @@ const getAllLoans = async (req, res) => {
         { model: LoanProduct },
         ...userIncludes,
       ],
-      // Keeping as-is to avoid touching Loans ordering if it's already working for you.
       order: [["createdAt", "DESC"]],
       limit: 500,
     });
@@ -795,6 +943,30 @@ const getAllLoans = async (req, res) => {
         const nd = String(l.nextDueStatus || "").toLowerCase();
         return nd === "overdue" || Number(l.dpd || 0) > 0 || Number(l.arrears || 0) > 0;
       });
+    }
+
+    // ---------- NEW: attach aggregates when requested ----------
+    const includeParam = String(req.query.include || "").toLowerCase();
+    const wantAggregates = includeParam.split(",").map(s => s.trim()).includes("aggregates");
+
+    if (wantAggregates && result.length) {
+      const ids = result.map((l) => l.id);
+      const maps = {
+        payments: await buildPaymentsMap(ids),
+        schedule: await buildScheduleInterestMap(ids),
+      };
+
+      const augmented = result.map((l) => {
+        const fig = computeAggregatesForLoan(l, maps);
+        const obj = l.toJSON();
+        obj.aggregates = fig;
+        // expose a couple top-levels for convenience
+        obj.totalInterest = fig.totalInterest;
+        obj.outstandingTotal = fig.outstandingTotal;
+        return obj;
+      });
+
+      return res.json(augmented);
     }
 
     res.json(result || []);
@@ -820,16 +992,14 @@ const getLoanById = async (req, res) => {
     const loan = await fetchLoanByPkSafe(id);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
-    let repayments = [];
-    let totals = {
-      principal: 0,
-      interest: 0,
-      fees: 0,
-      penalties: 0,
-      totalPaid: 0,
-      outstanding: Number(loan.amount || 0),
+    // Aggregates map for single id
+    const maps = {
+      payments: await buildPaymentsMap([loan.id]),
+      schedule: await buildScheduleInterestMap([loan.id]),
     };
+    const agg = computeAggregatesForLoan(loan, maps);
 
+    let repayments = [];
     if (includeRepayments === "true") {
       const RepaymentModel =
         LoanPayment ||
@@ -848,19 +1018,7 @@ const getLoanById = async (req, res) => {
           order: orderParts,
         });
 
-        // Normalize for UI
         repayments = rawRows.map((r) => normalizeRepaymentRow(r));
-
-        // Totals
-        for (const r of repayments) {
-          totals.totalPaid += Number(r.amount || 0);
-        }
-        // If you have allocation breakdown in your model, you can also roll-up
-        // principal/interest/fees/penalties here (kept simple & safe).
-        totals.outstanding = Math.max(
-          0,
-          Number(loan.amount || 0) + Number(loan.totalInterest || 0) - totals.totalPaid
-        );
       }
     }
 
@@ -872,7 +1030,7 @@ const getLoanById = async (req, res) => {
           schedule = await LoanSchedule.findAll({
             where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
             attributes: scheduleAttrs,
-            order: [["period", "ASC"]],
+            order: [["period", "ASC"]], 
           });
         } catch (e) {
           console.warn(`[loans] schedule query failed: ${e.message}`);
@@ -885,11 +1043,18 @@ const getLoanById = async (req, res) => {
 
     res.json({
       ...loan.toJSON(),
-      // expose stable keys the UI reads:
       borrowerId: loan.borrowerId ?? loan.Borrower?.id ?? null,
       branchId: loan.branchId ?? loan.Branch?.id ?? null,
       productId: loan.productId ?? loan.LoanProduct?.id ?? null,
-      totals,
+      aggregates: agg,
+      totals: {
+        principal: agg.principal,
+        interest: agg.totalInterest,
+        fees: 0,
+        penalties: 0,
+        totalPaid: agg.paidTotal,
+        outstanding: agg.outstandingTotal,
+      },
       repayments,
       schedule,
     });
@@ -1024,7 +1189,7 @@ const getLoanSchedule = async (req, res) => {
         rows = await LoanSchedule.findAll({
           where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
           attributes: scheduleAttrs,
-          order: [["period", "ASC"]],
+          order: [["period", "ASC"]], 
         });
       } catch (e) {
         console.warn(`[loans] getLoanSchedule DB fetch failed: ${e.message}`);
