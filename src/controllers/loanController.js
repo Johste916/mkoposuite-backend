@@ -13,9 +13,12 @@ const {
 } = require("../models");
 
 const { Op, where, col } = require("sequelize");
-/* ---------- soft deps: event bus + aggregates (both optional) ---------- */
+
+/* ---------- soft deps: event bus + aggregates (optional) ---------- */
 let BUS = null, EVENTS = null;
-try { ({ bus: BUS, EVENTS } = require('../services/syncBus')); } catch {}
+try {
+  ({ bus: BUS, EVENTS } = require("../services/syncBus"));
+} catch {}
 
 const emitSafe = (evt, payload) => {
   try {
@@ -29,7 +32,9 @@ let Aggregates = {
   recomputeBorrowerAggregates: async () => {},
   recomputeLoanAndBorrower: async () => {},
 };
-try { Aggregates = require('../services/aggregates'); } catch {}
+try {
+  Aggregates = require("../services/aggregates");
+} catch {}
 
 const {
   generateFlatRateSchedule,
@@ -39,14 +44,20 @@ const {
 const BORROWER_ATTRS = ["id", "name", "nationalId", "phone"];
 
 // DB statuses (persisted). "active" is derived (disbursed & not closed) and is not persisted.
-const DB_ENUM_STATUSES = new Set(["pending", "approved", "rejected", "disbursed", "closed"]);
+const DB_ENUM_STATUSES = new Set([
+  "pending",
+  "approved",
+  "rejected",
+  "disbursed",
+  "closed",
+]);
 
 // Allowed transitions for the persisted enum only
 // NOTE: expanded to allow resubmission after rejection (rejected -> pending)
 const ALLOWED = {
-  pending:   ["approved", "rejected"],
-  approved:  ["disbursed", "rejected"], // allow explicit reversal to rejected if needed
-  rejected:  ["pending"],
+  pending: ["approved", "rejected"],
+  approved: ["disbursed", "rejected"], // allow explicit reversal to rejected if needed
+  rejected: ["pending"],
   disbursed: ["closed"],
 };
 
@@ -91,7 +102,12 @@ function normalizePgType(t = "") {
   const s = String(t).toLowerCase();
   if (s.includes("uuid")) return "uuid";
   if (s.includes("int")) return "int"; // covers int2/4/8
-  if (s.includes("char") || s.includes("text") || s.includes("varying")) return "text";
+  if (
+    s.includes("char") ||
+    s.includes("text") ||
+    s.includes("varying")
+  )
+    return "text";
   if (s.includes("timestamp") || s.includes("date")) return "date";
   if (s.includes("enum") || s.includes("user-defined")) return "enum";
   return s || "unknown";
@@ -101,19 +117,29 @@ async function describeTableCached(tableName) {
   try {
     const qi = sequelize.getQueryInterface();
     if (tableName === getLoansTableName()) {
-      if (!LOAN_TABLE_DESC_CACHE) LOAN_TABLE_DESC_CACHE = await qi.describeTable(tableName);
+      if (!LOAN_TABLE_DESC_CACHE)
+        LOAN_TABLE_DESC_CACHE = await qi.describeTable(
+          tableName
+        );
       return LOAN_TABLE_DESC_CACHE;
     }
     if (tableName === getUsersTableName()) {
-      if (!USERS_TABLE_DESC_CACHE) USERS_TABLE_DESC_CACHE = await qi.describeTable(tableName);
+      if (!USERS_TABLE_DESC_CACHE)
+        USERS_TABLE_DESC_CACHE = await qi.describeTable(
+          tableName
+        );
       return USERS_TABLE_DESC_CACHE;
     }
     if (tableName === "loan_payments") {
-      if (!LOAN_PAYMENTS_DESC_CACHE) LOAN_PAYMENTS_DESC_CACHE = await qi.describeTable("loan_payments");
+      if (!LOAN_PAYMENTS_DESC_CACHE)
+        LOAN_PAYMENTS_DESC_CACHE =
+          await qi.describeTable("loan_payments");
       return LOAN_PAYMENTS_DESC_CACHE;
     }
     if (tableName === "loan_schedules") {
-      if (!LOAN_SCHEDULES_DESC_CACHE) LOAN_SCHEDULES_DESC_CACHE = await qi.describeTable("loan_schedules");
+      if (!LOAN_SCHEDULES_DESC_CACHE)
+        LOAN_SCHEDULES_DESC_CACHE =
+          await qi.describeTable("loan_schedules");
       return LOAN_SCHEDULES_DESC_CACHE;
     }
     return await qi.describeTable(tableName);
@@ -129,7 +155,9 @@ async function tableExists(tableName) {
 async function getLoanColumns() {
   if (LOAN_COLUMNS_CACHE) return LOAN_COLUMNS_CACHE;
   try {
-    const desc = await describeTableCached(getLoansTableName());
+    const desc = await describeTableCached(
+      getLoansTableName()
+    );
     if (desc) {
       LOAN_COLUMNS_CACHE = new Set(Object.keys(desc)); // DB field names
       return LOAN_COLUMNS_CACHE;
@@ -137,14 +165,18 @@ async function getLoanColumns() {
   } catch {}
   // Fallback: infer from model (may still include non-existent columns)
   LOAN_COLUMNS_CACHE = new Set(
-    Object.values(Loan.rawAttributes || {}).map((a) => a.field || a.fieldName || a)
+    Object.values(Loan.rawAttributes || {}).map(
+      (a) => a.field || a.fieldName || a
+    )
   );
   return LOAN_COLUMNS_CACHE;
 }
 
 /** Map a model attr to its DB field name */
 function toDbField(attrName) {
-  return Loan?.rawAttributes?.[attrName]?.field || attrName;
+  return (
+    Loan?.rawAttributes?.[attrName]?.field || attrName
+  );
 }
 
 /** Does this logical attr exist as a DB column on loans? */
@@ -158,41 +190,56 @@ async function getSafeLoanAttributeNames() {
   const cols = await getLoanColumns();
   const attrs = Loan.rawAttributes || {};
   return Object.keys(attrs).filter((name) => {
-    const field = attrs[name]?.field || name;
+    const field =
+      attrs[name]?.field || attrs[name]?.fieldName || name;
     return cols.has(field);
   });
 }
 
 /** Return type + allowNull meta for loans.<attr> */
 async function getLoanColumnMeta(attr) {
-  const loansDesc = await describeTableCached(getLoansTableName());
-  const dbField = Loan?.rawAttributes?.[attr]?.field || attr;
-  const col = loansDesc?.[dbField] || null;
-  if (!col) return null;
+  const loansDesc = await describeTableCached(
+    getLoansTableName()
+  );
+  const dbField =
+    Loan?.rawAttributes?.[attr]?.field || attr;
+  const colDesc = loansDesc?.[dbField] || null;
+  if (!colDesc) return null;
   return {
-    type: normalizePgType(col.type || "unknown"),
-    allowNull: !!col.allowNull,
-    raw: col,
+    type: normalizePgType(colDesc.type || "unknown"),
+    allowNull: !!colDesc.allowNull,
+    raw: colDesc,
     dbField,
   };
 }
 
 /** Prefer model-defined enum values; otherwise pull them robustly from the DB */
-async function getEnumLabelsForColumn(tableName, columnName) {
+async function getEnumLabelsForColumn(
+  tableName,
+  columnName
+) {
   try {
     // 1) Model-defined enum (most reliable)
     if (Loan && columnName === "status") {
       const ra = Loan.rawAttributes?.status;
       const modelVals =
-        (ra && (ra.values || ra.type?.values)) ? (ra.values || ra.type.values) : null;
-      if (Array.isArray(modelVals) && modelVals.length) return modelVals;
+        ra && (ra.values || ra.type?.values)
+          ? ra.values || ra.type.values
+          : null;
+      if (
+        Array.isArray(modelVals) &&
+        modelVals.length
+      )
+        return modelVals;
     }
 
     // 2) Cached?
-    const key = `${String(tableName).toLowerCase()}.${String(columnName).toLowerCase()}`;
+    const key = `${String(tableName).toLowerCase()}.${String(
+      columnName
+    ).toLowerCase()}`;
     if (ENUM_CACHE[key]) return ENUM_CACHE[key];
 
-    // 3) Two-step DB lookup: first get udt_name, then fetch pg_enum labels
+    // 3) Get udt_name then pg_enum labels
     const [[udtRow]] = await sequelize.query(
       `
       SELECT c.udt_name
@@ -220,11 +267,16 @@ async function getEnumLabelsForColumn(tableName, columnName) {
       `,
       { replacements: { udt } }
     );
-    const labels = Array.isArray(rows) ? rows.map(r => r.enumlabel) : [];
+    const labels = Array.isArray(rows)
+      ? rows.map((r) => r.enumlabel)
+      : [];
     ENUM_CACHE[key] = labels;
     return labels;
   } catch (e) {
-    console.warn("[loans] enum introspection failed:", e.message);
+    console.warn(
+      "[loans] enum introspection failed:",
+      e.message
+    );
     return [];
   }
 }
@@ -232,28 +284,41 @@ async function getEnumLabelsForColumn(tableName, columnName) {
 /** Map a friendly status ('approved') to the exact DB enum label (e.g., 'Approved') */
 async function mapStatusToDbEnumLabel(next) {
   const table = getLoansTableName();
-  const labels = await getEnumLabelsForColumn(table, "status");
-  if (!labels.length) return next; // column not enum (or unknown) → pass through
-  const hit = labels.find(l => String(l).toLowerCase() === String(next).toLowerCase());
+  const labels = await getEnumLabelsForColumn(
+    table,
+    "status"
+  );
+  if (!labels.length) return next; // column not enum → pass through
+  const hit = labels.find(
+    (l) =>
+      String(l).toLowerCase() ===
+      String(next).toLowerCase()
+  );
   return hit || null;
 }
 
 /**
- * Build includes for the User associations on Loan, but only if the FK type
- * matches Users PK type (prevents integer vs uuid join errors).
+ * Build includes for the User associations on Loan, but only if
+ * the FK type matches Users PK type (prevents int<->uuid join errors).
  */
 async function buildUserIncludesIfPossible() {
   const includes = [];
-  const userTableDesc = await describeTableCached(getUsersTableName());
-  const loansTableDesc = await describeTableCached(getLoansTableName());
+  const userTableDesc = await describeTableCached(
+    getUsersTableName()
+  );
+  const loansTableDesc = await describeTableCached(
+    getLoansTableName()
+  );
 
   // Figure out Users PK type (assume "id")
-  const usersPkType = normalizePgType(userTableDesc?.id?.type || "unknown");
+  const usersPkType = normalizePgType(
+    userTableDesc?.id?.type || "unknown"
+  );
 
   // Gather all Loan -> User associations
-  const assocEntries = Object.entries(Loan.associations || {}).filter(
-    ([, a]) => a?.target === User
-  );
+  const assocEntries = Object.entries(
+    Loan.associations || {}
+  ).filter(([, a]) => a?.target === User);
 
   for (const [as, assoc] of assocEntries) {
     const fkAttrName =
@@ -264,8 +329,13 @@ async function buildUserIncludesIfPossible() {
 
     if (!fkAttrName) continue;
 
-    const fkDbField = Loan.rawAttributes?.[fkAttrName]?.field || fkAttrName;
-    const fkType = normalizePgType(loansTableDesc?.[fkDbField]?.type || "unknown");
+    const fkDbField =
+      Loan.rawAttributes?.[fkAttrName]?.field ||
+      fkAttrName;
+    const fkType = normalizePgType(
+      loansTableDesc?.[fkDbField]?.type ||
+        "unknown"
+    );
 
     const compatible =
       (fkType === "uuid" && usersPkType === "uuid") ||
@@ -289,60 +359,95 @@ async function buildUserIncludesIfPossible() {
 }
 
 /** Safely set a User FK into fields, coercing to int/validating uuid as needed */
-async function setUserFkIfSafe(fields, attr, userId) {
+async function setUserFkIfSafe(
+  fields,
+  attr,
+  userId
+) {
   if (!(await loanColumnExists(attr))) return;
   const meta = await getLoanColumnMeta(attr);
   if (!meta) return;
   if (meta.type === "int") {
     const asInt = Number.parseInt(userId, 10);
     if (Number.isFinite(asInt)) fields[attr] = asInt;
-    else console.warn(`[loans] Skip ${attr}: userId not numeric for int FK`);
+    else
+      console.warn(
+        `[loans] Skip ${attr}: userId not numeric for int FK`
+      );
   } else if (meta.type === "uuid") {
     const s = String(userId || "");
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) {
+    if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        s
+      )
+    ) {
       fields[attr] = s;
     } else {
-      console.warn(`[loans] Skip ${attr}: userId not a UUID for uuid FK`);
+      console.warn(
+        `[loans] Skip ${attr}: userId not a UUID for uuid FK`
+      );
     }
   } else {
-    // unknown or text → do nothing; we don't know safe casting
-    console.warn(`[loans] Skip ${attr}: unsupported FK column type ${meta.type}`);
+    console.warn(
+      `[loans] Skip ${attr}: unsupported FK column type ${meta.type}`
+    );
   }
 }
 
 /** Safely set a date/timestamp column */
-async function setDateCol(fields, attr, dateVal = new Date()) {
+async function setDateCol(
+  fields,
+  attr,
+  dateVal = new Date()
+) {
   if (!(await loanColumnExists(attr))) return;
   const meta = await getLoanColumnMeta(attr);
   if (!meta) return;
   if (meta.type === "date") {
-    fields[attr] = new Date(dateVal).toISOString().slice(0, 10); // YYYY-MM-DD
+    fields[attr] = new Date(dateVal)
+      .toISOString()
+      .slice(0, 10); // YYYY-MM-DD
   } else {
-    fields[attr] = dateVal; // Sequelize handles timestamp
+    fields[attr] = dateVal; // let Sequelize handle timestamp
   }
 }
 
 /** Preflight: ensure we *can* set required columns for a transition */
 async function preflightTransition(next, userId) {
   // 1) status column cannot be INT
-  const statusMeta = await getLoanColumnMeta("status");
+  const statusMeta = await getLoanColumnMeta(
+    "status"
+  );
   if (statusMeta && statusMeta.type === "int") {
     return `Cannot set string status "${next}" because loans.status is numeric (int).`;
   }
   // 1b) if enum, make sure value exists
   if (statusMeta && statusMeta.type === "enum") {
-    const mapped = await mapStatusToDbEnumLabel(next);
+    const mapped = await mapStatusToDbEnumLabel(
+      next
+    );
     if (!mapped) {
-      const labels = await getEnumLabelsForColumn(getLoansTableName(), "status");
-      return `Status "${next}" not supported by DB enum. Allowed: ${labels.join(", ")}`;
+      const labels =
+        await getEnumLabelsForColumn(
+          getLoansTableName(),
+          "status"
+        );
+      return `Status "${next}" not supported by DB enum. Allowed: ${labels.join(
+        ", "
+      )}`;
     }
   }
 
   // helper to check a FK requirement
-  const needUserFk = async (attrName, label) => {
-    const meta = await getLoanColumnMeta(attrName);
-    if (!meta) return null; // column absent → nothing to validate
-    if (meta.allowNull) return null; // nullable → not strictly required
+  const needUserFk = async (
+    attrName,
+    label
+  ) => {
+    const meta = await getLoanColumnMeta(
+      attrName
+    );
+    if (!meta) return null; // column absent
+    if (meta.allowNull) return null; // nullable ok
     // Non-nullable: must be coercible
     if (meta.type === "int") {
       const asInt = Number.parseInt(userId, 10);
@@ -351,7 +456,11 @@ async function preflightTransition(next, userId) {
       }
     } else if (meta.type === "uuid") {
       const s = String(userId || "");
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) {
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          s
+        )
+      ) {
         return `Cannot ${label}: ${attrName} is UUID NOT NULL but current user id is not a UUID.`;
       }
     } else {
@@ -361,37 +470,59 @@ async function preflightTransition(next, userId) {
   };
 
   const needDateCol = async (attrName) => {
-    const meta = await getLoanColumnMeta(attrName);
+    const meta = await getLoanColumnMeta(
+      attrName
+    );
     if (!meta) return null;
     if (meta.allowNull) return null;
-    return null; // we will set a value
+    return null; // we'll set a value
   };
 
   if (next === "approved") {
     return (
-      (await needUserFk("approvedBy", "approve")) ||
-      (await needDateCol("approvalDate")) ||
+      (await needUserFk(
+        "approvedBy",
+        "approve"
+      )) ||
+      (await needDateCol(
+        "approvalDate"
+      )) ||
       null
     );
   }
   if (next === "rejected") {
     return (
-      (await needUserFk("rejectedBy", "reject")) ||
-      (await needDateCol("rejectedDate")) ||
+      (await needUserFk(
+        "rejectedBy",
+        "reject"
+      )) ||
+      (await needDateCol(
+        "rejectedDate"
+      )) ||
       null
     );
   }
   if (next === "disbursed") {
     return (
-      (await needUserFk("disbursedBy", "disburse")) ||
-      (await needDateCol("disbursementDate")) ||
+      (await needUserFk(
+        "disbursedBy",
+        "disburse"
+      )) ||
+      (await needDateCol(
+        "disbursementDate"
+      )) ||
       null
     );
   }
   if (next === "closed") {
     return (
-      (await needUserFk("closedBy", "close")) ||
-      (await needDateCol("closedDate")) ||
+      (await needUserFk(
+        "closedBy",
+        "close"
+      )) ||
+      (await needDateCol(
+        "closedDate"
+      )) ||
       null
     );
   }
@@ -403,35 +534,67 @@ async function preflightTransition(next, userId) {
 =========================== */
 function addMonthsDateOnly(dateStr, months) {
   // dateStr is "YYYY-MM-DD"
-  const [y, m, d] = String(dateStr).split("-").map(Number);
+  const [y, m, d] = String(dateStr)
+    .split("-")
+    .map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
-  const targetMonthIndex = dt.getUTCMonth() + Number(months);
-  const target = new Date(Date.UTC(dt.getUTCFullYear(), targetMonthIndex, dt.getUTCDate()));
+  const targetMonthIndex =
+    dt.getUTCMonth() + Number(months);
+  const target = new Date(
+    Date.UTC(
+      dt.getUTCFullYear(),
+      targetMonthIndex,
+      dt.getUTCDate()
+    )
+  );
   // Handle end-of-month rollover
-  if (target.getUTCMonth() !== ((m - 1 + Number(months)) % 12 + 12) % 12) {
+  if (
+    target.getUTCMonth() !==
+    ((m - 1 + Number(months)) % 12 + 12) % 12
+  ) {
     target.setUTCDate(0);
   }
-  return target.toISOString().slice(0, 10);
+  return target
+    .toISOString()
+    .slice(0, 10);
 }
 
 /* ---------- API payload normalizers (stable frontend contract) ---------- */
 function isoDateOnly(input) {
   if (!input) return "";
-  const s = typeof input === "string" ? input : new Date(input).toISOString();
+  const s =
+    typeof input === "string"
+      ? input
+      : new Date(input).toISOString();
   // allow 'YYYY-MM-DD', otherwise trim to date part
   const mm = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  return mm ? mm[1] : new Date(s).toISOString().slice(0, 10);
+  return mm
+    ? mm[1]
+    : new Date(s).toISOString().slice(0, 10);
 }
 
 /** Normalize a repayment row to a stable shape the UI expects */
 function normalizeRepaymentRow(r) {
   // Models vary (LoanPayment vs LoanRepayment). We normalize here.
   const date =
-    r.paymentDate || r.date || r.paidAt || r.created_at || r.createdAt || r.updated_at || r.updatedAt;
-  const amount = r.amountPaid ?? r.amount ?? r.total ?? 0;
-  const method = r.method || r.channel || r.mode || null;
+    r.paymentDate ||
+    r.date ||
+    r.paidAt ||
+    r.created_at ||
+    r.createdAt ||
+    r.updated_at ||
+    r.updatedAt;
+  const amount =
+    r.amountPaid ?? r.amount ?? r.total ?? 0;
+  const method =
+    r.method || r.channel || r.mode || null;
   const notes =
-    r.notes || r.note || r.remark || r.reference || r.description || null;
+    r.notes ||
+    r.note ||
+    r.remark ||
+    r.reference ||
+    r.description ||
+    null;
 
   return {
     id: r.id,
@@ -447,7 +610,8 @@ function normalizeRepaymentRow(r) {
 =========================== */
 const csvEscape = (v) => {
   const s = String(v ?? "");
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  if (/[",\n]/.test(s))
+    return `"${s.replace(/"/g, '""')}"`;
   return s;
 };
 
@@ -455,11 +619,22 @@ async function hasAnyRepayments(loanId) {
   const RepaymentModel =
     LoanPayment ||
     LoanRepayment ||
-    (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment));
+    (sequelize.models &&
+      (sequelize.models.LoanPayment ||
+        sequelize.models
+          .LoanRepayment));
 
-  if (!RepaymentModel || typeof RepaymentModel.count !== "function") return false;
+  if (
+    !RepaymentModel ||
+    typeof RepaymentModel.count !==
+      "function"
+  )
+    return false;
   try {
-    const n = await RepaymentModel.count({ where: { loanId } });
+    const n =
+      await RepaymentModel.count({
+        where: { loanId },
+      });
     return n > 0;
   } catch {
     return false;
@@ -467,59 +642,107 @@ async function hasAnyRepayments(loanId) {
 }
 
 async function getScheduleTableColumns() {
-  const desc = await describeTableCached("loan_schedules");
-  return desc ? new Set(Object.keys(desc)) : new Set();
+  const desc =
+    await describeTableCached(
+      "loan_schedules"
+    );
+  return desc
+    ? new Set(Object.keys(desc))
+    : new Set();
 }
 
 /** Safe schedule attribute names (model attr whose DB field exists) */
 async function getSafeScheduleAttributeNames() {
-  const desc = await describeTableCached("loan_schedules");
-  const cols = new Set(desc ? Object.keys(desc) : []);
-  const attrs = LoanSchedule?.rawAttributes || {};
-  return Object.keys(attrs).filter((name) => {
-    const field = attrs[name]?.field || name;
-    return cols.has(field);
-  });
+  const desc =
+    await describeTableCached(
+      "loan_schedules"
+    );
+  const cols = new Set(
+    desc ? Object.keys(desc) : []
+  );
+  const attrs =
+    LoanSchedule?.rawAttributes || {};
+  return Object.keys(attrs).filter(
+    (name) => {
+      const field =
+        attrs[name]?.field || name;
+      return cols.has(field);
+    }
+  );
 }
 
 /** DRY: shape a schedule row so only existing DB fields are sent (handles field mapping) */
 async function shapeScheduleRowForDb(base) {
-  const cols = await getScheduleTableColumns(); // DB columns (field names)
-  const attrs = LoanSchedule?.rawAttributes || {};
+  const cols = await getScheduleTableColumns(); // DB columns
+  const attrs =
+    LoanSchedule?.rawAttributes || {};
   return Object.fromEntries(
-    Object.entries(base).filter(([attrKey]) => {
-      const field = attrs[attrKey]?.field || attrKey; // map attr -> field
-      return cols.has(field);
-    })
+    Object.entries(base).filter(
+      ([attrKey]) => {
+        const field =
+          attrs[attrKey]?.field ||
+          attrKey;
+        return cols.has(field);
+      }
+    )
   );
 }
 
 /** Build a safe WHERE for loan schedules across snake/camel column names */
 function scheduleLoanIdWhere(val) {
-  if (LoanSchedule?.rawAttributes?.loanId) {
+  if (
+    LoanSchedule?.rawAttributes?.loanId
+  ) {
     // Sequelize will map loanId -> loan_id if needed
     return { loanId: val };
   }
-  // Fallback to raw SQL column with explicit operator
-  return where(col("loan_schedules.loan_id"), Op.eq, val);
+  // Fallback
+  return where(
+    col("loan_schedules.loan_id"),
+    Op.eq,
+    val
+  );
 }
 
 /** Bulk insert only provided fields (prevents Sequelize from trying to write non-existent columns) */
-async function bulkCreateLoanSchedulesSafe(rows) {
+async function bulkCreateLoanSchedulesSafe(
+  rows
+) {
   if (!rows?.length) return;
-  const fields = Array.from(new Set(rows.flatMap((r) => Object.keys(r))));
-  await LoanSchedule.bulkCreate(rows, { fields, validate: false });
+  const fields = Array.from(
+    new Set(
+      rows.flatMap((r) => Object.keys(r))
+    )
+  );
+  await LoanSchedule.bulkCreate(
+    rows,
+    { fields, validate: false }
+  );
 }
 
 /** DRY: safely fetch a loan by PK without selecting missing columns */
 async function fetchLoanByPkSafe(id) {
-  const attributes = await getSafeLoanAttributeNames();
-  const userIncludes = await buildUserIncludesIfPossible();
+  const attributes =
+    await getSafeLoanAttributeNames();
+  const userIncludes =
+    await buildUserIncludesIfPossible();
   return Loan.findByPk(id, {
     attributes,
     include: [
-      { model: Borrower, attributes: BORROWER_ATTRS },
-      { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
+      {
+        model: Borrower,
+        attributes: BORROWER_ATTRS,
+      },
+      {
+        model: Branch,
+        attributes: [
+          "id",
+          "name",
+          "code",
+          "phone",
+          "address",
+        ],
+      },
       { model: LoanProduct },
       ...userIncludes,
     ],
@@ -527,139 +750,372 @@ async function fetchLoanByPkSafe(id) {
 }
 
 /* --------------------------------------------------------------------
-   NEW: Aggregates helpers used by list & detail to match UI breakdown
+   Aggregates helpers used by list & detail to match UI breakdown
 ---------------------------------------------------------------------*/
-const __sumCol = (Model, attr) =>
-  sequelize.fn("COALESCE", sequelize.fn("SUM", col(Model.rawAttributes?.[attr]?.field || attr)), 0);
 
-function pickRateMonthly(l) {
-  return Number(l.interestRate ?? l.rate ?? 0);
-}
-function pickTermMonths(l) {
-  return Number(l.termMonths ?? l.durationMonths ?? l.term ?? 0);
-}
-function computeFlatInterest(principal, rateMonthly, term) {
-  return (Number(principal) * Number(rateMonthly) * Number(term)) / 100;
-}
-function computeReducingInterestViaSchedule(l) {
-  const schedule = generateReducingBalanceSchedule({
-    amount: Number(l.amount || 0),
-    interestRate: pickRateMonthly(l),
-    term: pickTermMonths(l),
-    issueDate: l.startDate,
-  }) || [];
-  return schedule.reduce((s, r) => s + Number(r.interest || 0), 0);
-}
+// helper to grab Sequelize's mapped column name for an attr
+const fieldOf = (modelAttrs, k, fallback) =>
+  modelAttrs[k]?.field || fallback;
 
-/** Group-by sums from LoanPayment/LoanRepayment */
+// sum(col) with COALESCE
+const sumCol = (dbField) =>
+  sequelize.fn(
+    "COALESCE",
+    sequelize.fn("SUM", sequelize.col(dbField)),
+    0
+  );
+
+/**
+ * buildPaymentsMap:
+ *  - GROUP BY "loanId"
+ *  - SUM "amountPaid" (or fallback)
+ *  - NO ORDER BY in the grouped query (fixes 42803)
+ *  - use .unscoped() to drop default scopes that might include ORDER
+ */
 async function buildPaymentsMap(loanIds) {
   const M =
     LoanPayment ||
     LoanRepayment ||
-    (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment));
+    (sequelize.models &&
+      (sequelize.models.LoanPayment ||
+        sequelize.models
+          .LoanRepayment));
 
   const out = Object.create(null);
-  if (!M || !loanIds.length) return out;
+  if (!M || !loanIds?.length) return out;
 
   const attrs = M.rawAttributes || {};
-  const have = (k) => !!attrs[k];
+
+  // resolve real DB column names based on model attribute defs
+  const loanIdField = fieldOf(
+    attrs,
+    "loanId",
+    "loanId"
+  );
+
+  // payment amount column priority
+  const amountField = attrs.amountPaid
+    ? fieldOf(attrs, "amountPaid", "amountPaid")
+    : attrs.amount
+    ? fieldOf(attrs, "amount", "amount")
+    : fieldOf(attrs, "total", "total");
+
+  // optional splits if they exist in table
+  const principalField = attrs.principal
+    ? fieldOf(attrs, "principal", "principal")
+    : null;
+  const interestField = attrs.interest
+    ? fieldOf(attrs, "interest", "interest")
+    : null;
+  const feesField = attrs.fees
+    ? fieldOf(attrs, "fees", "fees")
+    : null;
+  const penaltiesField = attrs.penalties
+    ? fieldOf(
+        attrs,
+        "penalties",
+        "penalties"
+      )
+    : null;
+
+  // unscoped() prevents defaultScope from injecting ORDER BY into GROUP BY
+  const Q = M.unscoped
+    ? M.unscoped()
+    : M;
 
   const aggAttrs = [
-    "loanId",
-    [__sumCol(M, have("amountPaid") ? "amountPaid" : have("amount") ? "amount" : "total"), "totalPaid"],
+    [sequelize.col(loanIdField), "loanId"],
+    [
+      sumCol(amountField),
+      "totalPaid",
+    ],
   ];
-  if (have("principal")) aggAttrs.push([__sumCol(M, "principal"), "paidPrincipal"]);
-  if (have("interest")) aggAttrs.push([__sumCol(M, "interest"), "paidInterest"]);
-  if (have("fees")) aggAttrs.push([__sumCol(M, "fees"), "paidFees"]);
-  if (have("penalties")) aggAttrs.push([__sumCol(M, "penalties"), "paidPenalties"]);
+  if (principalField) {
+    aggAttrs.push([
+      sumCol(principalField),
+      "paidPrincipal",
+    ]);
+  }
+  if (interestField) {
+    aggAttrs.push([
+      sumCol(interestField),
+      "paidInterest",
+    ]);
+  }
+  if (feesField) {
+    aggAttrs.push([
+      sumCol(feesField),
+      "paidFees",
+    ]);
+  }
+  if (penaltiesField) {
+    aggAttrs.push([
+      sumCol(penaltiesField),
+      "paidPenalties",
+    ]);
+  }
 
-  const rows = await M.findAll({
+  const rows = await Q.findAll({
     attributes: aggAttrs,
-    where: { loanId: { [Op.in]: loanIds } },
-    group: ["loanId"],
+    where: {
+      [loanIdField]: {
+        [Op.in]: loanIds,
+      },
+    },
+    group: [sequelize.col(loanIdField)],
+    order: [], // explicitly no order for GROUP BY
     raw: true,
   });
 
   for (const r of rows) {
     out[r.loanId] = {
       totalPaid: Number(r.totalPaid || 0),
-      paidPrincipal: Number(r.paidPrincipal || 0),
-      paidInterest: Number(r.paidInterest || 0),
-      paidFees: Number(r.paidFees || 0),
-      paidPenalties: Number(r.paidPenalties || 0),
+      paidPrincipal: Number(
+        r.paidPrincipal || 0
+      ),
+      paidInterest: Number(
+        r.paidInterest || 0
+      ),
+      paidFees: Number(
+        r.paidFees || 0
+      ),
+      paidPenalties: Number(
+        r.paidPenalties || 0
+      ),
     };
   }
   return out;
 }
 
-/** Group-by interest totals from loan_schedules if table/column exist */
-async function buildScheduleInterestMap(loanIds) {
+/**
+ * buildScheduleInterestMap:
+ *  - SUM interest per loanId from loan_schedules (if table & cols exist)
+ *  - same GROUP BY "loanId" / no ORDER
+ */
+async function buildScheduleInterestMap(
+  loanIds
+) {
   const out = Object.create(null);
-  if (!LoanSchedule || !loanIds.length) return out;
-  if (!(await tableExists("loan_schedules"))) return out;
+  if (!LoanSchedule || !loanIds?.length)
+    return out;
+  if (
+    !(await tableExists(
+      "loan_schedules"
+    ))
+  )
+    return out;
 
-  const attrs = LoanSchedule.rawAttributes || {};
-  if (!attrs.loanId || !attrs.interest) return out;
+  const attrs =
+    LoanSchedule.rawAttributes ||
+    {};
+  if (
+    !attrs.loanId ||
+    !attrs.interest
+  )
+    return out;
 
-  const rows = await LoanSchedule.findAll({
+  const loanIdField = fieldOf(
+    attrs,
+    "loanId",
+    "loanId"
+  );
+  const interestField = fieldOf(
+    attrs,
+    "interest",
+    "interest"
+  );
+
+  const Q = LoanSchedule.unscoped
+    ? LoanSchedule.unscoped()
+    : LoanSchedule;
+
+  const rows = await Q.findAll({
     attributes: [
-      "loanId",
-      [__sumCol(LoanSchedule, "interest"), "totalInterest"],
+      [
+        sequelize.col(
+          loanIdField
+        ),
+        "loanId",
+      ],
+      [
+        sumCol(interestField),
+        "totalInterest",
+      ],
     ],
-    where: { loanId: { [Op.in]: loanIds } },
-    group: ["loanId"],
+    where: {
+      [loanIdField]: {
+        [Op.in]: loanIds,
+      },
+    },
+    group: [sequelize.col(loanIdField)],
+    order: [], // no ORDER in GROUP BY query
     raw: true,
   });
 
   for (const r of rows) {
-    out[r.loanId] = { totalInterest: Number(r.totalInterest || 0) };
+    out[r.loanId] = {
+      totalInterest: Number(
+        r.totalInterest || 0
+      ),
+    };
   }
   return out;
 }
 
-function interestFirstAllocation(totalPaid, totalInterest, principal) {
-  const paidInterest = Math.min(Number(totalInterest), Number(totalPaid));
-  const paidPrincipal = Math.min(Number(principal), Math.max(0, Number(totalPaid) - paidInterest));
-  return { paidInterest, paidPrincipal };
+// helpers for computing aggregates
+function pickRateMonthly(l) {
+  return Number(
+    l.interestRate ?? l.rate ?? 0
+  );
+}
+function pickTermMonths(l) {
+  return Number(
+    l.termMonths ??
+      l.durationMonths ??
+      l.term ??
+      0
+  );
+}
+function computeFlatInterest(
+  principal,
+  rateMonthly,
+  term
+) {
+  return (
+    (Number(principal) *
+      Number(rateMonthly) *
+      Number(term)) /
+    100
+  );
+}
+function computeReducingInterestViaSchedule(
+  l
+) {
+  const schedule =
+    generateReducingBalanceSchedule({
+      amount: Number(l.amount || 0),
+      interestRate: pickRateMonthly(l),
+      term: pickTermMonths(l),
+      issueDate: l.startDate,
+    }) || [];
+  return schedule.reduce(
+    (s, r) =>
+      s + Number(r.interest || 0),
+    0
+  );
 }
 
-function computeAggregatesForLoan(loan, maps) {
-  const principal = Number(loan.amount || 0);
-  const rateMonthly = pickRateMonthly(loan);
+function interestFirstAllocation(
+  totalPaid,
+  totalInterest,
+  principal
+) {
+  const paidInterest = Math.min(
+    Number(totalInterest),
+    Number(totalPaid)
+  );
+  const paidPrincipal = Math.min(
+    Number(principal),
+    Math.max(
+      0,
+      Number(totalPaid) -
+        paidInterest
+    )
+  );
+  return {
+    paidInterest,
+    paidPrincipal,
+  };
+}
+
+function computeAggregatesForLoan(
+  loan,
+  maps
+) {
+  const principal = Number(
+    loan.amount || 0
+  );
+  const rateMonthly = pickRateMonthly(
+    loan
+  );
   const term = pickTermMonths(loan);
 
   // 1) interest: prefer schedule sum; fallback to model/compute
   let totalInterest =
-    (maps.schedule[loan.id]?.totalInterest ?? null);
+    maps.schedule[loan.id]
+      ?.totalInterest ?? null;
 
   if (!Number.isFinite(totalInterest)) {
-    if (loan.interestMethod === "reducing") {
-      totalInterest = computeReducingInterestViaSchedule(loan);
+    if (
+      loan.interestMethod ===
+      "reducing"
+    ) {
+      totalInterest =
+        computeReducingInterestViaSchedule(
+          loan
+        );
     } else {
-      totalInterest = computeFlatInterest(principal, rateMonthly, term);
+      totalInterest = computeFlatInterest(
+        principal,
+        rateMonthly,
+        term
+      );
     }
   }
 
   // 2) payments
-  const pm = maps.payments[loan.id] || {
-    totalPaid: 0, paidPrincipal: 0, paidInterest: 0, paidFees: 0, paidPenalties: 0,
-  };
+  const pm =
+    maps.payments[loan.id] || {
+      totalPaid: 0,
+      paidPrincipal: 0,
+      paidInterest: 0,
+      paidFees: 0,
+      paidPenalties: 0,
+    };
 
-  // If no split stored, allocate interest-first to keep UI consistent & conservative
-  let paidPrincipal = Number(pm.paidPrincipal || 0);
-  let paidInterest = Number(pm.paidInterest || 0);
+  let paidPrincipal = Number(
+    pm.paidPrincipal || 0
+  );
+  let paidInterest = Number(
+    pm.paidInterest || 0
+  );
 
-  if (paidPrincipal === 0 && paidInterest === 0 && pm.totalPaid > 0) {
-    const alloc = interestFirstAllocation(pm.totalPaid, totalInterest, principal);
+  // If no split stored, allocate interest-first so balances are consistent
+  if (
+    paidPrincipal === 0 &&
+    paidInterest === 0 &&
+    pm.totalPaid > 0
+  ) {
+    const alloc =
+      interestFirstAllocation(
+        pm.totalPaid,
+        totalInterest,
+        principal
+      );
     paidInterest = alloc.paidInterest;
     paidPrincipal = alloc.paidPrincipal;
   }
 
-  const paidTotal = Number(pm.totalPaid || (paidPrincipal + paidInterest));
+  const paidTotal = Number(
+    pm.totalPaid ||
+      paidPrincipal +
+        paidInterest
+  );
 
-  const principalBalance = Math.max(0, principal - paidPrincipal);
-  const interestBalance  = Math.max(0, totalInterest - paidInterest);
-  const outstandingTotal = Math.max(0, principalBalance + interestBalance);
+  const principalBalance = Math.max(
+    0,
+    principal - paidPrincipal
+  );
+  const interestBalance = Math.max(
+    0,
+    totalInterest -
+      paidInterest
+  );
+  const outstandingTotal = Math.max(
+    0,
+    principalBalance +
+      interestBalance
+  );
 
   return {
     principal,
@@ -678,15 +1134,26 @@ function computeAggregatesForLoan(loan, maps) {
 /* ====================================================================
    CORE: Transition executor usable by multiple endpoints (DRY)
 ==================================================================== */
-async function performStatusTransition(loan, next, { override = false, req }) {
-  if (!ALLOWED[loan.status]?.includes(next)) {
-    const err = new Error(`Cannot change ${loan.status} → ${next}`);
+async function performStatusTransition(
+  loan,
+  next,
+  { override = false, req }
+) {
+  if (
+    !ALLOWED[loan.status]?.includes(next)
+  ) {
+    const err = new Error(
+      `Cannot change ${loan.status} → ${next}`
+    );
     err.http = 400;
     throw err;
   }
 
   // Preflight avoid FK/type errors
-  const preMsg = await preflightTransition(next, req?.user?.id || null);
+  const preMsg = await preflightTransition(
+    next,
+    req?.user?.id || null
+  );
   if (preMsg) {
     const err = new Error(preMsg);
     err.http = 400;
@@ -694,110 +1161,243 @@ async function performStatusTransition(loan, next, { override = false, req }) {
   }
 
   if (next === "closed") {
-    const outstanding = Number(loan.outstanding ?? 0);
+    const outstanding = Number(
+      loan.outstanding ?? 0
+    );
     if (!override && outstanding > 0) {
-      const err = new Error("Outstanding > 0, override required");
+      const err = new Error(
+        "Outstanding > 0, override required"
+      );
       err.http = 400;
       throw err;
     }
   }
 
-  const mappedStatus = await mapStatusToDbEnumLabel(next);
+  const mappedStatus =
+    await mapStatusToDbEnumLabel(next);
   if (!mappedStatus) {
-    const labels = await getEnumLabelsForColumn(getLoansTableName(), "status");
-    const err = new Error(`Status "${next}" not supported by DB enum. Allowed: ${labels.join(", ")}`);
+    const labels =
+      await getEnumLabelsForColumn(
+        getLoansTableName(),
+        "status"
+      );
+    const err = new Error(
+      `Status "${next}" not supported by DB enum. Allowed: ${labels.join(
+        ", "
+      )}`
+    );
     err.http = 400;
     throw err;
   }
 
   const fields = {};
-  if (await loanColumnExists("status")) fields.status = mappedStatus;
+  if (await loanColumnExists("status"))
+    fields.status = mappedStatus;
   else {
-    const err = new Error("loans.status column missing");
+    const err = new Error(
+      "loans.status column missing"
+    );
     err.http = 500;
     throw err;
   }
 
   if (next === "approved") {
-    await setUserFkIfSafe(fields, "approvedBy", req?.user?.id || null);
-    await setDateCol(fields, "approvalDate", new Date());
+    await setUserFkIfSafe(
+      fields,
+      "approvedBy",
+      req?.user?.id || null
+    );
+    await setDateCol(
+      fields,
+      "approvalDate",
+      new Date()
+    );
   }
   if (next === "rejected") {
-    await setUserFkIfSafe(fields, "rejectedBy", req?.user?.id || null);
-    await setDateCol(fields, "rejectedDate", new Date());
+    await setUserFkIfSafe(
+      fields,
+      "rejectedBy",
+      req?.user?.id || null
+    );
+    await setDateCol(
+      fields,
+      "rejectedDate",
+      new Date()
+    );
   }
   if (next === "disbursed") {
-    await setUserFkIfSafe(fields, "disbursedBy", req?.user?.id || null);
-    await setDateCol(fields, "disbursementDate", new Date());
+    await setUserFkIfSafe(
+      fields,
+      "disbursedBy",
+      req?.user?.id || null
+    );
+    await setDateCol(
+      fields,
+      "disbursementDate",
+      new Date()
+    );
   }
   if (next === "closed") {
-    await setUserFkIfSafe(fields, "closedBy", req?.user?.id || null);
-    await setDateCol(fields, "closedDate", new Date());
-    if (override && (await loanColumnExists("closeReason"))) {
-      fields.closeReason = "override";
+    await setUserFkIfSafe(
+      fields,
+      "closedBy",
+      req?.user?.id || null
+    );
+    await setDateCol(
+      fields,
+      "closedDate",
+      new Date()
+    );
+    if (
+      override &&
+      (await loanColumnExists(
+        "closeReason"
+      ))
+    ) {
+      fields.closeReason =
+        "override";
     }
   }
 
   try {
     await loan.update(fields);
   } catch (e) {
-    const err = new Error(e?.parent?.message || e?.message || "Status update failed");
+    const err = new Error(
+      e?.parent?.message ||
+        e?.message ||
+        "Status update failed"
+    );
     err.http = 400;
     err.meta = {
       fields,
-      code: e?.parent?.code || e?.original?.code,
-      detail: e?.parent?.detail || null,
+      code:
+        e?.parent?.code ||
+        e?.original?.code,
+      detail:
+        e?.parent?.detail ||
+        null,
     };
     throw err;
   }
 
   // For first disbursement, auto-create schedule if table exists and none present
-  if (next === "disbursed" && LoanSchedule && (await tableExists("loan_schedules"))) {
+  if (
+    next === "disbursed" &&
+    LoanSchedule &&
+    (await tableExists(
+      "loan_schedules"
+    ))
+  ) {
     try {
-      const existing = await LoanSchedule.count({ where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] } });
+      const existing =
+        await LoanSchedule.count({
+          where: {
+            [Op.and]: [
+              scheduleLoanIdWhere(
+                loan.id
+              ),
+            ],
+          },
+        });
       if (existing === 0) {
         const input = {
-          amount: Number(loan.amount || 0),
-          interestRate: Number(loan.interestRate || 0),
+          amount: Number(
+            loan.amount || 0
+          ),
+          interestRate:
+            Number(
+              loan.interestRate ||
+                0
+            ),
           term: loan.termMonths,
           issueDate: loan.startDate,
         };
         const gen =
-          loan.interestMethod === "flat"
-            ? generateFlatRateSchedule(input)
-            : loan.interestMethod === "reducing"
-            ? generateReducingBalanceSchedule(input)
+          loan.interestMethod ===
+          "flat"
+            ? generateFlatRateSchedule(
+                input
+              )
+            : loan.interestMethod ===
+              "reducing"
+            ? generateReducingBalanceSchedule(
+                input
+              )
             : [];
         if (gen.length) {
           const rows = [];
-          for (let i = 0; i < gen.length; i++) {
+          for (
+            let i = 0;
+            i < gen.length;
+            i++
+          ) {
             const s = gen[i];
             const base = {
               loanId: loan.id,
               period: i + 1,
               dueDate: s.dueDate,
-              principal: Number(s.principal || 0),
-              interest: Number(s.interest || 0),
-              fees: Number(s.fees || 0),
-              penalties: Number(s.penalties || 0),
-              total:
+              principal:
                 Number(
-                  s.total ??
-                    Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0)
+                  s.principal ||
+                    0
                 ),
+              interest:
+                Number(
+                  s.interest ||
+                    0
+                ),
+              fees: Number(
+                s.fees || 0
+              ),
+              penalties:
+                Number(
+                  s.penalties ||
+                    0
+                ),
+              total: Number(
+                s.total ??
+                  Number(
+                    s.principal ||
+                      0
+                  ) +
+                    Number(
+                      s.interest ||
+                        0
+                    ) +
+                    Number(
+                      s.fees || 0
+                    ) +
+                    Number(
+                      s.penalties ||
+                        0
+                    )
+              ),
             };
-            rows.push(await shapeScheduleRowForDb(base));
+            rows.push(
+              await shapeScheduleRowForDb(
+                base
+              )
+            );
           }
-          await bulkCreateLoanSchedulesSafe(rows);
+          await bulkCreateLoanSchedulesSafe(
+            rows
+          );
         }
       }
     } catch (e) {
-      console.warn("[loans] schedule generation failed (non-fatal):", e?.parent?.message || e?.message);
+      console.warn(
+        "[loans] schedule generation failed (non-fatal):",
+        e?.parent?.message ||
+          e?.message
+      );
     }
   }
 
   // Return hydrated record with associations (safe attrs)
-  const updatedLoan = await fetchLoanByPkSafe(loan.id);
+  const updatedLoan =
+    await fetchLoanByPkSafe(
+      loan.id
+    );
   return updatedLoan;
 }
 
@@ -806,83 +1406,231 @@ async function performStatusTransition(loan, next, { override = false, req }) {
 =========================== */
 const createLoan = async (req, res) => {
   try {
-    const raw = typeof req.body?.payload === "string" ? req.body.payload : null;
-    let body = raw ? JSON.parse(raw) : { ...req.body };
+    const raw =
+      typeof req.body?.payload ===
+      "string"
+        ? req.body.payload
+        : null;
+    let body = raw
+      ? JSON.parse(raw)
+      : { ...req.body };
 
     // Name normalization
-    if (body.durationMonths != null && body.termMonths == null) {
-      body.termMonths = Number(body.durationMonths);
+    if (
+      body.durationMonths != null &&
+      body.termMonths == null
+    ) {
+      body.termMonths = Number(
+        body.durationMonths
+      );
     }
-    if (body.releaseDate && !body.startDate) {
-      body.startDate = body.releaseDate;
+    if (
+      body.releaseDate &&
+      !body.startDate
+    ) {
+      body.startDate =
+        body.releaseDate;
     }
 
     // Coerce numerics
-    if (body.amount != null) body.amount = Number(body.amount);
-    if (body.termMonths != null) body.termMonths = Number(body.termMonths);
-    if (body.interestRate != null && body.interestRate !== "") {
-      body.interestRate = Number(body.interestRate);
+    if (body.amount != null)
+      body.amount = Number(
+        body.amount
+      );
+    if (body.termMonths != null)
+      body.termMonths = Number(
+        body.termMonths
+      );
+    if (
+      body.interestRate != null &&
+      body.interestRate !== ""
+    ) {
+      body.interestRate = Number(
+        body.interestRate
+      );
     }
 
     // Defaults
     if (!body.startDate) {
       const today = new Date();
-      body.startDate = today.toISOString().slice(0, 10);
+      body.startDate = today
+        .toISOString()
+        .slice(0, 10);
     }
-    if (!body.currency) body.currency = "TZS";
-    if (!body.repaymentFrequency) body.repaymentFrequency = "monthly";
-    if (!body.interestMethod) body.interestMethod = "flat";
+    if (!body.currency)
+      body.currency = "TZS";
+    if (!body.repaymentFrequency)
+      body.repaymentFrequency =
+        "monthly";
+    if (!body.interestMethod)
+      body.interestMethod = "flat";
 
     // Requireds
     if (!body.borrowerId) {
-      return res.status(400).json({ error: "borrowerId is required" });
+      return res
+        .status(400)
+        .json({
+          error:
+            "borrowerId is required",
+        });
     }
     if (!body.productId) {
-      return res.status(400).json({ error: "productId is required" });
+      return res
+        .status(400)
+        .json({
+          error:
+            "productId is required",
+        });
     }
-    if (!Number.isFinite(body.amount) || body.amount <= 0) {
-      return res.status(400).json({ error: "amount must be a positive number" });
+    if (
+      !Number.isFinite(
+        body.amount
+      ) ||
+      body.amount <= 0
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            "amount must be a positive number",
+        });
     }
-    if (!Number.isFinite(body.termMonths) || body.termMonths <= 0) {
-      return res.status(400).json({ error: "termMonths must be a positive number" });
+    if (
+      !Number.isFinite(
+        body.termMonths
+      ) ||
+      body.termMonths <= 0
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            "termMonths must be a positive number",
+        });
     }
 
     // Product validations + defaults
-    const p = await LoanProduct.findByPk(body.productId);
-    if (!p) return res.status(400).json({ error: "Invalid loan product selected" });
+    const p =
+      await LoanProduct.findByPk(
+        body.productId
+      );
+    if (!p)
+      return res
+        .status(400)
+        .json({
+          error:
+            "Invalid loan product selected",
+        });
 
-    const a = Number(body.amount || 0);
-    const t = Number(body.termMonths || 0);
+    const a = Number(
+      body.amount || 0
+    );
+    const t = Number(
+      body.termMonths || 0
+    );
 
-    if (p.minPrincipal && a < Number(p.minPrincipal))
-      return res.status(400).json({ error: `Amount must be at least ${p.minPrincipal}` });
-    if (p.maxPrincipal && a > Number(p.maxPrincipal))
-      return res.status(400).json({ error: `Amount must not exceed ${p.maxPrincipal}` });
-    if (p.minTermMonths && t < Number(p.minTermMonths))
-      return res.status(400).json({ error: `Term must be at least ${p.minTermMonths} months` });
-    if (p.maxTermMonths && t > Number(p.maxTermMonths))
-      return res.status(400).json({ error: `Term must not exceed ${p.maxTermMonths} months` });
+    if (
+      p.minPrincipal &&
+      a < Number(p.minPrincipal)
+    )
+      return res
+        .status(400)
+        .json({
+          error: `Amount must be at least ${p.minPrincipal}`,
+        });
+    if (
+      p.maxPrincipal &&
+      a > Number(p.maxPrincipal)
+    )
+      return res
+        .status(400)
+        .json({
+          error: `Amount must not exceed ${p.maxPrincipal}`,
+        });
+    if (
+      p.minTermMonths &&
+      t <
+        Number(
+          p.minTermMonths
+        )
+    )
+      return res
+        .status(400)
+        .json({
+          error: `Term must be at least ${p.minTermMonths} months`,
+        });
+    if (
+      p.maxTermMonths &&
+      t >
+        Number(
+          p.maxTermMonths
+        )
+    )
+      return res
+        .status(400)
+        .json({
+          error: `Term must not exceed ${p.maxTermMonths} months`,
+        });
 
-    if (body.interestMethod == null) body.interestMethod = p.interestMethod || "flat";
-    if (body.interestRate == null || Number.isNaN(body.interestRate)) {
-      body.interestRate = Number(p.interestRate || 0);
+    if (
+      body.interestMethod ==
+      null
+    )
+      body.interestMethod =
+        p.interestMethod ||
+        "flat";
+    if (
+      body.interestRate ==
+        null ||
+      Number.isNaN(
+        body.interestRate
+      )
+    ) {
+      body.interestRate = Number(
+        p.interestRate || 0
+      );
     }
 
     // Ensures DB NOT NULL on endDate
     if (!body.endDate) {
-      body.endDate = addMonthsDateOnly(body.startDate, Number(body.termMonths));
+      body.endDate =
+        addMonthsDateOnly(
+          body.startDate,
+          Number(
+            body.termMonths
+          )
+        );
     }
 
     // Persisted status starts as pending → map to DB enum label if needed
-    const pendingLabel = await mapStatusToDbEnumLabel("pending");
-    body.status = pendingLabel || "pending";
+    const pendingLabel =
+      await mapStatusToDbEnumLabel(
+        "pending"
+      );
+    body.status =
+      pendingLabel ||
+      "pending";
 
     // initiatedBy only if present and column exists
-    if ("initiatedBy" in (Loan.rawAttributes || {}) && (await loanColumnExists("initiatedBy"))) {
-      await setUserFkIfSafe(body, "initiatedBy", req.user?.id || null);
+    if (
+      "initiatedBy" in
+        (Loan.rawAttributes ||
+          {}) &&
+      (await loanColumnExists(
+        "initiatedBy"
+      ))
+    ) {
+      await setUserFkIfSafe(
+        body,
+        "initiatedBy",
+        req.user?.id ||
+          null
+      );
     }
 
-    const loan = await Loan.create(body);
+    const loan = await Loan.create(
+      body
+    );
 
     writeAudit({
       entityId: loan.id,
@@ -892,12 +1640,25 @@ const createLoan = async (req, res) => {
       req,
     }).catch(() => {});
 
-    // Reload with safe attributes to avoid selecting missing columns
-    const reloaded = await fetchLoanByPkSafe(loan.id);
-    res.status(201).json(reloaded || loan);
+    // Reload with safe attributes
+    const reloaded =
+      await fetchLoanByPkSafe(
+        loan.id
+      );
+    res
+      .status(201)
+      .json(reloaded || loan);
   } catch (err) {
-    console.error("Create loan error:", err);
-    res.status(500).json({ error: "Failed to create loan" });
+    console.error(
+      "Create loan error:",
+      err
+    );
+    res
+      .status(500)
+      .json({
+        error:
+          "Failed to create loan",
+      });
   }
 };
 
@@ -908,224 +1669,625 @@ const getAllLoans = async (req, res) => {
   try {
     const whereObj = {};
 
-    const rawStatus = String(req.query.status || "").toLowerCase();
-    const scope = String(req.query.scope || "").toLowerCase();
+    const rawStatus = String(
+      req.query.status || ""
+    ).toLowerCase();
+    const scope = String(
+      req.query.scope || ""
+    ).toLowerCase();
 
-    if (rawStatus && rawStatus !== "all" && DB_ENUM_STATUSES.has(rawStatus)) {
-      const mapped = await mapStatusToDbEnumLabel(rawStatus);
-      whereObj.status = mapped || rawStatus;
+    if (
+      rawStatus &&
+      rawStatus !== "all" &&
+      DB_ENUM_STATUSES.has(
+        rawStatus
+      )
+    ) {
+      const mapped =
+        await mapStatusToDbEnumLabel(
+          rawStatus
+        );
+      whereObj.status =
+        mapped ||
+        rawStatus;
     }
 
-    const attributes = await getSafeLoanAttributeNames();
-    const userIncludes = await buildUserIncludesIfPossible();
+    const attributes =
+      await getSafeLoanAttributeNames();
+    const userIncludes =
+      await buildUserIncludesIfPossible();
 
-    const loans = await Loan.findAll({
-      where: whereObj,
-      attributes,
-      include: [
-        { model: Borrower, attributes: BORROWER_ATTRS },
-        { model: Branch, attributes: ["id", "name", "code", "phone", "address"] },
-        { model: LoanProduct },
-        ...userIncludes,
-      ],
-      order: [["createdAt", "DESC"]],
-      limit: 500,
-    });
+    const loans =
+      await Loan.findAll({
+        where: whereObj,
+        attributes,
+        include: [
+          {
+            model: Borrower,
+            attributes:
+              BORROWER_ATTRS,
+          },
+          {
+            model: Branch,
+            attributes: [
+              "id",
+              "name",
+              "code",
+              "phone",
+              "address",
+            ],
+          },
+          { model: LoanProduct },
+          ...userIncludes,
+        ],
+        order: [["createdAt", "DESC"]],
+        limit: 500,
+      });
 
     let result = loans;
 
-    if (rawStatus === "active" || scope === "active") {
-      result = result.filter((l) => String(l.status || "").toLowerCase() === "disbursed");
+    if (
+      rawStatus === "active" ||
+      scope === "active"
+    ) {
+      result = result.filter(
+        (l) =>
+          String(
+            l.status || ""
+          ).toLowerCase() ===
+          "disbursed"
+      );
     }
 
     if (scope === "delinquent") {
-      result = result.filter((l) => {
-        const nd = String(l.nextDueStatus || "").toLowerCase();
-        return nd === "overdue" || Number(l.dpd || 0) > 0 || Number(l.arrears || 0) > 0;
-      });
+      result = result.filter(
+        (l) => {
+          const nd = String(
+            l.nextDueStatus ||
+              ""
+          ).toLowerCase();
+          return (
+            nd === "overdue" ||
+            Number(l.dpd || 0) >
+              0 ||
+            Number(
+              l.arrears || 0
+            ) > 0
+          );
+        }
+      );
     }
 
-    // ---------- NEW: attach aggregates when requested ----------
-    const includeParam = String(req.query.include || "").toLowerCase();
-    const wantAggregates = includeParam.split(",").map(s => s.trim()).includes("aggregates");
+    // --- attach aggregates if requested ---
+    const includeParam = String(
+      req.query.include || ""
+    ).toLowerCase();
+    const wantAggregates =
+      includeParam
+        .split(",")
+        .map((s) =>
+          s.trim()
+        )
+        .includes(
+          "aggregates"
+        );
 
-    if (wantAggregates && result.length) {
-      const ids = result.map((l) => l.id);
+    if (
+      wantAggregates &&
+      result.length
+    ) {
+      const ids = result.map(
+        (l) => l.id
+      );
+
+      // maps from db
       const maps = {
-        payments: await buildPaymentsMap(ids),
-        schedule: await buildScheduleInterestMap(ids),
+        payments:
+          await buildPaymentsMap(
+            ids
+          ),
+        schedule:
+          await buildScheduleInterestMap(
+            ids
+          ),
       };
 
-      const augmented = result.map((l) => {
-        const fig = computeAggregatesForLoan(l, maps);
-        const obj = l.toJSON();
-        obj.aggregates = fig;
-        // expose a couple top-levels for convenience
-        obj.totalInterest = fig.totalInterest;
-        obj.outstandingTotal = fig.outstandingTotal;
-        return obj;
-      });
+      const augmented =
+        result.map((l) => {
+          const fig =
+            computeAggregatesForLoan(
+              l,
+              maps
+            );
+          const obj =
+            l.toJSON();
+          obj.aggregates =
+            fig;
+          // expose a couple for convenience
+          obj.totalInterest =
+            fig.totalInterest;
+          obj.outstandingTotal =
+            fig.outstandingTotal;
+          return obj;
+        });
 
-      return res.json(augmented);
+      return res.json(
+        augmented
+      );
     }
 
     res.json(result || []);
   } catch (err) {
-    console.error("Fetch loans error:", err);
-    res.status(500).json({ error: "Failed to fetch loans" });
+    console.error(
+      "Fetch loans error:",
+      err
+    );
+    res
+      .status(500)
+      .json({
+        error:
+          "Failed to fetch loans",
+      });
   }
 };
 
 /* ============================================
    GET LOAN BY ID (+repayments & schedule)
 ============================================ */
-const getLoanById = async (req, res) => {
+const getLoanById = async (
+  req,
+  res
+) => {
   try {
-    const idRaw = String(req.params.id ?? '');
-    const id = Number.parseInt(idRaw, 10);
+    const idRaw = String(
+      req.params.id ?? ""
+    );
+    const id =
+      Number.parseInt(
+        idRaw,
+        10
+      );
     if (!Number.isFinite(id)) {
-      return res.status(400).json({ error: 'Loan id must be an integer', received: idRaw });
+      return res
+        .status(400)
+        .json({
+          error:
+            "Loan id must be an integer",
+          received: idRaw,
+        });
     }
 
-    const { includeRepayments = "true", includeSchedule = "true" } = req.query;
+    const {
+      includeRepayments = "true",
+      includeSchedule = "true",
+    } = req.query;
 
-    const loan = await fetchLoanByPkSafe(id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    const loan =
+      await fetchLoanByPkSafe(
+        id
+      );
+    if (!loan)
+      return res
+        .status(404)
+        .json({
+          error:
+            "Loan not found",
+        });
 
     // Aggregates map for single id
     const maps = {
-      payments: await buildPaymentsMap([loan.id]),
-      schedule: await buildScheduleInterestMap([loan.id]),
+      payments:
+        await buildPaymentsMap(
+          [loan.id]
+        ),
+      schedule:
+        await buildScheduleInterestMap(
+          [loan.id]
+        ),
     };
-    const agg = computeAggregatesForLoan(loan, maps);
+    const agg =
+      computeAggregatesForLoan(
+        loan,
+        maps
+      );
 
     let repayments = [];
-    if (includeRepayments === "true") {
+    if (
+      includeRepayments ===
+      "true"
+    ) {
       const RepaymentModel =
         LoanPayment ||
         LoanRepayment ||
-        (sequelize.models && (sequelize.models.LoanPayment || sequelize.models.LoanRepayment));
+        (sequelize.models &&
+          (sequelize
+            .models
+            .LoanPayment ||
+            sequelize
+              .models
+              .LoanRepayment));
 
-      if (RepaymentModel && typeof RepaymentModel.findAll === "function") {
-        const attrs = RepaymentModel.rawAttributes || {};
+      if (
+        RepaymentModel &&
+        typeof RepaymentModel.findAll ===
+          "function"
+      ) {
+        const attrs =
+          RepaymentModel.rawAttributes ||
+          {};
         const orderParts = [];
-        if (attrs.paymentDate) orderParts.push(['paymentDate', 'DESC']);
-        else if (attrs.date) orderParts.push(['date', 'DESC']);
-        orderParts.push(['createdAt', 'DESC']); // safer fallback than createdAt
+        if (attrs.paymentDate)
+          orderParts.push([
+            "paymentDate",
+            "DESC",
+          ]);
+        else if (attrs.date)
+          orderParts.push([
+            "date",
+            "DESC",
+          ]);
+        orderParts.push([
+          "createdAt",
+          "DESC",
+        ]); // fallback
 
-        const rawRows = await RepaymentModel.findAll({
-          where: { loanId: loan.id },
-          order: orderParts,
-        });
+        const rawRows =
+          await RepaymentModel.findAll(
+            {
+              where: {
+                loanId: loan.id,
+              },
+              order: orderParts,
+            }
+          );
 
-        repayments = rawRows.map((r) => normalizeRepaymentRow(r));
+        repayments =
+          rawRows.map(
+            (r) =>
+              normalizeRepaymentRow(
+                r
+              )
+          );
       }
     }
 
     let schedule = [];
-    if (includeSchedule === "true" && LoanSchedule && typeof LoanSchedule.findAll === "function") {
-      if (await tableExists("loan_schedules")) {
+    if (
+      includeSchedule ===
+        "true" &&
+      LoanSchedule &&
+      typeof LoanSchedule.findAll ===
+        "function"
+    ) {
+      if (
+        await tableExists(
+          "loan_schedules"
+        )
+      ) {
         try {
-          const scheduleAttrs = await getSafeScheduleAttributeNames();
-          schedule = await LoanSchedule.findAll({
-            where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
-            attributes: scheduleAttrs,
-            order: [["period", "ASC"]], 
-          });
+          const scheduleAttrs =
+            await getSafeScheduleAttributeNames();
+          schedule =
+            await LoanSchedule.findAll(
+              {
+                where: {
+                  [Op.and]: [
+                    scheduleLoanIdWhere(
+                      loan.id
+                    ),
+                  ],
+                },
+                attributes:
+                  scheduleAttrs,
+                order: [
+                  [
+                    "period",
+                    "ASC",
+                  ],
+                ],
+              }
+            );
         } catch (e) {
-          console.warn(`[loans] schedule query failed: ${e.message}`);
+          console.warn(
+            `[loans] schedule query failed: ${e.message}`
+          );
           schedule = [];
         }
       } else {
-        console.warn("[loans] loan_schedules table missing; returning empty schedule");
+        console.warn(
+          "[loans] loan_schedules table missing; returning empty schedule"
+        );
       }
     }
 
     res.json({
       ...loan.toJSON(),
-      borrowerId: loan.borrowerId ?? loan.Borrower?.id ?? null,
-      branchId: loan.branchId ?? loan.Branch?.id ?? null,
-      productId: loan.productId ?? loan.LoanProduct?.id ?? null,
+      borrowerId:
+        loan.borrowerId ??
+        loan
+          .Borrower
+          ?.id ??
+        null,
+      branchId:
+        loan.branchId ??
+        loan.Branch
+          ?.id ??
+        null,
+      productId:
+        loan.productId ??
+        loan
+          .LoanProduct
+          ?.id ??
+        null,
       aggregates: agg,
       totals: {
-        principal: agg.principal,
-        interest: agg.totalInterest,
+        principal:
+          agg.principal,
+        interest:
+          agg.totalInterest,
         fees: 0,
         penalties: 0,
-        totalPaid: agg.paidTotal,
-        outstanding: agg.outstandingTotal,
+        totalPaid:
+          agg.paidTotal,
+        outstanding:
+          agg.outstandingTotal,
       },
       repayments,
       schedule,
     });
   } catch (err) {
-    console.error("Error fetching loan:", err);
-    res.status(500).json({ error: "Error fetching loan" });
+    console.error(
+      "Error fetching loan:",
+      err
+    );
+    res
+      .status(500)
+      .json({
+        error:
+          "Error fetching loan",
+      });
   }
 };
 
 /* ===========================
    UPDATE LOAN
 =========================== */
-const updateLoan = async (req, res) => {
+const updateLoan = async (
+  req,
+  res
+) => {
   try {
-    const loan = await fetchLoanByPkSafe(req.params.id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    const loan =
+      await fetchLoanByPkSafe(
+        req.params.id
+      );
+    if (!loan)
+      return res
+        .status(404)
+        .json({
+          error:
+            "Loan not found",
+        });
 
-    const before = loan.toJSON();
-    const body = { ...(req.body || {}) };
+    const before =
+      loan.toJSON();
+    const body = {
+      ...(req.body || {}),
+    };
 
     // Accept legacy/alias fields
-    if (body.principal != null && body.amount == null) body.amount = Number(body.principal);
-    if (body.durationMonths != null && body.termMonths == null) body.termMonths = Number(body.durationMonths);
-    if (body.releaseDate && !body.startDate) body.startDate = body.releaseDate;
+    if (
+      body.principal !=
+        null &&
+      body.amount ==
+        null
+    )
+      body.amount = Number(
+        body.principal
+      );
+    if (
+      body.durationMonths !=
+        null &&
+      body.termMonths ==
+        null
+    )
+      body.termMonths =
+        Number(
+          body.durationMonths
+        );
+    if (
+      body.releaseDate &&
+      !body.startDate
+    )
+      body.startDate =
+        body.releaseDate;
 
-    // Coerce numerics where provided
-    if (body.amount !== undefined && body.amount !== "") body.amount = Number(body.amount);
-    if (body.termMonths !== undefined && body.termMonths !== "") body.termMonths = Number(body.termMonths);
-    if (body.interestRate !== undefined && body.interestRate !== "") body.interestRate = Number(body.interestRate);
+    // Coerce numerics
+    if (
+      body.amount !==
+        undefined &&
+      body.amount !==
+        ""
+    )
+      body.amount = Number(
+        body.amount
+      );
+    if (
+      body.termMonths !==
+        undefined &&
+      body.termMonths !==
+        ""
+    )
+      body.termMonths =
+        Number(
+          body.termMonths
+        );
+    if (
+      body.interestRate !==
+        undefined &&
+      body.interestRate !==
+        ""
+    )
+      body.interestRate =
+        Number(
+          body.interestRate
+        );
 
     // Product validations (if changing product or values that need product bounds)
-    const productId = body.productId ?? loan.productId;
+    const productId =
+      body.productId ??
+      loan.productId;
     if (productId) {
-      const p = await LoanProduct.findByPk(productId);
-      if (!p) return res.status(400).json({ error: "Invalid loan product selected" });
+      const p =
+        await LoanProduct.findByPk(
+          productId
+        );
+      if (!p)
+        return res
+          .status(400)
+          .json({
+            error:
+              "Invalid loan product selected",
+          });
 
-      const a = Number(body.amount ?? loan.amount);
-      const t = Number(body.termMonths ?? loan.termMonths);
+      const a = Number(
+        body.amount ??
+          loan.amount
+      );
+      const t = Number(
+        body.termMonths ??
+          loan.termMonths
+      );
 
-      if (p.minPrincipal && a < Number(p.minPrincipal))
-        return res.status(400).json({ error: `Amount must be at least ${p.minPrincipal}` });
-      if (p.maxPrincipal && a > Number(p.maxPrincipal))
-        return res.status(400).json({ error: `Amount must not exceed ${p.maxPrincipal}` });
-      if (p.minTermMonths && t < Number(p.minTermMonths))
-        return res.status(400).json({ error: `Term must be at least ${p.minTermMonths} months` });
-      if (p.maxTermMonths && t > Number(p.maxTermMonths))
-        return res.status(400).json({ error: `Term must not exceed ${p.maxTermMonths} months` });
+      if (
+        p.minPrincipal &&
+        a <
+          Number(
+            p.minPrincipal
+          )
+      )
+        return res
+          .status(400)
+          .json({
+            error: `Amount must be at least ${p.minPrincipal}`,
+          });
+      if (
+        p.maxPrincipal &&
+        a >
+          Number(
+            p.maxPrincipal
+          )
+      )
+        return res
+          .status(400)
+          .json({
+            error: `Amount must not exceed ${p.maxPrincipal}`,
+          });
+      if (
+        p.minTermMonths &&
+        t <
+          Number(
+            p
+              .minTermMonths
+          )
+      )
+        return res
+          .status(400)
+          .json({
+            error: `Term must be at least ${p.minTermMonths} months`,
+          });
+      if (
+        p.maxTermMonths &&
+        t >
+          Number(
+            p
+              .maxTermMonths
+          )
+      )
+        return res
+          .status(400)
+          .json({
+            error: `Term must not exceed ${p.maxTermMonths} months`,
+          });
 
-      if (body.interestMethod === undefined)
-        body.interestMethod = loan.interestMethod || p.interestMethod || "flat";
-      if (body.interestRate === undefined)
-        body.interestRate = loan.interestRate || Number(p.interestRate || 0);
+      if (
+        body.interestMethod ===
+        undefined
+      )
+        body.interestMethod =
+          loan.interestMethod ||
+          p.interestMethod ||
+          "flat";
+      if (
+        body.interestRate ===
+        undefined
+      )
+        body.interestRate =
+          loan.interestRate ||
+          Number(
+            p.interestRate ||
+              0
+          );
     }
 
     // Recompute endDate if term/start changed and endDate omitted
-    const willChangeTerm = body.termMonths != null && Number(body.termMonths) !== Number(loan.termMonths);
-    const willChangeStart = body.startDate && String(body.startDate) !== String(loan.startDate);
-    if (!body.endDate && (willChangeTerm || willChangeStart)) {
-      const nextTerm = Number(body.termMonths ?? loan.termMonths);
-      const nextStart = String(body.startDate ?? loan.startDate);
-      body.endDate = addMonthsDateOnly(nextStart, nextTerm);
+    const willChangeTerm =
+      body.termMonths !=
+        null &&
+      Number(
+        body.termMonths
+      ) !==
+        Number(
+          loan.termMonths
+        );
+    const willChangeStart =
+      body.startDate &&
+      String(
+        body.startDate
+      ) !==
+        String(
+          loan.startDate
+        );
+    if (
+      !body.endDate &&
+      (willChangeTerm ||
+        willChangeStart)
+    ) {
+      const nextTerm = Number(
+        body.termMonths ??
+          loan.termMonths
+      );
+      const nextStart =
+        String(
+          body.startDate ??
+            loan.startDate
+        );
+      body.endDate =
+        addMonthsDateOnly(
+          nextStart,
+          nextTerm
+        );
     }
 
     // Only send columns that actually exist on loans table
-    const safeAttrs = await getSafeLoanAttributeNames();        // model attr names
+    const safeAttrs =
+      await getSafeLoanAttributeNames();
     const safeBody = {};
-    for (const key of Object.keys(body)) {
-      if (safeAttrs.includes(key)) safeBody[key] = body[key];
+    for (const key of Object.keys(
+      body
+    )) {
+      if (
+        safeAttrs.includes(
+          key
+        )
+      )
+        safeBody[key] =
+          body[key];
     }
 
-    await loan.update(safeBody);
+    await loan.update(
+      safeBody
+    );
 
     writeAudit({
       entityId: loan.id,
@@ -1135,23 +2297,49 @@ const updateLoan = async (req, res) => {
       req,
     }).catch(() => {});
 
-    const reloaded = await fetchLoanByPkSafe(loan.id);
+    const reloaded =
+      await fetchLoanByPkSafe(
+        loan.id
+      );
     res.json(reloaded || loan);
   } catch (err) {
-    console.error("Update loan error:", err);
-    res.status(500).json({ error: "Error updating loan", detail: err?.parent?.message || err?.message });
+    console.error(
+      "Update loan error:",
+      err
+    );
+    res.status(500).json({
+      error:
+        "Error updating loan",
+      detail:
+        err?.parent
+          ?.message ||
+        err?.message,
+    });
   }
 };
 
 /* ===========================
    DELETE LOAN
 =========================== */
-const deleteLoan = async (req, res) => {
+const deleteLoan = async (
+  req,
+  res
+) => {
   try {
-    const loan = await fetchLoanByPkSafe(req.params.id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    const loan =
+      await fetchLoanByPkSafe(
+        req.params.id
+      );
+    if (!loan)
+      return res
+        .status(404)
+        .json({
+          error:
+            "Loan not found",
+        });
 
-    const before = loan.toJSON();
+    const before =
+      loan.toJSON();
     await loan.destroy();
 
     writeAudit({
@@ -1162,79 +2350,174 @@ const deleteLoan = async (req, res) => {
       req,
     }).catch(() => {});
 
-    res.json({ message: "Loan deleted" });
+    res.json({
+      message:
+        "Loan deleted",
+    });
   } catch (err) {
-    console.error("Delete loan error:", err);
-    res.status(500).json({ error: "Error deleting loan" });
+    console.error(
+      "Delete loan error:",
+      err
+    );
+    res.status(500).json({
+      error:
+        "Error deleting loan",
+    });
   }
 };
 
 /* ===========================
-   GENERATE SCHEDULE (Preview)
+   GET LOAN SCHEDULE
+   (prefer DB; fallback to preview)
 =========================== */
-/* ===========================
-   GET LOAN SCHEDULE (prefer DB; fallback to preview)
-=========================== */
-const getLoanSchedule = async (req, res) => {
+const getLoanSchedule = async (
+  req,
+  res
+) => {
   try {
-    const loanId = req.params.loanId || req.params.id;
-    const loan = await fetchLoanByPkSafe(loanId);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
-
-    // 1) Prefer persisted rows (so we return paid*, balance, settled, etc.)
-    let rows = [];
-    if (LoanSchedule && (await tableExists("loan_schedules"))) {
-      try {
-        const scheduleAttrs = await getSafeScheduleAttributeNames();
-        rows = await LoanSchedule.findAll({
-          where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
-          attributes: scheduleAttrs,
-          order: [["period", "ASC"]], 
+    const loanId =
+      req.params.loanId ||
+      req.params.id;
+    const loan =
+      await fetchLoanByPkSafe(
+        loanId
+      );
+    if (!loan)
+      return res
+        .status(404)
+        .json({
+          error:
+            "Loan not found",
         });
+
+    // 1) Prefer persisted rows
+    let rows = [];
+    if (
+      LoanSchedule &&
+      (await tableExists(
+        "loan_schedules"
+      ))
+    ) {
+      try {
+        const scheduleAttrs =
+          await getSafeScheduleAttributeNames();
+        rows =
+          await LoanSchedule.findAll(
+            {
+              where: {
+                [Op.and]: [
+                  scheduleLoanIdWhere(
+                    loan.id
+                  ),
+                ],
+              },
+              attributes:
+                scheduleAttrs,
+              order: [
+                [
+                  "period",
+                  "ASC",
+                ],
+              ],
+            }
+          );
       } catch (e) {
-        console.warn(`[loans] getLoanSchedule DB fetch failed: ${e.message}`);
+        console.warn(
+          `[loans] getLoanSchedule DB fetch failed: ${e.message}`
+        );
       }
     }
 
     if (rows && rows.length) {
-      return res.json(rows);
+      return res.json(
+        rows
+      );
     }
 
-    // 2) Fallback to generated preview (first-time / no table)
+    // 2) Fallback to generated preview
     const schedule =
-      loan.interestMethod === "flat"
-        ? generateFlatRateSchedule({
-            amount: Number(loan.amount || 0),
-            interestRate: Number(loan.interestRate || 0),
-            term: loan.termMonths,
-            issueDate: loan.startDate,
-          })
-        : loan.interestMethod === "reducing"
-        ? generateReducingBalanceSchedule({
-            amount: Number(loan.amount || 0),
-            interestRate: Number(loan.interestRate || 0),
-            term: loan.termMonths,
-            issueDate: loan.startDate,
-          })
+      loan.interestMethod ===
+      "flat"
+        ? generateFlatRateSchedule(
+            {
+              amount: Number(
+                loan.amount ||
+                  0
+              ),
+              interestRate:
+                Number(
+                  loan.interestRate ||
+                    0
+                ),
+              term: loan.termMonths,
+              issueDate:
+                loan.startDate,
+            }
+          )
+        : loan.interestMethod ===
+          "reducing"
+        ? generateReducingBalanceSchedule(
+            {
+              amount: Number(
+                loan.amount ||
+                  0
+              ),
+              interestRate:
+                Number(
+                  loan.interestRate ||
+                    0
+                ),
+              term: loan.termMonths,
+              issueDate:
+                loan.startDate,
+            }
+          )
         : [];
 
-    if (!schedule.length) return res.status(400).json({ error: "Invalid interest method" });
-    return res.json(schedule);
+    if (!schedule.length)
+      return res
+        .status(400)
+        .json({
+          error:
+            "Invalid interest method",
+        });
+    return res.json(
+      schedule
+    );
   } catch (err) {
-    console.error("Get schedule error:", err);
-    res.status(500).json({ error: "Failed to get schedule" });
+    console.error(
+      "Get schedule error:",
+      err
+    );
+    res.status(500).json({
+      error:
+        "Failed to get schedule",
+    });
   }
 };
-
 
 /* ===========================
    RESCHEDULE (replace or preview)
 =========================== */
-const rebuildLoanSchedule = async (req, res) => {
+const rebuildLoanSchedule = async (
+  req,
+  res
+) => {
   try {
-    const id = req.params.loanId || req.params.id;
-    const loan = await fetchLoanByPkSafe(id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    const id =
+      req.params.loanId ||
+      req.params.id;
+    const loan =
+      await fetchLoanByPkSafe(
+        id
+      );
+    if (!loan)
+      return res
+        .status(404)
+        .json({
+          error:
+            "Loan not found",
+        });
 
     const {
       mode = "preview",
@@ -1247,121 +2530,311 @@ const rebuildLoanSchedule = async (req, res) => {
     } = req.body || {};
 
     const effective = {
-      startDate: startDate || loan.startDate,
-      termMonths: Number.isFinite(Number(termMonths)) ? Number(termMonths) : loan.termMonths,
-      amount: Number.isFinite(Number(amount)) ? Number(amount) : Number(loan.amount || 0),
+      startDate:
+        startDate ||
+        loan.startDate,
+      termMonths: Number.isFinite(
+        Number(termMonths)
+      )
+        ? Number(
+            termMonths
+          )
+        : loan.termMonths,
+      amount: Number.isFinite(
+        Number(amount)
+      )
+        ? Number(
+            amount
+          )
+        : Number(
+            loan.amount ||
+              0
+          ),
       interestRate:
-        Number.isFinite(Number(interestRate)) ? Number(interestRate) : Number(loan.interestRate || 0),
-      interestMethod: interestMethod || loan.interestMethod || "flat",
+        Number.isFinite(
+          Number(
+            interestRate
+          )
+        )
+          ? Number(
+              interestRate
+            )
+          : Number(
+              loan.interestRate ||
+                0
+            ),
+      interestMethod:
+        interestMethod ||
+        loan.interestMethod ||
+        "flat",
     };
 
     // Generate schedule with proposed/updated values
     const schedule =
-      effective.interestMethod === "flat"
-        ? generateFlatRateSchedule({
-            amount: effective.amount,
-            interestRate: effective.interestRate,
-            term: effective.termMonths,
-            issueDate: effective.startDate,
-          })
-        : effective.interestMethod === "reducing"
-        ? generateReducingBalanceSchedule({
-            amount: effective.amount,
-            interestRate: effective.interestRate,
-            term: effective.termMonths,
-            issueDate: effective.startDate,
-          })
+      effective.interestMethod ===
+      "flat"
+        ? generateFlatRateSchedule(
+            {
+              amount:
+                effective.amount,
+              interestRate:
+                effective.interestRate,
+              term: effective.termMonths,
+              issueDate:
+                effective.startDate,
+            }
+          )
+        : effective.interestMethod ===
+          "reducing"
+        ? generateReducingBalanceSchedule(
+            {
+              amount:
+                effective.amount,
+              interestRate:
+                effective.interestRate,
+              term: effective.termMonths,
+              issueDate:
+                effective.startDate,
+            }
+          )
         : [];
 
     if (!schedule.length) {
-      return res.status(400).json({ error: "Invalid interest method" });
+      return res
+        .status(400)
+        .json({
+          error:
+            "Invalid interest method",
+        });
     }
 
     if (mode === "preview") {
-      return res.json({ mode, schedule });
+      return res.json({
+        mode,
+        schedule,
+      });
     }
 
-    // mode === "replace": persist by replacing existing rows
-    if (!(await tableExists("loan_schedules"))) {
-      return res.status(400).json({ error: "loan_schedules table not found" });
+    // mode === "replace": persist
+    if (
+      !(await tableExists(
+        "loan_schedules"
+      ))
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            "loan_schedules table not found",
+        });
     }
 
     // Fetch existing rows if preserving paid/settled flags
     let existing = [];
     if (preservePaid) {
-      const scheduleAttrs = await getSafeScheduleAttributeNames();
-      existing = await LoanSchedule.findAll({
-        where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
-        attributes: scheduleAttrs,
-        order: [["period", "ASC"]],
-      });
+      const scheduleAttrs =
+        await getSafeScheduleAttributeNames();
+      existing =
+        await LoanSchedule.findAll(
+          {
+            where: {
+              [Op.and]: [
+                scheduleLoanIdWhere(
+                  loan.id
+                ),
+              ],
+            },
+            attributes:
+              scheduleAttrs,
+            order: [
+              [
+                "period",
+                "ASC",
+              ],
+            ],
+          }
+        );
     }
 
-    await LoanSchedule.destroy({ where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] } });
+    await LoanSchedule.destroy({
+      where: {
+        [Op.and]: [
+          scheduleLoanIdWhere(
+            loan.id
+          ),
+        ],
+      },
+    });
 
     const rows = [];
-    for (let i = 0; i < schedule.length; i++) {
+    for (
+      let i = 0;
+      i < schedule.length;
+      i++
+    ) {
       const s = schedule[i];
       const base = {
         loanId: loan.id,
         period: i + 1,
         dueDate: s.dueDate,
-        principal: Number(s.principal || 0),
-        interest: Number(s.interest || 0),
-        fees: Number(s.fees || 0),
-        penalties: Number(s.penalties || 0),
-        total:
+        principal:
           Number(
-            s.total ??
-              Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0)
+            s.principal ||
+              0
           ),
+        interest:
+          Number(
+            s.interest ||
+              0
+          ),
+        fees: Number(
+          s.fees || 0
+        ),
+        penalties:
+          Number(
+            s.penalties ||
+              0
+          ),
+        total: Number(
+          s.total ??
+            Number(
+              s.principal ||
+                0
+            ) +
+              Number(
+                s.interest ||
+                  0
+              ) +
+              Number(
+                s.fees || 0
+              ) +
+              Number(
+                s.penalties ||
+                  0
+              )
+        ),
       };
 
       // carry over 'paid/settled' flags by index if requested and present
-      if (preservePaid && existing[i]) {
-        if ("paid" in existing[i]) base.paid = existing[i].paid;
-        if ("settled" in existing[i]) base.settled = existing[i].settled;
-        if ("balance" in existing[i] && !Number.isFinite(base.balance)) base.balance = existing[i].balance;
+      if (
+        preservePaid &&
+        existing[i]
+      ) {
+        if ("paid" in existing[i])
+          base.paid =
+            existing[i]
+              .paid;
+        if (
+          "settled" in
+          existing[i]
+        )
+          base.settled =
+            existing[i]
+              .settled;
+        if (
+          "balance" in
+            existing[i] &&
+          !Number.isFinite(
+            base.balance
+          )
+        )
+          base.balance =
+            existing[i]
+              .balance;
       }
 
-      rows.push(await shapeScheduleRowForDb(base));
+      rows.push(
+        await shapeScheduleRowForDb(
+          base
+        )
+      );
     }
 
-    await bulkCreateLoanSchedulesSafe(rows);
+    await bulkCreateLoanSchedulesSafe(
+      rows
+    );
 
     // Optionally align loan.startDate/endDate if caller changed them
     const updates = {};
-    if (startDate && (await loanColumnExists("startDate"))) updates.startDate = effective.startDate;
-    if ((termMonths || startDate) && (await loanColumnExists("endDate"))) {
-      updates.endDate = addMonthsDateOnly(effective.startDate, effective.termMonths);
+    if (
+      startDate &&
+      (await loanColumnExists(
+        "startDate"
+      ))
+    )
+      updates.startDate =
+        effective.startDate;
+    if (
+      (termMonths ||
+        startDate) &&
+      (await loanColumnExists(
+        "endDate"
+      ))
+    ) {
+      updates.endDate =
+        addMonthsDateOnly(
+          effective.startDate,
+          effective.termMonths
+        );
     }
-    if (Object.keys(updates).length) await loan.update(updates);
+    if (
+      Object.keys(updates)
+        .length
+    )
+      await loan.update(
+        updates
+      );
 
     writeAudit({
       entityId: loan.id,
-      action: "schedule:rebuild",
+      action:
+        "schedule:rebuild",
       before: null,
-      after: { startDate: loan.startDate, endDate: loan.endDate, rows: rows.length },
+      after: {
+        startDate:
+          loan.startDate,
+        endDate:
+          loan.endDate,
+        rows: rows.length,
+      },
       req,
     }).catch(() => {});
 
-    return res.json({ mode: "replace", count: rows.length });
-  } catch (err) {
-    console.error("Reschedule error:", err);
-    // expose helpful details to the client for debugging
-    return res.status(500).json({
-      error: "Failed to rebuild schedule",
-      detail: err?.parent?.message || err?.message || null,
-      code: err?.parent?.code || err?.code || null,
-      sql: err?.sql || null,
+    return res.json({
+      mode: "replace",
+      count: rows.length,
     });
+  } catch (err) {
+    console.error(
+      "Reschedule error:",
+      err
+    );
+    return res
+      .status(500)
+      .json({
+        error:
+          "Failed to rebuild schedule",
+        detail:
+          err?.parent
+            ?.message ||
+          err?.message ||
+          null,
+        code:
+          err?.parent?.code ||
+          err?.code ||
+          null,
+        sql: err?.sql || null,
+      });
   }
 };
 
 /* ===========================
-   UI alias: /loans/:id/reschedule  → rebuildLoanSchedule
+   UI alias: /loans/:id/reschedule → rebuildLoanSchedule
 =========================== */
-const rescheduleLoan = async (req, res) => {
+const rescheduleLoan = async (
+  req,
+  res
+) => {
   try {
     const {
       newTermMonths,
@@ -1376,69 +2849,167 @@ const rescheduleLoan = async (req, res) => {
       preview,
     } = req.body || {};
 
+    // Normalize body into what rebuildLoanSchedule expects
     req.body = {
-      mode: (previewOnly || preview) ? "preview" : "replace",
-      termMonths: newTermMonths ?? termMonths,
-      startDate: newStartDate || startDate,
+      mode:
+        previewOnly ||
+        preview
+          ? "preview"
+          : "replace",
+      termMonths:
+        newTermMonths ??
+        termMonths,
+      startDate:
+        newStartDate ||
+        startDate,
       amount,
       interestRate,
       interestMethod,
-      preservePaid: typeof preservePaid === "boolean" ? preservePaid : true,
+      preservePaid:
+        typeof preservePaid ===
+        "boolean"
+          ? preservePaid
+          : true,
     };
 
-    return rebuildLoanSchedule(req, res);
+    return rebuildLoanSchedule(
+      req,
+      res
+    );
   } catch (err) {
-    console.error("rescheduleLoan error:", err);
-    return res.status(500).json({ error: "Failed to reschedule loan" });
+    console.error(
+      "rescheduleLoan error:",
+      err
+    );
+    return res
+      .status(500)
+      .json({
+        error:
+          "Failed to reschedule loan",
+      });
   }
 };
 
 /* ===========================
    CSV EXPORT of schedule
 =========================== */
-const exportLoanScheduleCsv = async (req, res) => {
+const exportLoanScheduleCsv = async (
+  req,
+  res
+) => {
   try {
-    const id = req.params.loanId || req.params.id;
-    const loan = await fetchLoanByPkSafe(id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    const id =
+      req.params.loanId ||
+      req.params.id;
+    const loan =
+      await fetchLoanByPkSafe(
+        id
+      );
+    if (!loan)
+      return res
+        .status(404)
+        .json({
+          error:
+            "Loan not found",
+        });
 
     let rows = [];
-    if (LoanSchedule && (await tableExists("loan_schedules"))) {
-      const scheduleAttrs = await getSafeScheduleAttributeNames();
-      rows = await LoanSchedule.findAll({
-        where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] },
-        attributes: scheduleAttrs,
-        order: [["period", "ASC"]],
-      });
+    if (
+      LoanSchedule &&
+      (await tableExists(
+        "loan_schedules"
+      ))
+    ) {
+      const scheduleAttrs =
+        await getSafeScheduleAttributeNames();
+      rows =
+        await LoanSchedule.findAll(
+          {
+            where: {
+              [Op.and]: [
+                scheduleLoanIdWhere(
+                  loan.id
+                ),
+              ],
+            },
+            attributes:
+              scheduleAttrs,
+            order: [
+              [
+                "period",
+                "ASC",
+              ],
+            ],
+          }
+        );
     }
 
     // Fallback: generate preview rows if table empty
     if (!rows.length) {
       const input = {
-        amount: Number(loan.amount || 0),
-        interestRate: Number(loan.interestRate || 0),
+        amount: Number(
+          loan.amount || 0
+        ),
+        interestRate:
+          Number(
+            loan.interestRate ||
+              0
+          ),
         term: loan.termMonths,
-        issueDate: loan.startDate,
+        issueDate:
+          loan.startDate,
       };
       const gen =
-        loan.interestMethod === "flat"
-          ? generateFlatRateSchedule(input)
-          : loan.interestMethod === "reducing"
-          ? generateReducingBalanceSchedule(input)
+        loan.interestMethod ===
+        "flat"
+          ? generateFlatRateSchedule(
+              input
+            )
+          : loan.interestMethod ===
+            "reducing"
+          ? generateReducingBalanceSchedule(
+              input
+            )
           : [];
-      rows = gen.map((s, i) => ({
-        period: i + 1,
-        dueDate: s.dueDate,
-        principal: s.principal,
-        interest: s.interest,
-        penalties: s.penalties || 0,
-        fees: s.fees || 0,
-        total:
-          s.total ??
-          Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0),
-        balance: s.balance ?? "",
-        settled: s.settled ?? false,
-      }));
+      rows = gen.map(
+        (s, i) => ({
+          period: i + 1,
+          dueDate: s.dueDate,
+          principal:
+            s.principal,
+          interest:
+            s.interest,
+          penalties:
+            s.penalties ||
+            0,
+          fees:
+            s.fees ||
+            0,
+          total:
+            s.total ??
+            Number(
+              s.principal ||
+                0
+            ) +
+              Number(
+                s.interest ||
+                  0
+              ) +
+              Number(
+                s.fees || 0
+              ) +
+              Number(
+                s.penalties ||
+                  0
+              ),
+          balance:
+            s.balance ??
+            "",
+          settled:
+            s.settled ??
+            false,
+        })
+      );
     }
 
     const header = [
@@ -1453,20 +3024,49 @@ const exportLoanScheduleCsv = async (req, res) => {
       "Status",
     ];
 
-    const lines = [header.map(csvEscape).join(",")];
+    const lines = [
+      header
+        .map(csvEscape)
+        .join(","),
+    ];
     for (const r of rows) {
-      const settled = r.settled || r.paid ? "Settled" : "Pending";
+      const settled =
+        r.settled ||
+        r.paid
+          ? "Settled"
+          : "Pending";
       lines.push(
         [
           r.period,
           r.dueDate,
-          r.principal ?? 0,
-          r.interest ?? 0,
-          r.penalties ?? r.penalty ?? 0,
-          r.fees ?? r.fee ?? 0,
+          r.principal ??
+            0,
+          r.interest ??
+            0,
+          r.penalties ??
+            r.penalty ??
+            0,
+          r.fees ??
+            r.fee ??
+            0,
           r.total ??
-            Number(r.principal || 0) + Number(r.interest || 0) + Number(r.fees || 0) + Number(r.penalties || 0),
-          r.balance ?? "",
+            (Number(
+              r.principal ||
+                0
+            ) +
+              Number(
+                r.interest ||
+                  0
+              ) +
+              Number(
+                r.fees || 0
+              ) +
+              Number(
+                r.penalties ||
+                  0
+              )),
+          r.balance ??
+            "",
           settled,
         ]
           .map(csvEscape)
@@ -1474,177 +3074,460 @@ const exportLoanScheduleCsv = async (req, res) => {
       );
     }
 
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="loan-${loan.id}-schedule.csv"`);
-    res.status(200).send(lines.join("\n"));
+    res.setHeader(
+      "Content-Type",
+      "text/csv; charset=utf-8"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="loan-${loan.id}-schedule.csv"`
+    );
+    res
+      .status(200)
+      .send(
+        lines.join("\n")
+      );
   } catch (err) {
-    console.error("Export CSV error:", err);
-    res.status(500).json({ error: "Failed to export schedule CSV" });
+    console.error(
+      "Export CSV error:",
+      err
+    );
+    res.status(500).json({
+      error:
+        "Failed to export schedule CSV",
+    });
   }
 };
 
 /* ===========================
    STATUS UPDATE (single UPDATE)
 =========================== */
-const updateLoanStatus = async (req, res) => {
+const updateLoanStatus = async (
+  req,
+  res
+) => {
   try {
-    const next = String(req.body?.status || "").toLowerCase();
-    const override = !!req.body?.override;
+    const next = String(
+      req.body?.status ||
+        ""
+    ).toLowerCase();
+    const override = !!req.body
+      ?.override;
 
-    const loan = await fetchLoanByPkSafe(req.params.id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    const loan =
+      await fetchLoanByPkSafe(
+        req.params.id
+      );
+    if (!loan)
+      return res
+        .status(404)
+        .json({
+          error:
+            "Loan not found",
+        });
 
-    const updatedLoan = await performStatusTransition(loan, next, { override, req });
+    const updatedLoan =
+      await performStatusTransition(
+        loan,
+        next,
+        {
+          override,
+          req,
+        }
+      );
 
     writeAudit({
       entityId: loan.id,
       action: `status:${next}`,
       before: null,
-      after: updatedLoan?.toJSON?.() || null,
+      after:
+        updatedLoan?.toJSON?.() ||
+        null,
       req,
     }).catch(() => {});
 
-    res.json({ message: `Loan ${next} successfully`, loan: updatedLoan });
+    res.json({
+      message: `Loan ${next} successfully`,
+      loan: updatedLoan,
+    });
   } catch (err) {
-    const code = err.http || 500;
-    const payload = { error: err.message };
-    if (err.meta) Object.assign(payload, err.meta);
-    res.status(code).json(payload);
+    const code =
+      err.http || 500;
+    const payload = {
+      error: err.message,
+    };
+    if (err.meta)
+      Object.assign(
+        payload,
+        err.meta
+      );
+    res
+      .status(code)
+      .json(payload);
   }
 };
 
 /* ===========================
    WORKFLOW ACTION (optional)
 =========================== */
-const workflowAction = async (req, res) => {
+const workflowAction = async (
+  req,
+  res
+) => {
   try {
-    const id = req.params.id;
-    const { action, suggestedAmount } = req.body || {};
-    const loan = await fetchLoanByPkSafe(id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    const id =
+      req.params.id;
+    const {
+      action,
+      suggestedAmount,
+    } = req.body || {};
+    const loan =
+      await fetchLoanByPkSafe(
+        id
+      );
+    if (!loan)
+      return res
+        .status(404)
+        .json({
+          error:
+            "Loan not found",
+        });
 
-    // If approver provided a suggestion, update amount first (non-blocking if identical)
-    if (suggestedAmount != null && Number(suggestedAmount) > 0) {
-      await loan.update({ amount: Number(suggestedAmount) });
+    // If approver provided a suggestion, update amount first
+    if (
+      suggestedAmount !=
+        null &&
+      Number(
+        suggestedAmount
+      ) > 0
+    ) {
+      await loan.update({
+        amount: Number(
+          suggestedAmount
+        ),
+      });
     }
 
-    if (action === "bm_approve" || action === "compliance_approve") {
-      const updated = await performStatusTransition(loan, "approved", { req });
-      return res.json({ message: "Approved", loan: updated });
+    if (
+      action ===
+        "bm_approve" ||
+      action ===
+        "compliance_approve"
+    ) {
+      const updated =
+        await performStatusTransition(
+          loan,
+          "approved",
+          {
+            req,
+          }
+        );
+      return res.json({
+        message:
+          "Approved",
+        loan: updated,
+      });
     }
 
-    if (action === "reject") {
-      const updated = await performStatusTransition(loan, "rejected", { req });
-      return res.json({ message: "Rejected", loan: updated });
+    if (
+      action ===
+      "reject"
+    ) {
+      const updated =
+        await performStatusTransition(
+          loan,
+          "rejected",
+          {
+            req,
+          }
+        );
+      return res.json({
+        message:
+          "Rejected",
+        loan: updated,
+      });
     }
 
-    if (action === "resubmit") {
+    if (
+      action ===
+      "resubmit"
+    ) {
       // Allow resubmitting a rejected app back to pending
-      if (!ALLOWED[loan.status]?.includes("pending")) {
-        return res.status(400).json({ error: `Cannot change ${loan.status} → pending` });
+      if (
+        !ALLOWED[
+          loan.status
+        ]?.includes(
+          "pending"
+        )
+      ) {
+        return res
+          .status(400)
+          .json({
+            error: `Cannot change ${loan.status} → pending`,
+          });
       }
-      const updated = await performStatusTransition(loan, "pending", { req });
-      return res.json({ message: "Resubmitted", loan: updated });
+      const updated =
+        await performStatusTransition(
+          loan,
+          "pending",
+          {
+            req,
+          }
+        );
+      return res.json({
+        message:
+          "Resubmitted",
+        loan: updated,
+      });
     }
 
-    if (action === "request_changes") {
-      // No status change here; comments endpoint handles the note.
-      return res.json({ message: "Change request recorded" });
+    if (
+      action ===
+      "request_changes"
+    ) {
+      // No status change; comments endpoint handles the note
+      return res.json({
+        message:
+          "Change request recorded",
+      });
     }
 
-    return res.status(400).json({ error: "Unknown workflow action" });
+    return res
+      .status(400)
+      .json({
+        error:
+          "Unknown workflow action",
+      });
   } catch (err) {
-    console.error("Workflow action error:", err);
-    res.status(500).json({ error: "Failed to apply workflow action" });
+    console.error(
+      "Workflow action error:",
+      err
+    );
+    res.status(500).json({
+      error:
+        "Failed to apply workflow action",
+    });
   }
 };
 
 /* ===========================
    RE-ISSUE DISBURSEMENT (optional)
 =========================== */
-const reissueLoan = async (req, res) => {
+const reissueLoan = async (
+  req,
+  res
+) => {
   try {
-    const id = req.params.id;
-    const loan = await fetchLoanByPkSafe(id);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    const id =
+      req.params.id;
+    const loan =
+      await fetchLoanByPkSafe(
+        id
+      );
+    if (!loan)
+      return res
+        .status(404)
+        .json({
+          error:
+            "Loan not found",
+        });
 
-    if (await hasAnyRepayments(loan.id)) {
-      return res.status(400).json({ error: "Cannot re-issue: repayments already recorded" });
+    if (
+      await hasAnyRepayments(
+        loan.id
+      )
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            "Cannot re-issue: repayments already recorded",
+        });
     }
 
     const {
       disbursementDate = new Date().toISOString(),
-      startDate = disbursementDate.slice(0, 10),
+      startDate = disbursementDate.slice(
+        0,
+        10
+      ),
       regenerateSchedule = true,
     } = req.body || {};
 
     // Update date fields if present in DB
     const updates = {};
-    if (await loanColumnExists("disbursementDate")) updates.disbursementDate = disbursementDate;
-    if (await loanColumnExists("startDate")) updates.startDate = startDate;
-    if (await loanColumnExists("endDate")) {
-      updates.endDate = addMonthsDateOnly(startDate, loan.termMonths);
+    if (
+      await loanColumnExists(
+        "disbursementDate"
+      )
+    )
+      updates.disbursementDate =
+        disbursementDate;
+    if (
+      await loanColumnExists(
+        "startDate"
+      )
+    )
+      updates.startDate =
+        startDate;
+    if (
+      await loanColumnExists(
+        "endDate"
+      )
+    ) {
+      updates.endDate =
+        addMonthsDateOnly(
+          startDate,
+          loan.termMonths
+        );
     }
 
     // Keep status as 'disbursed' (or transition from approved → disbursed if needed)
     if (loan.status === "approved") {
-      await performStatusTransition(loan, "disbursed", { req });
+      await performStatusTransition(
+        loan,
+        "disbursed",
+        { req }
+      );
     }
 
-    await loan.update(updates);
+    await loan.update(
+      updates
+    );
 
     // Regenerate schedule from new dates
-    if (regenerateSchedule && (await tableExists("loan_schedules"))) {
-      await LoanSchedule.destroy({ where: { [Op.and]: [scheduleLoanIdWhere(loan.id)] } });
+    if (
+      regenerateSchedule &&
+      (await tableExists(
+        "loan_schedules"
+      ))
+    ) {
+      await LoanSchedule.destroy({
+        where: {
+          [Op.and]: [
+            scheduleLoanIdWhere(
+              loan.id
+            ),
+          ],
+        },
+      });
 
       const input = {
-        amount: Number(loan.amount || 0),
-        interestRate: Number(loan.interestRate || 0),
+        amount: Number(
+          loan.amount || 0
+        ),
+        interestRate:
+          Number(
+            loan.interestRate ||
+              0
+          ),
         term: loan.termMonths,
-        issueDate: startDate,
+        issueDate:
+          startDate,
       };
       const gen =
-        loan.interestMethod === "flat"
-          ? generateFlatRateSchedule(input)
-          : loan.interestMethod === "reducing"
-          ? generateReducingBalanceSchedule(input)
+        loan.interestMethod ===
+        "flat"
+          ? generateFlatRateSchedule(
+              input
+            )
+          : loan.interestMethod ===
+            "reducing"
+          ? generateReducingBalanceSchedule(
+              input
+            )
           : [];
 
       const rows = [];
-      for (let i = 0; i < gen.length; i++) {
+      for (
+        let i = 0;
+        i < gen.length;
+        i++
+      ) {
         const s = gen[i];
         const base = {
           loanId: loan.id,
           period: i + 1,
           dueDate: s.dueDate,
-          principal: Number(s.principal || 0),
-          interest: Number(s.interest || 0),
-          fees: Number(s.fees || 0),
-          penalties: Number(s.penalties || 0),
-          total:
+          principal:
             Number(
-              s.total ??
-                Number(s.principal || 0) + Number(s.interest || 0) + Number(s.fees || 0) + Number(s.penalties || 0)
+              s.principal ||
+                0
             ),
+          interest:
+            Number(
+              s.interest ||
+                0
+            ),
+          fees: Number(
+            s.fees || 0
+          ),
+          penalties:
+            Number(
+              s.penalties ||
+                0
+            ),
+          total: Number(
+            s.total ??
+              Number(
+                s.principal ||
+                  0
+              ) +
+                Number(
+                  s.interest ||
+                    0
+                ) +
+                Number(
+                  s.fees || 0
+                ) +
+                Number(
+                  s.penalties ||
+                    0
+                )
+          ),
         };
-        rows.push(await shapeScheduleRowForDb(base));
+        rows.push(
+          await shapeScheduleRowForDb(
+            base
+          )
+        );
       }
-      if (rows.length) await bulkCreateLoanSchedulesSafe(rows);
+      if (rows.length)
+        await bulkCreateLoanSchedulesSafe(
+          rows
+        );
     }
 
     writeAudit({
       entityId: loan.id,
       action: "reissue",
       before: null,
-      after: { ...updates },
+      after: {
+        ...updates,
+      },
       req,
     }).catch(() => {});
 
-    const reloaded = await fetchLoanByPkSafe(loan.id);
-    res.json({ message: "Loan re-issued", loan: reloaded || loan });
+    const reloaded =
+      await fetchLoanByPkSafe(
+        loan.id
+      );
+    res.json({
+      message:
+        "Loan re-issued",
+      loan:
+        reloaded ||
+        loan,
+    });
   } catch (err) {
-    console.error("Re-issue error:", err);
-    res.status(500).json({ error: "Failed to re-issue loan" });
+    console.error(
+      "Re-issue error:",
+      err
+    );
+    res.status(500).json({
+      error:
+        "Failed to re-issue loan",
+    });
   }
 };
 
@@ -1657,7 +3540,7 @@ module.exports = {
   updateLoanStatus,
   getLoanSchedule,
 
-  // NEW/optional, wire routes if you want these features:
+  // optional extra routes:
   workflowAction,          // POST /loans/:id/workflow
   rebuildLoanSchedule,     // POST /loans/:id/schedule
   exportLoanScheduleCsv,   // GET  /loans/:id/schedule/export.csv
